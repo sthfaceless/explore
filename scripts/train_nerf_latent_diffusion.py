@@ -2,19 +2,22 @@ from argparse import ArgumentParser
 
 import clearml
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning import Trainer
 
 from modules.nerf.dataset import NerfLatents
-from modules.nerf.trainer import LatentDiffusion
+from modules.nerf.trainer import LatentDiffusion, NerfClassTrainer, SimpleLogger
+from modules.nerf.util import render_latent_nerf
 
 
 def get_parser():
     parser = ArgumentParser(description="Training NeRF latent sampler")
     # Input data settings
     parser.add_argument("--latent_path", default="", help="Path to latents checkpoint")
+    parser.add_argument("--sampler", default="", help="Path to latent sampler")
 
     # Training settings
-    parser.add_argument("--learning_rate", default=5*1e-5, type=float, help="Learning rate for decoder and nerf")
+    parser.add_argument("--learning_rate", default=5 * 1e-5, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--min_lr_rate", default=0.1, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--max_beta", default=0.0195, type=float, help="Max noise schedule")
     parser.add_argument("--min_beta", default=0.0015, type=float, help="Min noise schedule")
@@ -54,17 +57,29 @@ if __name__ == "__main__":
     else:
         logger = None
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=args.out_model_name,
-                                                       filename='best', save_on_train_epoch_end=True)
-    dataset = NerfLatents(latents_checkpoint=args.latent_path, latent_shape=args.latent_shape)
-    model = LatentDiffusion(shape=args.latent_shape, unet_hiddens=args.hidden_dims, dataset=dataset,
-                            decoder_path=args.latent_path, img_size=args.img_size, focal=args.focal,
-                            attention_dim=args.attention_dim, min_lr_rate=args.min_lr_rate, min_beta=args.min_beta,
-                            max_beta=args.max_beta, epochs=args.epochs, steps=args.steps,
-                            diffusion_steps=args.diffusion_steps, learning_rate=args.learning_rate,
-                            log_samples=args.samples_epoch, clearml=logger, batch_size=args.batch_size)
-    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps//10,
-                      reload_dataloaders_every_n_epochs=1, enable_model_summary=True,
-                      enable_progress_bar=True, enable_checkpointing=True,
-                      accelerator='gpu', gpus=[0], callbacks=[checkpoint_callback], check_val_every_n_epoch=5)
-    trainer.fit(model)
+    if args.sampler:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        renderer = NerfClassTrainer.load_from_checkpoint(args.decoder_path, map_location=device, dataset=None) \
+            .to(device)
+        sampler = LatentDiffusion.load_from_checkpoint(args.sampler, map_location=device, dataset=None)
+        galleries = []
+        for batch_idx in range(args.samples_epoch // args.batch_size + min(1, args.samples_epoch % args.batch_size)):
+            size = min(args.batch_size, args.samples_epoch - batch_idx * args.batch_size)
+            h = sampler.sample(size)
+            galleries.extend(render_latent_nerf(h, renderer, w=args.img_size, h=args.img_size, focal=args.focal))
+        SimpleLogger(logger).log_images(galleries, 'samples', epoch=0)
+    else:
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=args.out_model_name,
+                                                           filename='best', save_on_train_epoch_end=True)
+        dataset = NerfLatents(latents_checkpoint=args.latent_path, latent_shape=args.latent_shape)
+        model = LatentDiffusion(shape=args.latent_shape, unet_hiddens=args.hidden_dims, dataset=dataset,
+                                decoder_path=args.latent_path, img_size=args.img_size, focal=args.focal,
+                                attention_dim=args.attention_dim, min_lr_rate=args.min_lr_rate, min_beta=args.min_beta,
+                                max_beta=args.max_beta, epochs=args.epochs, steps=args.steps,
+                                diffusion_steps=args.diffusion_steps, learning_rate=args.learning_rate,
+                                log_samples=args.samples_epoch, clearml=logger, batch_size=args.batch_size)
+        trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 10,
+                          reload_dataloaders_every_n_epochs=1, enable_model_summary=True,
+                          enable_progress_bar=True, enable_checkpointing=True,
+                          accelerator='gpu', gpus=[0], callbacks=[checkpoint_callback], check_val_every_n_epoch=5)
+        trainer.fit(model)
