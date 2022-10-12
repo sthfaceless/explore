@@ -60,7 +60,7 @@ if __name__ == "__main__":
 
     if args.sampler:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        renderer = NerfClassTrainer.load_from_checkpoint(args.decoder_path, map_location=device, dataset=None) \
+        renderer = NerfClassTrainer.load_from_checkpoint(args.latent_path, map_location=device, dataset=None) \
             .to(device)
         sampler = LatentDiffusion.load_from_checkpoint(args.sampler, map_location=device, dataset=None)
         galleries = []
