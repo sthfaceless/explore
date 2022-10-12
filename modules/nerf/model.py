@@ -2,7 +2,7 @@ import math
 
 from modules.common.model import *
 from modules.gen.model import *
-from util import render_gallery, positional_points_encoding
+from modules.nerf.util import render_gallery, positional_points_encoding
 
 
 class DensityGrid:

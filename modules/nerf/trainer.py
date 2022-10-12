@@ -7,9 +7,9 @@ import pytorch_lightning as pl
 from PIL import Image
 from tqdm import tqdm
 
-from dataset import *
-from model import *
-from util import *
+from modules.nerf.dataset import *
+from modules.nerf.model import *
+from modules.nerf.util import *
 
 from modules.dd.model import *
 

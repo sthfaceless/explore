@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from instant_utils import TestbedSnapshot
+from modules.nerf.instant_ngp.instant_utils import TestbedSnapshot
 
 
 class ReshapeLayer(torch.nn.Module):

@@ -6,6 +6,7 @@
 
 `pip install -r requirements.txt`
 
+`export PYTHONPATH=./ python scripts/*.py`
 ## Contains
 
 - Common ML modules
