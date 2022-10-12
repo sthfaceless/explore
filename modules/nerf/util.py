@@ -207,8 +207,8 @@ def latent_encoding(points, encodings, nums, cube_clip=1.0):
         # x1, x2 = x1.squeeze(1), x2.squeeze(1)
         # we map all points inside cube into [0; dim-2]
         # then add 1 before for values lower -cube_clip and 1 after for values greater cube_clip
-        x1 = torch.clip((x1 / cube_clip + 1) / 2 * (dim - 2) + 1, min=0, max=dim - 1).view(n)
-        x2 = torch.clip((x2 / cube_clip + 1) / 2 * (dim - 2) + 1, min=0, max=dim - 1).view(n)
+        x1 = torch.clip((x1 / cube_clip + cube_clip) / 2 * (dim - 2) + 1, min=0, max=dim - 1).view(n)
+        x2 = torch.clip((x2 / cube_clip + cube_clip) / 2 * (dim - 2) + 1, min=0, max=dim - 1).view(n)
         x1_low, x1_high = torch.floor(x1), torch.ceil(x1)
         x2_low, x2_high = torch.floor(x2), torch.ceil(x2)
 
