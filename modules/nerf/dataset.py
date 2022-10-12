@@ -34,7 +34,7 @@ class NerfScene(torch.utils.data.IterableDataset):
             frames = sample(meta['frames'], k=n_images)
         for image_id, frame in enumerate(frames):
             # read image and resize to desired resolution
-            img = cv2.imread(os.path.join(self.scene_root, images_dir, os.path.basename(frame['file_path'])) + '.png')
+            img = cv2.imread(os.path.join(self.scene_root, images_dir, os.path.basename(frame['file_path'])))
             img = cv2.resize(img, (h, w))
             # find black pixels at the image to ignore them in sampling
             self.non_black_pixels.append(np.transpose((img.min(axis=-1) > 0).nonzero()))
