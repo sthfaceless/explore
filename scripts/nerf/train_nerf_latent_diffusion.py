@@ -4,6 +4,7 @@ import clearml
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning import Trainer
+from tqdm import tqdm
 
 from modules.nerf.dataset import NerfLatents
 from modules.nerf.trainer import LatentDiffusion, NerfClassTrainer, SimpleLogger
@@ -63,7 +64,8 @@ if __name__ == "__main__":
             .to(device)
         sampler = LatentDiffusion.load_from_checkpoint(args.sampler, map_location=device, dataset=None)
         galleries = []
-        for batch_idx in range(args.samples_epoch // args.batch_size + min(1, args.samples_epoch % args.batch_size)):
+        for batch_idx in tqdm(
+                range(args.samples_epoch // args.batch_size + min(1, args.samples_epoch % args.batch_size))):
             size = min(args.batch_size, args.samples_epoch - batch_idx * args.batch_size)
             h = sampler.sample(size)
             galleries.extend(render_latent_nerf(h, renderer, w=args.img_size, h=args.img_size, focal=args.focal))

@@ -24,3 +24,4 @@
     - Transformer
 - Explore notebooks in various domains
     - Avito ads effectiveness
+    - License Plates recognition
