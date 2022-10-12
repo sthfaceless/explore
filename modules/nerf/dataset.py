@@ -151,8 +151,8 @@ class NerfClass(torch.utils.data.IterableDataset):
 
     def __next__(self):
         cache_index = randint(a=0, b=self.cache_size - 1)
-        scene = next(self.cache[cache_index])
         id = self.cache_keys[cache_index]
+        scene = next(self.cache[id])
         scene['id'] = torch.LongTensor([id])
         return scene
 

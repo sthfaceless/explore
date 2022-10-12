@@ -464,11 +464,11 @@ class NerfClassTrainer(pl.LightningModule):
     def train_dataloader(self):
         self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False, num_workers=2,
-                                           pin_memory=True, drop_last=False, prefetch_factor=2)
+                                           pin_memory=False, drop_last=False, prefetch_factor=2)
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False, num_workers=2,
-                                           pin_memory=True, drop_last=False, prefetch_factor=2)
+                                           pin_memory=False, drop_last=False, prefetch_factor=2)
 
 
 class LatentDiffusion(pl.LightningModule):
