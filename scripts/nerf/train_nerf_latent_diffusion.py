@@ -67,8 +67,9 @@ if __name__ == "__main__":
         for batch_idx in tqdm(
                 range(args.samples_epoch // args.batch_size + min(1, args.samples_epoch % args.batch_size))):
             size = min(args.batch_size, args.samples_epoch - batch_idx * args.batch_size)
-            h = sampler.sample(size)
-            galleries.extend(render_latent_nerf(h, renderer, w=args.img_size, h=args.img_size, focal=args.focal))
+            with torch.no_grad():
+                h = sampler.sample(size)
+                galleries.extend(render_latent_nerf(h, renderer, w=args.img_size, h=args.img_size, focal=args.focal))
         SimpleLogger(logger).log_images(galleries, 'samples', epoch=0)
     else:
         checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=args.out_model_name,
