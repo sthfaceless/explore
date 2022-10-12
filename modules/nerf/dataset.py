@@ -18,8 +18,8 @@ class NerfScene(torch.utils.data.IterableDataset):
         self.color_sample = int(self.batch_rays * color_ratio)
         self.all_sample = self.batch_rays - self.color_sample
 
-        images_dir = 'train'
-        transforms = 'transforms_train.json'
+        # images_dir = 'train'
+        # transforms = 'transforms_train.json'
 
         with open(os.path.join(self.scene_root, transforms), 'r') as f:
             meta = json.load(f)

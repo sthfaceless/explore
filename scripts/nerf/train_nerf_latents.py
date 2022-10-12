@@ -70,7 +70,7 @@ if __name__ == "__main__":
 
     checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(dirpath=args.out_model_name)
 
-    dataset = NerfClass(class_path=args.path, batch_rays=args.nerf_batch, batch_objects=args.batch_objects,
+    dataset = NerfClass(class_path=args.dataset, batch_rays=args.nerf_batch, batch_objects=args.batch_objects,
                         images_per_scene=args.images_batch, w=args.img_size, h=args.img_size,
                         cache_size=args.cache_size)
     model = NerfClassTrainer(clearml=logger, dataset=dataset, n_objects=len(dataset.get_items()),
