@@ -21,10 +21,10 @@ def get_parser():
     parser.add_argument("--min_lr_ratio", default=0.1, type=float, help="Minimal learning rate ratio")
     parser.add_argument("--train_rate", default=0.8, type=float, help="Train data rate")
     parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
-    parser.add_argument("--steps", default=2000, type=int, help="Epochs in training")
-    parser.add_argument("--acc_grads", default=1, type=int,
+    parser.add_argument("--steps", default=10000, type=int, help="Epochs in training")
+    parser.add_argument("--acc_grads", default=4, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
-    parser.add_argument("--batch_objects", default=3, type=int, help="NeRF objects in one batch")
+    parser.add_argument("--batch_objects", default=2, type=int, help="NeRF objects in one batch")
     parser.add_argument("--images_batch", default=64, type=int, help="NeRF images in one batch")
     parser.add_argument("--cache_size", default=-1, type=int, help="NeRF scenes loaded in memory for epoch")
     parser.add_argument("--samples_epoch", default=10, type=int, help="Samples of generator in one epoch")
@@ -35,7 +35,7 @@ def get_parser():
     parser.add_argument("--hidden_dims", default=[32, 32, 64, 64, 128, 128, 128, 128, 256, 256], nargs='+', type=int,
                         help="Hidden dims for decoder")
     parser.add_argument("--latent", default=[32, 16, 16], type=int, help="Latent dim shape")
-    parser.add_argument("--feature_dim", default=64, type=int, help="Positional feature dim")
+    parser.add_argument("--feature_dim", default=32, type=int, help="Positional feature dim")
     parser.add_argument("--attention_dim", default=8, type=int, help="Width till the one attention would be done")
     parser.add_argument("--embed_noise", default=0.1, type=float, help="Noise added to embedding")
 
@@ -43,8 +43,8 @@ def get_parser():
     parser.add_argument("--nerf_hidden", default=128, type=int, help="Hidden dim shape")
     parser.add_argument("--nerf_blocks", default=4, type=int, help="NeRF residual blocks")
     parser.add_argument("--nerf_pe", default=12, type=int, help="L for positional encoding")
-    parser.add_argument("--nerf_spp", default=64, type=int, help="Samples per pixel in nerf")
-    parser.add_argument("--nerf_batch", default=1024, type=int, help="Rays in one batch for NeRF")
+    parser.add_argument("--nerf_spp", default=128, type=int, help="Samples per pixel in nerf")
+    parser.add_argument("--nerf_batch", default=2048, type=int, help="Rays in one batch for NeRF")
 
     # Meta settings
     parser.add_argument("--out_model_name", default="nerf_gen", help="Name of output model path")
