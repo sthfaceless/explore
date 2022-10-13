@@ -1,3 +1,4 @@
+import os
 from argparse import ArgumentParser
 
 import clearml
@@ -16,7 +17,6 @@ def get_parser():
     # Input data settings
     parser.add_argument("--latent_path", default="", help="Path to latents checkpoint")
     parser.add_argument("--sampler", default="", help="Path to latent sampler")
-    parser.add_argument("--model", default="", help="Model checkpoint name")
 
     # Training settings
     parser.add_argument("--learning_rate", default=5 * 1e-5, type=float, help="Learning rate for decoder and nerf")
@@ -73,8 +73,9 @@ if __name__ == "__main__":
                 galleries.extend(render_latent_nerf(h, renderer, w=args.img_size, h=args.img_size, focal=args.focal))
         SimpleLogger(logger).log_images(galleries, 'samples', epoch=0)
     else:
-        checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=args.out_model_name,
-                                                           filename=args.model, save_on_train_epoch_end=True)
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
+                                                           filename=os.path.basename(args.out_model_name),
+                                                           save_on_train_epoch_end=True)
         dataset = NerfLatents(latents_checkpoint=args.latent_path, latent_shape=args.latent_shape)
         model = LatentDiffusion(shape=args.latent_shape, unet_hiddens=args.hidden_dims, dataset=dataset,
                                 decoder_path=args.latent_path, img_size=args.img_size, focal=args.focal,

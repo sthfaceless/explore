@@ -1,3 +1,4 @@
+import os
 from argparse import ArgumentParser
 
 import clearml
@@ -13,8 +14,6 @@ def get_parser():
     parser = ArgumentParser(description="Training NeRF latents")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to shapenet class")
-    parser.add_argument("--latents_out", default="latents.ckpt", help="Default path to save latents")
-    parser.add_argument("--model", default="", help="Name of output model checkpoint")
 
     # Training settings
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for decoder and nerf")
@@ -70,7 +69,8 @@ if __name__ == "__main__":
     else:
         logger = None
 
-    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(dirpath=args.out_model_name, filename=args.model)
+    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
+                                                                      filename=os.path.basename(args.out_model_name))
 
     dataset = NerfClass(class_path=args.dataset, batch_rays=args.nerf_batch, batch_objects=args.batch_objects,
                         images_per_scene=args.images_batch, w=args.img_size, h=args.img_size,
@@ -82,7 +82,9 @@ if __name__ == "__main__":
                              nerf_blocks=args.nerf_blocks, nerf_spp=args.nerf_spp, nerf_pe=args.nerf_pe,
                              batch_rays=args.nerf_batch, batch_objects=args.batch_objects,
                              learning_rate=args.learning_rate, decoder_hiddens=args.hidden_dims,
-                             positional_dim=args.feature_dim, model_out=args.latents_out,
+                             positional_dim=args.feature_dim,
+                             model_out=os.path.join(os.path.dirname(args.out_model_name),
+                                                    os.path.basename(args.out_model_name) + '.parts'),
                              min_lr_ratio=args.min_lr_ratio, initial_lr_ratio=args.initial_lr_ratio,
                              val_samples=args.samples_epoch, image_size=args.img_size,
                              accumulate_gradients=args.acc_grads)
