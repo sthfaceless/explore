@@ -3,6 +3,7 @@ from argparse import ArgumentParser
 import clearml
 import pytorch_lightning
 from pytorch_lightning import Trainer
+from pytorch_lightning.strategies import DDPStrategy
 
 from modules.nerf.dataset import NerfClass
 from modules.nerf.trainer import NerfClassTrainer
@@ -86,6 +87,7 @@ if __name__ == "__main__":
                              accumulate_gradients=args.acc_grads)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
+                      strategy=DDPStrategy(find_unused_parameters=False),
                       accelerator='gpu', devices=1, callbacks=[checkpoint_callback],
                       reload_dataloaders_every_n_epochs=1)
     trainer.fit(model)
