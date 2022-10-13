@@ -69,7 +69,7 @@ def generate_images(n_views, shapenet_root, obj_class, obj_id, out_path, batch_s
     )
 
     # create renderer
-    R, T = look_at_view_transform(dist=1.0, elev=0, azim=0)
+    R, T = look_at_view_transform(dist=2.0 * aabb, elev=0, azim=0)
     cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=focal, principal_point=((0.0, 0.0),))
     lights = AmbientLights(device=device, ambient_color=(1.0, 1.0, 1.0))
     renderer = MeshRenderer(
@@ -112,7 +112,7 @@ def generate_images(n_views, shapenet_root, obj_class, obj_id, out_path, batch_s
 
     for batch_id in range(len(grid[0]) // batch_size + min(1, len(grid[0]) % batch_size)):
 
-        R, T = look_at_view_transform(dist=1.0, elev=grid[0][batch_id * batch_size: (batch_id + 1) * batch_size],
+        R, T = look_at_view_transform(dist=2.0 * aabb, elev=grid[0][batch_id * batch_size: (batch_id + 1) * batch_size],
                                       azim=grid[1][batch_id * batch_size: (batch_id + 1) * batch_size])
         cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=focal, principal_point=((0.0, 0.0),))
 

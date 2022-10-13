@@ -7,11 +7,10 @@ import pytorch_lightning as pl
 from PIL import Image
 from tqdm import tqdm
 
+from modules.dd.model import *
 from modules.nerf.dataset import *
 from modules.nerf.model import *
 from modules.nerf.util import *
-
-from modules.dd.model import *
 
 
 class SimpleLogger:
@@ -40,7 +39,7 @@ class NerfTrainer:
 
     def render_views(self, scene):
         images = scene.imgs[np.random.randint(low=0, high=len(scene.imgs), size=8)]
-        images = ((images + 1.0) * 255.0 / 2).astype(np.uint8)
+        images = (images * 255.0).astype(np.uint8)
         h, w, _ = scene.imgs[0].shape
         gallery = np.array(images).reshape((2, 4, h, w, 3)).transpose(0, 2, 1, 3, 4).reshape((2 * h, 4 * w, 3))
         return gallery
@@ -476,7 +475,7 @@ class LatentDiffusion(pl.LightningModule):
     def __init__(self, shape, unet_hiddens, dataset, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=False,
-                 min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.0):
+                 min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         super(LatentDiffusion, self).__init__()
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
 

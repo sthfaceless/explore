@@ -156,7 +156,7 @@ def adaptive_sample_dists(near, far, spp, coarse_dists, weights, weight_noise=0.
     return dists
 
 
-def render_rays(model, ray_o, ray_d, near, far, base_radius, spp, pe_powers, scene_scale=2.0, dens_threshold=1e-2,
+def render_rays(model, ray_o, ray_d, near, far, base_radius, spp, pe_powers, scene_scale=1.0, dens_threshold=1e-2,
                 dgrid_res=64, dgrid=None, coarse_dists=None, ray_weights=None):
     # dists (b, spp+1)
     if ray_weights is not None:
@@ -250,7 +250,7 @@ def render_latent_nerf(latents, model, w=128, h=128, focal=1.5, camera_distance=
                 with torch.no_grad():
                     out = model(latents=latents[gallery_id].unsqueeze(0), near=near, far=far, base_radius=base_radius,
                                 poses=poses, pixel_coords=pixel_coords)
-                rendered_pixels = (out['fine_pixels'] + 1) * 255 / 2
+                rendered_pixels = out['fine_pixels']* 255
                 pixels.append(rendered_pixels.cpu().detach().numpy().astype(np.uint8))
             images.append(np.concatenate(pixels, axis=0).reshape((h, w, 3)))
         gallery = np.array(images).reshape((2, 4, h, w, 3)).transpose(0, 2, 1, 3, 4).reshape((2 * h, 4 * w, 3))
@@ -273,7 +273,7 @@ def render_batch(batch, model, pe_powers, spp):
     return coarse_pixels, fine_pixels, torch.cat([coarse_trans, fine_trans], dim=1)
 
 
-def render_gallery(model, batch_size, spp, pe_powers, w=128, h=128, focal=64.0, camera_distance=4.0,
+def render_gallery(model, batch_size, spp, pe_powers, w=128, h=128, focal=1.5, camera_distance=4.0,
                    dgrid=None, device=torch.device('cpu')):
     default_cams = get_default_cams()
     n_pixels = h * w
@@ -289,13 +289,13 @@ def render_gallery(model, batch_size, spp, pe_powers, w=128, h=128, focal=64.0, 
             batch = {
                 'poses': cam.view(1, 3, 4).repeat(size, 1, 1),
                 'pixel_coords': dirs[l:r],
-                'near': torch.ones(size, device=device, dtype=torch.float32) * 2.0,
-                'far': torch.ones(size, device=device, dtype=torch.float32) * 6.0,
+                'near': torch.ones(size, device=device, dtype=torch.float32) * (4.0 - 3 ** (1 / 2)),
+                'far': torch.ones(size, device=device, dtype=torch.float32) * (4.0 + 3 ** (1 / 2)),
                 'base_radius': torch.ones(size, device=device, dtype=torch.float32) / (3 ** (1 / 2) * focal * w)
             }
             with torch.no_grad():
                 _, fine_pixels, _ = render_batch(batch, model, pe_powers, spp)
-                fine_pixels = (fine_pixels + 1) * 255 / 2
+                fine_pixels = fine_pixels * 255
             pixels.append(fine_pixels.cpu().detach().numpy().astype(np.uint8))
 
         images.append(np.concatenate(pixels, axis=0).reshape((h, w, 3)))

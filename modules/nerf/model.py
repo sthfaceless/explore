@@ -7,7 +7,7 @@ from modules.nerf.util import render_gallery, positional_points_encoding
 
 class DensityGrid:
 
-    def __init__(self, res, decay_rate, dens_threshold, spp, frac=1.0, scene_scale=2.0, device=torch.device('cpu')):
+    def __init__(self, res, decay_rate, dens_threshold, spp, frac=1.0, scene_scale=1.0, device=torch.device('cpu')):
         self.res = res
         self.dens_threshold = dens_threshold * spp
         self.decay_rate = decay_rate
@@ -52,18 +52,17 @@ class DensityGrid:
 
 class Nerf(torch.nn.Module):
 
-    def __init__(self, hidden_dim=128, num_blocks=3, pe_powers=16, density_noise=0.0,
+    def __init__(self, hidden_dim=128, num_blocks=3, pe_powers=16,
                  transmittance_weight=0.1, transmittance_threshold=0.88):
         super(Nerf, self).__init__()
         self.pe_powers = pe_powers
-        self.density_noise = density_noise
         self.transmittance_weight = transmittance_weight
         self.transmittance_threshold = transmittance_threshold
         input_dim = pe_powers * 3
 
         self.input_layer = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
-            torch.nn.ReLU()
+            torch.nn.LeakyReLU()
         )
 
         self.blocks = torch.nn.ModuleList([])
@@ -71,7 +70,7 @@ class Nerf(torch.nn.Module):
             self.blocks.append(torch.nn.ModuleList([
                 torch.nn.Sequential(
                     torch.nn.Linear(hidden_dim, hidden_dim),
-                    torch.nn.ReLU()
+                    torch.nn.LeakyReLU()
                 ),
                 torch.nn.Sequential(
                     torch.nn.Linear(hidden_dim, hidden_dim)
@@ -80,7 +79,7 @@ class Nerf(torch.nn.Module):
 
         self.rgb_layer = torch.nn.Sequential(
             torch.nn.Linear(hidden_dim, 3),
-            torch.nn.Tanh()
+            torch.nn.Sigmoid()
         )
         self.density_layer = torch.nn.Sequential(
             torch.nn.Linear(hidden_dim, 1)
@@ -92,9 +91,9 @@ class Nerf(torch.nn.Module):
         for first_block, second_block in self.blocks:
             out = first_block(x)
             out = second_block(out)
-            x = torch.nn.functional.relu(out + x)
+            x = torch.nn.functional.leaky_relu(out + x)
         rgb = self.rgb_layer(x)
-        raw_dens = self.density_layer(x) + self.density_noise * torch.randn(n_points, 1, device=points.device)
+        raw_dens = self.density_layer(x)
         density = torch.nn.functional.softplus(raw_dens - 1)  # shifted softplus
         return rgb, density
 
@@ -109,7 +108,7 @@ class Nerf(torch.nn.Module):
                       out['trans_loss'] * self.transmittance_weight
         return out
 
-    def render_views(self, spp, batch_size, w=128, h=128, focal=64.0, camera_distance=4.0, dgrid=None,
+    def render_views(self, spp, batch_size, w=128, h=128, focal=1.5, camera_distance=4.0, dgrid=None,
                      device=torch.device('cpu')):
         return render_gallery(model=self, spp=spp, pe_powers=self.pe_powers,
                               batch_size=batch_size, w=w, h=h, focal=focal, camera_distance=camera_distance,
@@ -143,7 +142,7 @@ class ConditionalNeRF(torch.nn.Module):
             h = torch.sin(h)
             h = block_2(h)
             x = h + mapper(x) * self.residual_scale
-        rgb = torch.tanh(self.rgb_layer(x))
+        rgb = torch.sigmoid(self.rgb_layer(x))
         density = torch.nn.functional.softplus(self.density_layer(x) - 1)
         return rgb, density
 
@@ -173,7 +172,7 @@ class HiddenConditionalNeRF(torch.nn.Module):
             h = torch.sin(h)
             h = block_2(h)
             x = h + x * self.residual_scale
-        rgb = torch.tanh(self.rgb_layer(x))
+        rgb = torch.sigmoid(self.rgb_layer(x))
         density = torch.nn.functional.softplus(self.density_layer(x) - 1)
         return rgb, density
 

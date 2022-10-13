@@ -40,7 +40,7 @@ class NerfScene(torch.utils.data.IterableDataset):
             self.non_black_pixels.append(np.transpose((img.min(axis=-1) > 0).nonzero()))
             self.non_black_ids.append(np.ones(len(self.non_black_pixels[-1]), dtype=np.int32) * image_id)
             # save camera poses of images
-            self.imgs.append(normalize_image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+            self.imgs.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0)
             self.poses.append(np.array(frame['transform_matrix']).astype(np.float32)[:-1])
         self.imgs = np.array(self.imgs)  # n_images h w 3
         self.poses = np.array(self.poses)  # n_images 3 4
@@ -49,8 +49,11 @@ class NerfScene(torch.utils.data.IterableDataset):
 
         self.h, self.w = self.imgs[0].shape[:2]
 
+        # center all cameras at (0,0,0)
         self.poses[:, :, -1] -= self.get_mean_point().reshape(1, 3)
-        self.poses[:, :, -1] *= 4.0 / self.get_mean_distance()
+        # rescale coordinates to out system
+        scale = 4.0 / self.get_mean_distance()
+        self.poses[:, :, -1] *= scale
 
         self.camera_angle_x = float(meta['camera_angle_x'])
         self.focal_x = 0.5 / np.tan(0.5 * self.camera_angle_x)
