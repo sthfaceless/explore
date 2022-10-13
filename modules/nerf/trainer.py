@@ -357,7 +357,7 @@ class NerfClassTrainer(pl.LightningModule):
         # fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
 
         return {
-            'fine_pixels': coarse_weights,
+            'fine_pixels': coarse_pixels,
             'transmittance': coarse_transmittance,
             'density': coarse_density
         }
