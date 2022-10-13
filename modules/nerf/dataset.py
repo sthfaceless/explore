@@ -11,7 +11,7 @@ from modules.nerf.util import *
 class NerfScene(torch.utils.data.IterableDataset):
 
     def __init__(self, scene_root, batch_rays, n_images=-1, transforms='transforms.json', images_dir='images',
-                 color_ratio=0.5, w=128, h=128):
+                 color_ratio=0.75, w=128, h=128):
         super(NerfScene, self).__init__()
         self.scene_root = scene_root
         self.batch_rays = batch_rays
@@ -36,8 +36,12 @@ class NerfScene(torch.utils.data.IterableDataset):
             # read image and resize to desired resolution
             img = cv2.imread(os.path.join(self.scene_root, images_dir, os.path.basename(frame['file_path'])))
             img = cv2.resize(img, (h, w))
+
             # find black pixels at the image to ignore them in sampling
-            self.non_black_pixels.append(np.transpose((img.min(axis=-1) > 0).nonzero()))
+            # self.non_black_pixels.append(np.transpose((img.min(axis=-1) > 0).nonzero()))
+            self.non_black_pixels.append(
+                np.mgrid[int(h / 4):int(3 * h / 4), int(w / 4):int(3 * w / 4)].reshape(2, -1).transpose())
+
             self.non_black_ids.append(np.ones(len(self.non_black_pixels[-1]), dtype=np.int32) * image_id)
             # save camera poses of images
             self.imgs.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0)
@@ -68,6 +72,7 @@ class NerfScene(torch.utils.data.IterableDataset):
 
     def __next__(self):
 
+        # indices for all rays
         img_pixels = self.w * self.h
         indices = np.random.randint(low=0, high=img_pixels * len(self.imgs), size=self.all_sample)
         img_ids = indices // img_pixels
@@ -76,6 +81,7 @@ class NerfScene(torch.utils.data.IterableDataset):
         ray_h = ray_ids // self.w
         ray_w = ray_ids % self.w
 
+        # indices for color rays
         indices = np.random.randint(low=0, high=len(self.non_black_pixels), size=self.color_sample)
         ray_h = np.concatenate([ray_h, self.non_black_pixels[indices, 0]], axis=0)
         ray_w = np.concatenate([ray_w, self.non_black_pixels[indices, 1]], axis=0)
