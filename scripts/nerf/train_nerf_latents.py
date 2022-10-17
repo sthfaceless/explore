@@ -90,7 +90,7 @@ if __name__ == "__main__":
                              accumulate_gradients=args.acc_grads)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=False),
+                      strategy=DDPStrategy(find_unused_parameters=False), precision=16,
                       accelerator='gpu', devices=1, callbacks=[checkpoint_callback],
                       reload_dataloaders_every_n_epochs=1)
     trainer.fit(model)
