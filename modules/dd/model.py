@@ -36,7 +36,6 @@ class UNetDenoiser(torch.nn.Module):
         self.mid_layers = torch.nn.Module()
         self.mid_layers.block_1 = TimestepResBlock2D(hidden_dim=hidden_dims[-1],
                                                      timestep_dim=self.timestep_features, num_groups=num_groups)
-        self.mid_layers.attn = Attention2D(dim=hidden_dims[-1], num_groups=num_groups)
         self.mid_layers.block_2 = TimestepResBlock2D(hidden_dim=hidden_dims[-1],
                                                      timestep_dim=self.timestep_features, num_groups=num_groups)
 
@@ -47,7 +46,7 @@ class UNetDenoiser(torch.nn.Module):
             if prev_dim != dim:
                 self.upsample_blocks.append(UpSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.decoder_layers.append(torch.nn.ModuleList([]))
-                current_resolution /= 2
+                current_resolution *= 2
             block = TimestepResBlock2D(hidden_dim=dim, in_dim=2 * dim, attn=current_resolution <= attention_dim,
                                        timestep_dim=self.timestep_features, num_groups=num_groups)
             self.decoder_layers[-1].append(block)
@@ -73,7 +72,6 @@ class UNetDenoiser(torch.nn.Module):
             h = downsample(h)
         # Mid mapping
         h = self.mid_layers.block_1(h, h_time)
-        h = self.mid_layers.attn(h)
         h = self.mid_layers.block_2(h, h_time)
         # Decode latent
         for blocks, upsample in zip(self.decoder_layers, self.upsample_blocks):

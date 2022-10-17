@@ -1,5 +1,7 @@
 import math
 
+import torch.nn
+
 from modules.common.model import *
 from modules.gen.model import *
 from modules.nerf.util import render_gallery, positional_points_encoding
@@ -457,4 +459,128 @@ class NerfWeightsLinearDiscriminator(NerfWeightsDiscriminator):
     def forward(self, x):
         embed = self.encoder(x)
         out = self.predictor(embed)
+        return out
+
+
+class XUnetBlock(torch.nn.Module):
+
+    def __init__(self, block, dim, num_groups=32, need_attn=False):
+        super(XUnetBlock, self).__init__()
+        self.block = block
+        self.need_attn = need_attn
+        if self.need_attn:
+            self.cross_attn_orig = Attention2D(dim, num_groups=num_groups)
+            self.cross_attn_cond = Attention2D(dim, num_groups=num_groups)
+
+    def forward(self, x, emb):
+        h = self.block(x, emb)
+        if self.need_attn:
+            h_orig, h_cond = torch.split(h, 2, dim=0)
+            h_orig = self.cross_attn_orig(q=h_orig, v=h_cond)
+            h_cond = self.cross_attn_cond(q=h_cond, v=h_orig)
+            h = torch.cat([h_orig, h_cond], dim=0)
+        return h
+
+
+class XUNetDenoiser(torch.nn.Module):
+
+    def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
+                 num_groups=32, dropout=0.0):
+        super(XUNetDenoiser, self).__init__()
+        features, h, w = shape
+        self.features = features
+        self.steps = steps
+        # Input mapping
+        self.input_mapper = torch.nn.Conv2d(features, hidden_dims[0], kernel_size=kernel_size, padding=kernel_size // 2)
+
+        # Embed mapping
+        self.emb_features = hidden_dims[0] * 4
+        self.embed_norm = norm(self.emb_features, num_groups)
+        self.embed_layers = torch.nn.ModuleList([
+            torch.nn.Conv2d(features * 4, self.emb_features, kernel_size=1),
+            torch.nn.Conv2d(self.emb_features, self.emb_features, kernel_size=1),
+        ])
+        self.embed_cond = torch.nn.Embedding(num_embeddings=2, embedding_dim=features)
+        self.emb_downsample_blocks = torch.nn.ModuleList([])
+
+        self.encoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
+        self.downsample_blocks = torch.nn.ModuleList([])
+        current_resolution = h
+        for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
+            if prev_dim != dim:
+                current_resolution //= 2
+                self.emb_downsample_blocks.append(DownSample2d(features, dim, kernel_size=kernel_size,
+                                                               scale_factor=current_resolution / h))
+                self.downsample_blocks.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
+                self.encoder_layers.append(torch.nn.ModuleList([]))
+            need_attn = current_resolution <= attention_dim
+            block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=self.emb_features, num_groups=num_groups,
+                                              kernel_size=kernel_size, attn=need_attn, dropout=dropout)
+            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn)
+            self.encoder_layers[-1].append(block)
+        self.downsample_blocks.append(torch.nn.Identity())
+
+        self.mid_layers = torch.nn.Module()
+        need_attn = current_resolution <= attention_dim
+        block1 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
+                                           num_groups=num_groups, kernel_size=kernel_size,
+                                           attn=need_attn, dropout=dropout)
+        self.mid_layers.block_1 = XUnetBlock(block1, dim=hidden_dims[-1], num_groups=num_groups, need_attn=need_attn)
+        block2 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
+                                           num_groups=num_groups, kernel_size=kernel_size,
+                                           attn=need_attn, dropout=dropout)
+        self.mid_layers.block_2 = XUnetBlock(block2, dim=hidden_dims[-1], num_groups=num_groups, need_attn=need_attn)
+
+        inverse_dims = hidden_dims[::-1]
+        self.decoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
+        self.upsample_blocks = torch.nn.ModuleList([])
+        for prev_dim, dim in zip([inverse_dims[0]] + list(inverse_dims), inverse_dims):
+            if prev_dim != dim:
+                current_resolution *= 2
+                self.upsample_blocks.append(UpSample2d(prev_dim, dim, kernel_size=kernel_size))
+                self.decoder_layers.append(torch.nn.ModuleList([]))
+
+            block = ConditionalNormResBlock2D(hidden_dim=dim, in_dim=2 * dim, embed_dim=self.emb_features,
+                                              num_groups=num_groups,
+                                              kernel_size=kernel_size, attn=need_attn, dropout=dropout)
+            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn)
+            self.decoder_layers[-1].append(block)
+        self.upsample_blocks.append(torch.nn.Identity())
+
+        # Out latent prediction
+        self.out_norm = norm(hidden_dims[0], num_groups=num_groups)
+        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features, kernel_size=kernel_size, padding=kernel_size // 2)
+
+    def forward(self, x, time, ray_o, ray_d):
+        b, in_channels, h, w = x.shape
+        # Prepare input for mapping
+        h = self.input_mapper(x)
+        # Encode embeddings to (b features h w)
+        h_time = get_timestep_encoding(time, self.features, self.steps)[:, :, None, None].expand(b, self.features, h, w)
+        h_d = get_positional_encoding(ray_d.transpose(1, -1), self.features).transpose(-1, 1)
+        h_o = get_positional_encoding(ray_o, self.features)[:, :, None, None].expand(b, self.features, h, w)
+        orig_id, cond_id = torch.zeros(b // 2).type_as(x).long(), torch.ones(b // 2).type_as(x).long()
+        h_cond = self.embed_cond(torch.cat([orig_id, cond_id], dim=0))[:, :, None, None].expand(b, self.features, h, w)
+        emb = torch.cat([h_time, h_d, h_o, h_cond], dim=1)
+        emb = nonlinear(self.embed_norm(self.embed_layers[0](emb)))
+        emb = self.embed_layers[1](emb)
+        embs = [emb] + [downsample(emb) for downsample in self.emb_downsample_blocks]
+        # Encode latent
+        outs = []
+        for blocks, downsample, emb in zip(self.encoder_layers, self.downsample_blocks, embs):
+            for block in blocks:
+                h = block(h, emb)
+                outs.append(h)
+            h = downsample(h)
+        # Mid mapping
+        h = self.mid_layers.block_1(h, emb[-1])
+        h = self.mid_layers.block_2(h, emb[-1])
+        # Decode latent
+        for blocks, upsample, emb in zip(self.decoder_layers, self.upsample_blocks, embs[::-1]):
+            for block in blocks:
+                h = block(torch.cat([h, outs.pop()], dim=1), emb)
+            h = upsample(h)
+
+        h = self.out_norm(nonlinear(h))
+        out = self.out_mapper(h)
         return out

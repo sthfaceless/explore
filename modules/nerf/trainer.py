@@ -722,3 +722,151 @@ class MultiVAETrainer(pl.LightningModule):
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=None, shuffle=False, num_workers=2,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
+
+
+class NVSDiffusion(pl.LightningModule):
+
+    def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
+                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
+                 min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
+        super(NVSDiffusion, self).__init__()
+        self.save_hyperparameters(ignore=['clearml', 'dataset'])
+
+        self.shape = shape
+        self.in_features, self.h, self.w = shape
+        self.focal = focal
+
+        self.classifier_free = classifier_free
+        self.diffusion_steps = diffusion_steps
+        self.min_beta = min_beta
+        self.max_beta = max_beta
+
+        self.learning_rate = learning_rate
+        self.min_lr_rate = min_lr_rate
+        self.batch_size = batch_size
+
+        self.log_samples = log_samples
+        self.log_length = log_length
+
+        self.register_buffer('betas', self.get_beta_schedule())
+        self.register_buffer('alphas', 1 - self.betas)
+        self.register_buffer('head_alphas', torch.cumprod(self.alphas, dim=-1))
+
+        self.custom_logger = SimpleLogger(clearml)
+        self.dataset = dataset
+
+        self.model = XUNetDenoiser(shape=shape, steps=self.diffusion_steps, hidden_dims=xunet_hiddens,
+                                   attention_dim=attention_dim, dropout=dropout)
+
+    def get_beta_schedule(self, kind='linear'):
+        if kind == 'linear':
+            return torch.linspace(start=self.min_beta, end=self.max_beta, steps=self.diffusion_steps)
+        else:
+            raise NotImplementedError
+
+    def q_sample(self, x, t, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x)
+        t = t[:, None, None, None]  # b features h w
+        return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
+
+    def p_sample(self, x, t, ray_o, ray_d):
+        z = torch.randn_like(x)
+        z[t == 0] = 0
+        t = t[:, None, None, None]  # b features h w
+        x = (x - self.forward(x, t.view(-1), ray_o, ray_d) * self.betas[t] / torch.sqrt(1 - self.head_alphas[t])) \
+            / torch.sqrt(self.alphas[t]) + self.betas[t] * z
+        return x
+
+    def sample(self, n_seq, cond, ray_o, ray_d, dist=4.0):
+        n_samples = len(cond)
+        all_cond, all_ray_o, all_ray_d = [cond], [ray_o], [ray_d]
+        for item_id in range(n_seq):
+            x = torch.randn((n_samples, *self.shape), device=self.device)
+            poses = get_random_poses(torch.ones(n_samples, device=self.device) * dist)
+            ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
+                                           focal=torch.ones(n_samples, device=self.device) * self.focal, poses=poses)
+            for t in reversed(range(self.diffusion_steps)):
+                ids = choices(range(item_id + 1), k=n_samples)
+                _x = torch.cat([x] + [all_cond[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))], dim=0)
+                _t = torch.cat([torch.ones(n_samples).type_as(x) * t, -torch.ones(n_samples).type_as(x)], dim=0).long()
+                _ray_o = torch.cat([ray_o] + [all_ray_o[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
+                                   dim=0)
+                _ray_d = torch.cat([ray_d.transpose(1, -1)] + [all_ray_d[idx][i].unsqueeze(0) for idx, i in
+                                                               zip(ids, range(n_samples))], dim=0)
+                x = self.p_sample(_x, _t, _ray_o, _ray_d)
+            all_cond.append(x)
+            all_ray_o.append(ray_o)
+            all_ray_d.append(ray_d)
+        return all_cond
+
+    def forward(self, x, t, ray_o, ray_d):
+        return self.model(x, t, ray_o, ray_d)
+
+    def step(self, batch):
+        # extract origin view
+        x = batch['view']
+        noise = torch.randn_like(x)
+        t = torch.randint(low=0, high=self.diffusion_steps - 1, size=[len(batch)]).type_as(batch).long()
+        x_noised = self.q_sample(batch, t, noise)
+        # extract conditional view with classifier free guidance
+        clf_free_msk = torch.rand(len(x)).type_as(x) > self.classifier_free
+        x_cond = torch.where(clf_free_msk, batch['cond'], torch.randn_like(batch['cond']))
+        # extract positional information
+        origin_ray_o, origin_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['view_poses'])
+        cond_ray_o, cond_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['cond_poses'])
+        # concat origin with conditional to run them simultaneously
+        ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
+        ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).transpose(1, -1)  # b h w 3 -> b 3 h w
+        x_noised = torch.cat([x_noised, x_cond], dim=0)
+        t = torch.cat([t, -torch.ones_like(t)], dim=0)
+        noise_pred = torch.split(self.forward(x_noised, t, ray_o, ray_d), 2, dim=0)[0]
+        loss = torch.nn.functional.mse_loss(noise, noise_pred)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+
+        loss = self.step(batch)
+        self.log('train_loss', loss, prog_bar=True)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+
+        loss = self.step(batch)
+        self.log('val_loss', loss, prog_bar=True)
+
+        return loss
+
+    def on_validation_epoch_end(self):
+        data_iter = iter(self.trainer.val_dataloaders[0])
+        batch = next(data_iter)
+        cond = batch['cond'][:self.log_samples].to(self.device)
+        poses = batch['cond_poses'][:self.log_samples].to(self.device)
+        focal = batch['focal'][:self.log_samples].to(self.device)
+        ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
+        with torch.no_grad():
+            images = self.sample(self.log_length - 1, cond, ray_o, ray_d.transpose(1, -1))
+        # seq b 3 h w -> b seq 3 h w -> b seq h w 3
+        images = torch.stack(images, dim=0).transpose(0, 1).transpose(2, -1)
+        b, seq, h, w, d = images.shape
+        images = images.view(b, 4, seq // 4, h, w, d).transpose(2, 3).view(b, 4 * h, seq // 4 * w, d).cpu().numpy()
+        galleries = [denormalize_image(images[idx]) for idx in range(b)]
+        self.custom_logger.log_images(galleries, 'sample', self.current_epoch)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
+                                                                            T_0=10, T_mult=1, last_epoch=-1,
+                                                                            eta_min=self.min_lr_rate
+                                                                                    * self.learning_rate)
+        return [optimizer], [lr_scheduler]
+
+    def train_dataloader(self):
+        self.dataset.reset_cache()
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
+                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
+                                           pin_memory=False, drop_last=False, prefetch_factor=2)

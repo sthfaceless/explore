@@ -17,6 +17,16 @@ def build_nerf_weights(layers, shapes, raw):
     return weights
 
 
+def get_images_rays(h, w, focal, poses):
+    y, x = torch.meshgrid(torch.arange(h).type_as(focal), torch.arange(w).type_as(focal), indexing='ij')
+    x = (x + 0.5 - w / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * w)
+    y = (y + 0.5 - h / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * h)
+    dirs = torch.stack([x, -y, -torch.ones_like(x)], dim=-1)  # b h w 3
+    ray_o = poses[..., -1]  # b 3
+    ray_d = torch.matmul(dirs.unsqueeze(-2), poses[:, None, None, :, :3].transpose(-1, -2)).squeeze(-2)
+    return ray_o, ray_d
+
+
 def get_image_coords(h, w, focal_x, focal_y, device=torch.device('cpu')):
     # returns coordinates of each pixel in camera coordinate system
     y, x = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing='ij')
@@ -32,6 +42,31 @@ def get_rays(poses, pixel_coords):
     ray_o = poses[..., -1]  # b 3
     ray_d = torch.matmul(poses[..., :3], pixel_coords[..., None]).squeeze(-1)  # b 3 3
     return ray_o, ray_d
+
+
+def normalize_vector(v):
+    return v / torch.norm(v, p=2, dim=-1, keepdim=True)
+
+
+def look_at_matrix(eye, target):
+    fwd = target - eye
+    side = torch.linalg.cross(fwd, torch.tensor([0, 1, 0]).type_as(eye).view(1, 3).repeat(len(fwd), 1))
+    up = torch.linalg.cross(side, fwd)
+    fwd, side, up = normalize_vector(fwd), normalize_vector(side), normalize_vector(up)
+    side = torch.cat([side, -torch.matmul(side.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1).squeeze(-1)], dim=-1)
+    up = torch.cat([up, -torch.matmul(up.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    fwd = torch.cat([-fwd, -torch.matmul(fwd.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    pad = torch.tensor([0, 0, 0, 1]).type_as(eye).view(1, 4).repeat(len(eye), 1)
+    w2c = torch.stack([side, up, fwd, pad], dim=1)  # b 4 4
+    c2w = torch.linalg.inv(w2c)[:, :3]
+    return c2w
+
+
+def get_random_poses(dist):
+    n_poses = len(dist)
+    target = torch.zeros(n_poses, 3).type_as(dist)
+    eye = normalize_vector(torch.rand(n_poses, 3).type_as(dist)) * dist.unsqueeze(-1)
+    return look_at_matrix(eye, target)
 
 
 def positional_points_encoding(points, pe_powers, base=2):
@@ -250,7 +285,7 @@ def render_latent_nerf(latents, model, w=128, h=128, focal=1.5, camera_distance=
                 with torch.no_grad():
                     out = model(latents=latents[gallery_id].unsqueeze(0), near=near, far=far, base_radius=base_radius,
                                 poses=poses, pixel_coords=pixel_coords)
-                rendered_pixels = out['fine_pixels']* 255
+                rendered_pixels = out['fine_pixels'] * 255
                 pixels.append(rendered_pixels.cpu().detach().numpy().astype(np.uint8))
             images.append(np.concatenate(pixels, axis=0).reshape((h, w, 3)))
         gallery = np.array(images).reshape((2, 4, h, w, 3)).transpose(0, 2, 1, 3, 4).reshape((2 * h, 4 * w, 3))

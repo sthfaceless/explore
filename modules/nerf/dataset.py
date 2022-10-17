@@ -290,3 +290,74 @@ class NerfLatents(torch.utils.data.IterableDataset):
 
     def __next__(self):
         return self[randint(0, len(self.latents) - 1)]
+
+
+class PairViews(torch.utils.data.IterableDataset):
+
+    def __init__(self, class_path, images_per_scene=-1, transforms='transforms.json', images_dir='images',
+                 cache_size=-1, w=128, h=128):
+        super(PairViews, self).__init__()
+        # images_dir = 'train'
+        # transforms = 'transforms_train.json'
+        self.class_path = class_path
+        self.images_dir = images_dir
+        self.transforms = transforms
+        self.h = h
+        self.w = w
+        self.images_per_scene = images_per_scene
+        self.items = [item for item in os.listdir(class_path) if os.path.isdir(os.path.join(class_path, item))]
+        if cache_size == -1:
+            self.cache_size = len(self.items)
+        else:
+            self.cache_size = cache_size
+        self.images, self.poses, self.focals = [], [], []
+        self.reset_cache()
+
+    def reset_cache(self):
+        self.images, self.poses, self.focals = [], [], []
+        items = sample(self.items, k=self.cache_size)
+        for scene in items:
+            scene_root = os.path.join(self.class_path, scene)
+            with open(os.path.join(scene_root, self.transforms), 'r') as f:
+                meta = json.load(f)
+            self.focals.append(0.5 / np.tan(0.5 * meta['camera_angle_x']))
+            if self.images_per_scene < 0:
+                frames = meta['frames']
+            else:
+                frames = sample(meta['frames'], k=self.images_per_scene)
+            images, poses = [], []
+            for image_id, frame in enumerate(frames):
+                # read image and resize to desired resolution
+                img = cv2.imread(os.path.join(scene_root, self.images_dir, os.path.basename(frame['file_path'])))
+                img = cv2.resize(img, (self.h, self.w))
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                # save camera poses of images
+                images.append(normalize_image(img))
+                poses.append(np.array(frame['transform_matrix']).astype(np.float32)[:-1])
+            self.images.append(images)
+            # some standardizations
+            poses = np.array(poses)
+            self.mean_distance = np.mean(np.linalg.norm(poses[:, :, -1], axis=-1))
+            mid_dir = np.array([0, 0, -1], dtype=np.float32)
+            mid_point = np.mean(poses[:, :, -1] + (poses[:, :, :3] @ mid_dir) * self.mean_distance, axis=0)
+            poses[:, :, -1] -= mid_point.reshape(1, 3)
+            poses[:, :, -1] *= 4.0 / self.mean_distance
+            self.poses.append(poses)
+
+    def get_mean_distance(self):
+        return self.mean_distance
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        idx = randint(0, self.cache_size - 1)
+        views = self.images[idx]
+        pair = sample(range(self.images_per_scene), k=2)
+        return {
+            'view': views[pair[0]],
+            'view_poses': self.poses[idx][pair[0]],
+            'cond': views[pair[1]],
+            'cond_poses': self.poses[idx][pair[1]],
+            'focal': self.focals[idx],
+        }
