@@ -473,7 +473,7 @@ class LatentDiffusion(pl.LightningModule):
 
     def __init__(self, shape, unet_hiddens, dataset, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
-                 min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=False,
+                 min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=True,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         super(LatentDiffusion, self).__init__()
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
