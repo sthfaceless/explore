@@ -127,10 +127,10 @@ class Attention2D(torch.nn.Module):
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
-    def forward(self, q, v=None):
-        if v is None:
-            v = q
-        q, v = self.norm_q(q), self.norm_v(v)
+    def forward(self, _q, _v=None):
+        if _v is None:
+            _v = _q
+        q, v = self.norm_q(_q), self.norm_v(_v)
         q, k, v = self.q(q), self.k(v), self.v(v)
 
         # compute attention
