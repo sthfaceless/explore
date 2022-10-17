@@ -145,7 +145,7 @@ class Attention2D(torch.nn.Module):
 
         out = self.out(out)
 
-        return (out + q) / 2 ** (1 / 2)
+        return (out + _q) / 2 ** (1 / 2)
 
 
 class MHAAttention2D(torch.nn.Module):
