@@ -101,7 +101,7 @@ class VAEEncoder2D(torch.nn.Module):
         for prev_dim, dim in zip(hidden_dims, hidden_dims[1:]):
             if prev_dim != dim:
                 self.encoder_blocks.append(DownSample2d(in_dim=prev_dim, out_dim=dim, kernel_size=kernel_size))
-                current_res /= 2
+                current_res //= 2
             self.encoder_blocks.append(ResBlock2d(in_dim=dim, hidden_dim=dim, num_groups=num_groups,
                                                   kernel_size=kernel_size))
         # out norm of encoder

@@ -330,7 +330,6 @@ class NerfClassTrainer(pl.LightningModule):
         total, spp, n_features = positional_features.shape
 
         # encode points to latent
-        # nums = batch['num'].view(total, 1).repeat(1, spp).view(total * spp)
         nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
             .repeat(1, total // n_objects, spp).view(total * spp)
         latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
@@ -346,7 +345,6 @@ class NerfClassTrainer(pl.LightningModule):
         # mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
         # positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
         # total, spp, n_features = positional_features.shape
-        # # nums = batch['num'].view(total, 1).repeat(1, spp).view(total * spp)
         # nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
         #     .repeat(1, total // n_objects, spp).view(total * spp)
         # latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)

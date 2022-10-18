@@ -70,8 +70,8 @@ class DownSample2d(torch.nn.Module):
                                     padding=kernel_size // 2, stride=1)
 
     def forward(self, x):
-        h = torch.nn.functional.interpolate(x, scale_factor=self.scale_factor, mode='bilinear')
-        h = self.conv(h)
+        h = self.conv(x)
+        h = torch.nn.functional.interpolate(h, scale_factor=self.scale_factor, mode='bilinear')
         return h
 
 
@@ -145,7 +145,7 @@ class Attention2D(torch.nn.Module):
 
         out = self.out(out)
 
-        return (out + _q) / 2 ** (1 / 2)
+        return out + _q
 
 
 class MHAAttention2D(torch.nn.Module):

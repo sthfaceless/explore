@@ -203,7 +203,7 @@ class NerfLatentDecoder(torch.nn.Module):
             if current_resolution <= attention_dim:
                 blocks.append(Attention2D(dim, num_groups=num_groups))
         self.model = torch.nn.Sequential(*blocks,
-                                         torch.nn.GroupNorm(num_groups=num_groups, num_channels=hidden_dims[-1]),
+                                         norm(num_groups=num_groups, dims=hidden_dims[-1]),
                                          torch.nn.SiLU(),
                                          torch.nn.Conv2d(hidden_dims[-1], out_dim, kernel_size=kernel_size,
                                                          padding=kernel_size // 2))
