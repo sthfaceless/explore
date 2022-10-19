@@ -260,6 +260,8 @@ class NerfClassTrainer(pl.LightningModule):
         self.n_objects = n_objects
         self.model_out = model_out
 
+        self.near = near
+        self.far = far
         self.nerf_spp = nerf_spp
         self.nerf_pe = nerf_pe
         self.coarse_weight = coarse_weight
@@ -306,7 +308,7 @@ class NerfClassTrainer(pl.LightningModule):
 
     def render_images(self, n_images):
 
-        idxs = torch.randint(low=0, high=self.latents.num_embeddings, size=n_images, device=self.device).long()
+        idxs = torch.randint(low=0, high=self.latents.num_embeddings, size=(n_images,), device=self.device).long()
         latents = self.latents(idxs).view(n_images, *self.embed_shape)
         galleries = render_latent_nerf(latents=latents, model=self,
                                        w=self.image_size, h=self.image_size, focal=self.dataset.get_focal(),

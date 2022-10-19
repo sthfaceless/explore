@@ -1,7 +1,7 @@
 import glob
 import os
 from random import sample, choices, randint
-
+from tqdm import tqdm
 import cv2
 
 from modules.common.util import *
@@ -144,7 +144,7 @@ class NerfClass(torch.utils.data.IterableDataset):
 
     def reset_cache(self):
         self.cache_keys = sample(range(len(self.items)), k=self.cache_size)
-        self.cache = {obj_id: self.load_nerf_scene(obj_id) for obj_id in self.cache_keys}
+        self.cache = {obj_id: self.load_nerf_scene(obj_id) for obj_id in tqdm(self.cache_keys)}
 
     def __iter__(self):
         return self
@@ -316,7 +316,7 @@ class PairViews(torch.utils.data.IterableDataset):
     def reset_cache(self):
         self.images, self.poses, self.focals = [], [], []
         items = sample(self.items, k=self.cache_size)
-        for scene in items:
+        for scene in tqdm(items):
             scene_root = os.path.join(self.class_path, scene)
             with open(os.path.join(scene_root, self.transforms), 'r') as f:
                 meta = json.load(f)
