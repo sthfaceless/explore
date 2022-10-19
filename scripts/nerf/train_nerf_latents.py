@@ -41,6 +41,8 @@ def get_parser():
     parser.add_argument("--embed_noise", default=0.1, type=float, help="Noise added to embedding")
 
     # Nerf settings
+    parser.add_argument("--near", default=4-3**(1/2), type=float, help="Hidden dim shape")
+    parser.add_argument("--far", default=4+3**(1/2), type=float, help="Hidden dim shape")
     parser.add_argument("--nerf_hidden", default=128, type=int, help="Hidden dim shape")
     parser.add_argument("--nerf_blocks", default=4, type=int, help="NeRF residual blocks")
     parser.add_argument("--nerf_pe", default=12, type=int, help="L for positional encoding")
@@ -82,7 +84,7 @@ if __name__ == "__main__":
                              nerf_blocks=args.nerf_blocks, nerf_spp=args.nerf_spp, nerf_pe=args.nerf_pe,
                              batch_rays=args.nerf_batch, batch_objects=args.batch_objects,
                              learning_rate=args.learning_rate, decoder_hiddens=args.hidden_dims,
-                             positional_dim=args.feature_dim,
+                             positional_dim=args.feature_dim, near=args.near, far=args.far,
                              model_out=os.path.join(os.path.dirname(args.out_model_name),
                                                     os.path.basename(args.out_model_name) + '.parts'),
                              min_lr_ratio=args.min_lr_ratio, initial_lr_ratio=args.initial_lr_ratio,
