@@ -251,7 +251,8 @@ class NerfClassTrainer(pl.LightningModule):
                  decoder_hiddens=(32, 32, 64, 64, 128, 128), positional_dim=256, attention_dim=32, lr_embed=1e-4,
                  nerf_blocks=4, nerf_hidden=32, nerf_pe=12, nerf_spp=128, coarse_weight=0.1, image_size=128,
                  accumulate_gradients=1, learning_rate=5 * 1e-4, clearml=None, val_samples=5,
-                 num_groups=32, density_reg=0.0, model_out='model_last.ckpt',
+                 num_groups=32, density_reg=0.0, model_out='model_last.ckpt', near=4 - 3 ** (1 / 2),
+                 far=4 + 3 ** (1 / 2),
                  transmittance_reg=0.75, transmittance_warmup=5, transmittance_min=0.3, transmittance_weight=0.0,
                  warmup_epochs=3, initial_lr_ratio=0.1, min_lr_ratio=0.01):
         super(NerfClassTrainer, self).__init__()
@@ -305,15 +306,13 @@ class NerfClassTrainer(pl.LightningModule):
 
     def render_images(self, n_images):
 
-        data_iter = iter(self.trainer.val_dataloaders[0])
-        batch = next(data_iter)
-        idxs = torch.cat([next(data_iter)['id'][0] for _ in range(n_images)], dim=0).to(self.device)
+        idxs = torch.randint(low=0, high=self.latents.num_embeddings, size=n_images, device=self.device).long()
         latents = self.latents(idxs).view(n_images, *self.embed_shape)
         galleries = render_latent_nerf(latents=latents, model=self,
                                        w=self.image_size, h=self.image_size, focal=self.dataset.get_focal(),
                                        camera_distance=self.dataset.get_camera_distance(),
-                                       near_val=batch['near'].view(-1)[0].item(),
-                                       far_val=batch['far'].view(-1)[0].item(), batch_rays=len(batch['near'].view(-1)))
+                                       near_val=self.near, far_val=self.far,
+                                       batch_rays=self.batch_rays * self.batch_objects)
         return galleries
 
     def forward(self, latents, near, far, base_radius, poses, pixel_coords):
