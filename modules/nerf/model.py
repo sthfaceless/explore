@@ -93,7 +93,7 @@ class Nerf(torch.nn.Module):
         for first_block, second_block in self.blocks:
             out = first_block(x)
             out = second_block(out)
-            x = torch.nn.functional.leaky_relu(out + x)
+            x = torch.nn.functional.leaky_relu((out + x) / 2 ** (1 / 2))
         rgb = self.rgb_layer(x)
         raw_dens = self.density_layer(x)
         density = torch.nn.functional.softplus(raw_dens - 1)  # shifted softplus
@@ -119,12 +119,11 @@ class Nerf(torch.nn.Module):
 
 class ConditionalNeRF(torch.nn.Module):
 
-    def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12, residual_scale=1.0):
+    def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12):
         super(ConditionalNeRF, self).__init__()
         self.input_dim = pe_powers * 3 + latent_dim
         self.blocks = torch.nn.ModuleList([])
         self.input_layer = torch.nn.Linear(self.input_dim, hidden_dim)
-        self.residual_scale = residual_scale
         for block_id in range(num_blocks):
             self.blocks.append(torch.nn.ModuleList([
                 torch.nn.Linear(hidden_dim + latent_dim, hidden_dim),
@@ -143,7 +142,7 @@ class ConditionalNeRF(torch.nn.Module):
             h = block_1(h)
             h = torch.sin(h)
             h = block_2(h)
-            x = h + mapper(x) * self.residual_scale
+            x = (h + mapper(x)) / 2 ** (1 / 2)
         rgb = torch.sigmoid(self.rgb_layer(x))
         density = torch.nn.functional.softplus(self.density_layer(x) - 1)
         return rgb, density
@@ -151,12 +150,11 @@ class ConditionalNeRF(torch.nn.Module):
 
 class HiddenConditionalNeRF(torch.nn.Module):
 
-    def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12, residual_scale=1.0):
+    def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12):
         super(HiddenConditionalNeRF, self).__init__()
         self.input_dim = pe_powers * 3 + latent_dim
         self.blocks = torch.nn.ModuleList([])
         self.input_layer = torch.nn.Linear(self.input_dim, hidden_dim)
-        self.residual_scale = residual_scale
         for block_id in range(num_blocks):
             self.blocks.append(torch.nn.ModuleList([
                 torch.nn.Linear(hidden_dim, hidden_dim),
@@ -173,7 +171,7 @@ class HiddenConditionalNeRF(torch.nn.Module):
             h = torch.cat([block_1(h), latent], dim=-1)
             h = torch.sin(h)
             h = block_2(h)
-            x = h + x * self.residual_scale
+            x = (h + x) / 2 ** (1/2)
         rgb = torch.sigmoid(self.rgb_layer(x))
         density = torch.nn.functional.softplus(self.density_layer(x) - 1)
         return rgb, density

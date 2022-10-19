@@ -145,7 +145,7 @@ class Attention2D(torch.nn.Module):
 
         out = self.out(out)
 
-        return out + _q
+        return (out + _q) / 2 ** (1 / 2)
 
 
 class MHAAttention2D(torch.nn.Module):
@@ -157,17 +157,18 @@ class MHAAttention2D(torch.nn.Module):
         self.scale = self.head_dim ** (-0.5)
         self.dropout = dropout
 
-        self.norm = norm(dim, num_groups)
+        self.norm_q = norm(dim, num_groups)
+        self.norm_v = norm(dim, num_groups)
         self.q = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.k = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
-    def forward(self, input):
-        out = self.norm(input)
-        q = self.q(out)
-        k = self.k(out)
-        v = self.v(out)
+    def forward(self, _q, _v=None):
+        if _v is None:
+            _v = _q
+        q, v = self.norm_q(_q), self.norm_v(_v)
+        q, k, v = self.q(q), self.k(v), self.v(v)
 
         # compute attention
         b, c, h, w = q.shape
@@ -182,14 +183,13 @@ class MHAAttention2D(torch.nn.Module):
         out = out.transpose(-1, -2).reshape(b, self.dim, h, w)
         out = self.out(out)
 
-        return out + input
+        return (out + _q) / 2 ** (1 / 2)
 
 
 class ResBlock2d(torch.nn.Module):
 
-    def __init__(self, hidden_dim, kernel_size=3, num_groups=32, res_scaling=1.0, in_dim=-1):
+    def __init__(self, hidden_dim, kernel_size=3, num_groups=32, in_dim=-1):
         super(ResBlock2d, self).__init__()
-        self.res_scaling = res_scaling
 
         if in_dim == -1:
             in_dim = hidden_dim
@@ -205,16 +205,15 @@ class ResBlock2d(torch.nn.Module):
 
     def forward(self, input):
         x = self.layer_1(torch.nn.functional.silu(self.ln_1(input)))
-        skip = input if self.in_dim == self.hidden_dim else self.input_mapper(input) * self.res_scaling
-        x = self.layer_2(torch.nn.functional.silu(self.ln_2(x))) + skip
+        skip = input if self.in_dim == self.hidden_dim else self.input_mapper(input)
+        x = (self.layer_2(torch.nn.functional.silu(self.ln_2(x))) + skip) / 2 ** (1 / 2)
         return x
 
 
 class TimestepResBlock2D(torch.nn.Module):
 
-    def __init__(self, hidden_dim, timestep_dim, kernel_size=3, num_groups=32, res_scaling=1.0, in_dim=-1, attn=False):
+    def __init__(self, hidden_dim, timestep_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False):
         super(TimestepResBlock2D, self).__init__()
-        self.res_scaling = res_scaling
 
         self.time_layer = torch.nn.Linear(timestep_dim, hidden_dim)
 
@@ -237,8 +236,8 @@ class TimestepResBlock2D(torch.nn.Module):
     def forward(self, input, time):
         h = self.layer_1(nonlinear(self.ln_1(input)))
         h = h + self.time_layer(nonlinear(time))[:, :, None, None]  # broadcast to image shape
-        skip = input if self.in_dim == self.hidden_dim else self.res_mapper(input) * self.res_scaling
-        h = self.layer_2(nonlinear(self.ln_2(h))) + skip
+        skip = input if self.in_dim == self.hidden_dim else self.res_mapper(input)
+        h = (self.layer_2(nonlinear(self.ln_2(h))) + skip) / 2 ** (1 / 2)
         if self.need_attn:
             h = self.attn(h)
         return h
@@ -315,7 +314,7 @@ class ResBlock(torch.nn.Module):
         )
 
     def forward(self, x):
-        return torch.nn.functional.gelu(self.block(x) + x)
+        return torch.nn.functional.gelu((self.block(x) + x) / 2 ** (1 / 2))
 
 
 class DownSampleConv1D(torch.nn.Module):
@@ -350,4 +349,4 @@ class ResBlockConv1D(torch.nn.Module):
         )
 
     def forward(self, x):
-        return torch.nn.functional.gelu(self.block(x) + x)
+        return torch.nn.functional.gelu((self.block(x) + x) / 2 ** (1 / 2))

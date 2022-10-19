@@ -333,7 +333,7 @@ class PairViews(torch.utils.data.IterableDataset):
                 img = cv2.resize(img, (self.h, self.w))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 # save camera poses of images
-                images.append(normalize_image(img))
+                images.append(normalize_image(img).swapaxes(0, -1))
                 poses.append(np.array(frame['transform_matrix']).astype(np.float32)[:-1])
             self.images.append(images)
             # some standardizations
