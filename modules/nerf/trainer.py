@@ -341,24 +341,25 @@ class NerfClassTrainer(pl.LightningModule):
         coarse_pixels, coarse_weights, coarse_transmittance = render_pixels(coarse_rgb, coarse_density, dists)
 
         # adaptively find optimal distances based on coarse sampling
-        # dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
-        #                               weights=coarse_weights)
-        # mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
-        # positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
-        # total, spp, n_features = positional_features.shape
-        # nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
-        #     .repeat(1, total // n_objects, spp).view(total * spp)
-        # latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
-        #
-        # # render pixels
-        # fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
-        # fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
-        # fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
+        dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
+                                      weights=coarse_weights)
+        mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
+        positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
+        total, spp, n_features = positional_features.shape
+        nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
+            .repeat(1, total // n_objects, spp).view(total * spp)
+        latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
+
+        # render pixels
+        fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
+        fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
+        fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
 
         return {
-            'fine_pixels': coarse_pixels,
-            'transmittance': coarse_transmittance,
-            'density': coarse_density
+            'coarse_pixels': coarse_pixels,
+            'fine_pixels': fine_pixels,
+            'transmittance': torch.cat([coarse_transmittance, fine_transmittance], dim=-1),
+            'density': torch.cat([coarse_density, fine_density], dim=-1)
         }
 
     def render(self, batch, train=True):
@@ -380,8 +381,8 @@ class NerfClassTrainer(pl.LightningModule):
 
     def loss(self, out, gt_pixels):
         loss = {
-            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels),
-            # + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
+            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels)
+                        + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
             'mean_density': torch.mean(out['density']),
             'mean_transmittance': torch.mean(out['transmittance'])
         }
