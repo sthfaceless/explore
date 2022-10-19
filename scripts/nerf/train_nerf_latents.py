@@ -35,14 +35,14 @@ def get_parser():
     # Model settings
     parser.add_argument("--hidden_dims", default=[32, 32, 64, 64, 128, 128, 128, 128, 256, 256], nargs='+', type=int,
                         help="Hidden dims for decoder")
-    parser.add_argument("--latent", default=[32, 16, 16], type=int, help="Latent dim shape")
+    parser.add_argument("--latent", default=[32, 8, 8], type=int, nargs='+', help="Latent dim shape")
     parser.add_argument("--feature_dim", default=32, type=int, help="Positional feature dim")
     parser.add_argument("--attention_dim", default=8, type=int, help="Width till the one attention would be done")
     parser.add_argument("--embed_noise", default=0.1, type=float, help="Noise added to embedding")
 
     # Nerf settings
-    parser.add_argument("--near", default=4-3**(1/2), type=float, help="Hidden dim shape")
-    parser.add_argument("--far", default=4+3**(1/2), type=float, help="Hidden dim shape")
+    parser.add_argument("--near", default=4 - 3 ** (1 / 2), type=float, help="Hidden dim shape")
+    parser.add_argument("--far", default=4 + 3 ** (1 / 2), type=float, help="Hidden dim shape")
     parser.add_argument("--nerf_hidden", default=128, type=int, help="Hidden dim shape")
     parser.add_argument("--nerf_blocks", default=4, type=int, help="NeRF residual blocks")
     parser.add_argument("--nerf_pe", default=12, type=int, help="L for positional encoding")
