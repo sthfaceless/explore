@@ -4,8 +4,8 @@ from random import shuffle
 from time import time
 
 import pytorch_lightning as pl
+import torch.cuda
 from PIL import Image
-from tqdm import tqdm
 
 from modules.dd.model import *
 from modules.nerf.dataset import *
@@ -366,9 +366,11 @@ class NerfClassTrainer(pl.LightningModule):
         # take embedding for scene and decode it to positional features
         idxs = batch['id'].view(-1)
         n_objects = len(idxs)
-        latent = self.latents.forward(idxs).view(n_objects, *self.embed_shape)
+        latent = self.latents.forward(idxs)
         if train:
-            latent += torch.randn_like(latent, device=self.device) * self.embed_noise
+            latent += torch.randn_like(latent, device=self.device) * torch.std(latent, dim=-1,
+                                                                               keepdim=True) * self.embed_noise
+        latent = latent.view(n_objects, *self.embed_shape)
 
         near, far, base_radius = batch['near'].view(-1), batch['far'].view(-1), batch['base_radius'].view(-1)
         poses = batch['poses'].view(-1, 3, 4)
@@ -460,12 +462,14 @@ class NerfClassTrainer(pl.LightningModule):
 
     def train_dataloader(self):
         self.dataset.reset_cache()
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False, num_workers=2,
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
+                                           pin_memory=False, drop_last=False, prefetch_factor=1)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False, num_workers=2,
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_objects, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
+                                           pin_memory=False, drop_last=False, prefetch_factor=1)
 
 
 class LatentDiffusion(pl.LightningModule):
@@ -585,11 +589,13 @@ class LatentDiffusion(pl.LightningModule):
         return [optimizer], [lr_scheduler]
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
 
@@ -715,11 +721,13 @@ class MultiVAETrainer(pl.LightningModule):
 
     def train_dataloader(self):
         self.dataset.reset_cache()
-        return torch.utils.data.DataLoader(self.dataset, batch_size=None, shuffle=False, num_workers=2,
+        return torch.utils.data.DataLoader(self.dataset, batch_size=None, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=None, shuffle=False, num_workers=2,
+        return torch.utils.data.DataLoader(self.dataset, batch_size=None, shuffle=False,
+                                           num_workers=torch.cuda.device_count() * 2,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
 
