@@ -146,7 +146,7 @@ class NerfClass(torch.utils.data.IterableDataset):
     def reset_cache(self):
         self.cache_keys = sample(range(len(self.items)), k=self.cache_size)
         with ProcessPoolExecutor(max_workers=4) as executor:
-            scenes = executor.map(self.load_nerf_scene, tqdm(self.cache_keys))
+            scenes = executor.map(self.load_nerf_scene, self.cache_keys)
             self.cache = {obj_id: scene for obj_id, scene in zip(self.cache_keys, scenes)}
 
     def __iter__(self):

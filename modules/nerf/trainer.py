@@ -368,8 +368,8 @@ class NerfClassTrainer(pl.LightningModule):
         n_objects = len(idxs)
         latent = self.latents.forward(idxs)
         if train:
-            latent += torch.randn_like(latent, device=self.device) * torch.std(latent, dim=-1,
-                                                                               keepdim=True) * self.embed_noise
+            latent = latent + torch.randn_like(latent) * torch.std(latent.detach(), dim=-1,
+                                                                   keepdim=True) * self.embed_noise
         latent = latent.view(n_objects, *self.embed_shape)
 
         near, far, base_radius = batch['near'].view(-1), batch['far'].view(-1), batch['base_radius'].view(-1)
