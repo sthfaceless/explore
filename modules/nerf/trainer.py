@@ -342,25 +342,27 @@ class NerfClassTrainer(pl.LightningModule):
         coarse_pixels, coarse_weights, coarse_transmittance = render_pixels(coarse_rgb, coarse_density, dists)
 
         # adaptively find optimal distances based on coarse sampling
-        dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
-                                      weights=coarse_weights)
-        mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
-        positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
-        total, spp, n_features = positional_features.shape
-        nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
-            .repeat(1, total // n_objects, spp).view(total * spp)
-        latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
-
-        # render pixels
-        fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
-        fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
-        fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
+        # dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
+        #                               weights=coarse_weights)
+        # mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
+        # positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
+        # total, spp, n_features = positional_features.shape
+        # nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
+        #     .repeat(1, total // n_objects, spp).view(total * spp)
+        # latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
+        #
+        # # render pixels
+        # fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
+        # fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
+        # fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
 
         return {
-            'coarse_pixels': coarse_pixels,
-            'fine_pixels': fine_pixels,
-            'transmittance': torch.cat([coarse_transmittance, fine_transmittance], dim=-1),
-            'density': torch.cat([coarse_density, fine_density], dim=-1)
+            # 'coarse_pixels': coarse_pixels,
+            'fine_pixels': coarse_pixels,
+            # 'transmittance': torch.cat([coarse_transmittance, fine_transmittance], dim=-1),
+            'transmittance': coarse_transmittance,
+            # 'density': torch.cat([coarse_density, fine_density], dim=-1)
+            'density': coarse_density
         }
 
     def render(self, batch, train=True):
@@ -382,8 +384,8 @@ class NerfClassTrainer(pl.LightningModule):
 
     def loss(self, out, gt_pixels):
         loss = {
-            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels)
-                        + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
+            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels),
+            # + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
             'mean_density': torch.mean(out['density']),
             'mean_transmittance': torch.mean(out['transmittance'])
         }
@@ -696,25 +698,29 @@ class NVSDiffusion(Diffusion):
 
     def sample(self, n_seq, cond, ray_o, ray_d, dist=4.0):
         n_samples = len(cond)
-        all_cond, all_ray_o, all_ray_d = [cond], [ray_o], [ray_d]
+        cond_sequence, ray_o_sequence, ray_d_sequence = [cond], [ray_o], [ray_d]
         for item_id in range(n_seq):
-            x = torch.randn((n_samples, *self.shape), device=self.device)
-            poses = get_random_poses(torch.ones(n_samples, device=self.device) * dist)
+            x = torch.randn((n_samples, *self.shape)).type_as(cond)
+            poses = get_random_poses(torch.ones(n_samples).type_as(cond) * dist)
             ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
-                                           focal=torch.ones(n_samples, device=self.device) * self.focal, poses=poses)
+                                           focal=torch.ones(n_samples).type_as(cond) * self.focal, poses=poses)
+            # b h w 3 -> b 3 h w
+            ray_d = torch.movedim(ray_d, -1, 1)
             for t in reversed(range(self.diffusion_steps)):
-                ids = choices(range(item_id + 1), k=n_samples)
-                _x = torch.cat([x] + [all_cond[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))], dim=0)
-                _t = torch.cat([torch.ones(n_samples).type_as(x) * t, -torch.ones(n_samples).type_as(x)], dim=0).long()
-                _ray_o = torch.cat([ray_o] + [all_ray_o[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
-                                   dim=0)
-                _ray_d = torch.cat([ray_d.transpose(1, -1)] + [all_ray_d[idx][i].unsqueeze(0) for idx, i in
-                                                               zip(ids, range(n_samples))], dim=0)
-                x = self.p_sample(_x, _t, ray_o=_ray_o, ray_d=_ray_d)
-            all_cond.append(x)
-            all_ray_o.append(ray_o)
-            all_ray_d.append(ray_d)
-        return all_cond
+                ids = choices(range(len(cond_sequence)), k=n_samples)
+                x = torch.cat([x] + [cond_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
+                              dim=0)
+                t = torch.cat([torch.ones(n_samples).type_as(x) * t, -torch.ones(n_samples).type_as(x)], dim=0).long()
+                _ray_o = torch.cat(
+                    [ray_o] + [ray_o_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
+                    dim=0)
+                _ray_d = torch.cat(
+                    [ray_d] + [ray_d_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))], dim=0)
+                x = torch.chunk(self.p_sample(x, t, ray_o=_ray_o, ray_d=_ray_d), 2, dim=0)[0]
+            cond_sequence.append(x)
+            ray_o_sequence.append(ray_o)
+            ray_d_sequence.append(ray_d)
+        return cond_sequence
 
     def forward(self, x, t, ray_o, ray_d):
         return self.model(x, t, ray_o, ray_d)
@@ -723,20 +729,20 @@ class NVSDiffusion(Diffusion):
         # extract origin view
         x = batch['view']
         noise = torch.randn_like(x)
-        t = torch.randint(low=0, high=self.diffusion_steps - 1, size=[len(batch)]).type_as(batch).long()
-        x_noised = self.q_sample(batch, t, noise)
+        t = torch.randint(low=0, high=self.diffusion_steps - 1, size=(len(x),)).type_as(batch['focal']).long()
+        x_noised = self.q_sample(x, t, noise)
         # extract conditional view with classifier free guidance
         clf_free_msk = torch.rand(len(x)).type_as(x) > self.classifier_free
-        x_cond = torch.where(clf_free_msk, batch['cond'], torch.randn_like(batch['cond']))
+        x_cond = torch.where(clf_free_msk[:, None, None, None], batch['cond'], torch.randn_like(batch['cond']))
         # extract positional information
         origin_ray_o, origin_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['view_poses'])
         cond_ray_o, cond_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['cond_poses'])
         # concat origin with conditional to run them simultaneously
         ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
-        ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).transpose(1, -1)  # b h w 3 -> b 3 h w
+        ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
         x_noised = torch.cat([x_noised, x_cond], dim=0)
         t = torch.cat([t, -torch.ones_like(t)], dim=0)
-        noise_pred = torch.split(self.forward(x_noised, t, ray_o, ray_d), 2, dim=0)[0]
+        noise_pred = torch.chunk(self.forward(x_noised, t, ray_o, ray_d), 2, dim=0)[0]
         loss = torch.nn.functional.mse_loss(noise, noise_pred)
         return loss
 
@@ -748,9 +754,9 @@ class NVSDiffusion(Diffusion):
         focal = batch['focal'][:self.log_samples].to(self.device)
         ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
         with torch.no_grad():
-            images = self.sample(self.log_length - 1, cond, ray_o, ray_d.transpose(1, -1))
+            images = self.sample(self.log_length - 1, cond, ray_o, ray_d.movedim(-1, 1))
         # seq b 3 h w -> b seq 3 h w -> b seq h w 3
-        images = torch.stack(images, dim=0).transpose(0, 1).transpose(2, -1)
+        images = torch.stack(images, dim=0).transpose(0, 1).movedim(2, -1)
         b, seq, h, w, d = images.shape
         images = images.view(b, 4, seq // 4, h, w, d).transpose(2, 3).view(b, 4 * h, seq // 4 * w, d).cpu().numpy()
         galleries = [denormalize_image(images[idx]) for idx in range(b)]
@@ -758,5 +764,6 @@ class NVSDiffusion(Diffusion):
 
     def train_dataloader(self):
         self.dataset.reset_cache()
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
+                                           num_workers=2 * torch.cuda.device_count(),
+                                           pin_memory=True, drop_last=False, prefetch_factor=2)

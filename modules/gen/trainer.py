@@ -79,9 +79,9 @@ class Diffusion(pl.LightningModule):
     def train_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
                                            num_workers=2 * torch.cuda.device_count(),
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+                                           pin_memory=True, prefetch_factor=2)
 
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
                                            num_workers=2 * torch.cuda.device_count(),
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
+                                           pin_memory=True, prefetch_factor=2)

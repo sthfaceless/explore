@@ -79,7 +79,7 @@ class UNetDenoiser(torch.nn.Module):
                 h = block(torch.cat([h, outs.pop()], dim=1), h_time)
             h = upsample(h)
 
-        h = self.out_norm(nonlinear(h))
+        h = nonlinear(self.out_norm(h))
         out = self.out_mapper(h)
         return out
 

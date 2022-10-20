@@ -1,9 +1,9 @@
 import glob
 import os
 from random import sample, choices, randint
-from tqdm import tqdm
+
 import cv2
-from concurrent.futures.process import ProcessPoolExecutor
+from tqdm import tqdm
 
 from modules.common.util import *
 from modules.nerf.util import *
@@ -360,5 +360,5 @@ class PairViews(torch.utils.data.IterableDataset):
             'view_poses': self.poses[idx][pair[0]],
             'cond': views[pair[1]],
             'cond_poses': self.poses[idx][pair[1]],
-            'focal': self.focals[idx],
+            'focal': self.focals[idx].astype(np.float32),
         }

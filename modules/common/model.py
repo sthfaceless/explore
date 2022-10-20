@@ -252,7 +252,7 @@ class ConditionalNorm2D(torch.nn.Module):
 
     def forward(self, h, emb):
         emb = self.layer(nonlinear(self.norm(emb)))
-        gamma, beta = torch.split(emb, 2, dim=1)  # split in channel dimension (b c h w)
+        gamma, beta = torch.chunk(emb, 2, dim=1)  # split in channel dimension (b c h w)
         return h * (1 + gamma) + beta
 
 

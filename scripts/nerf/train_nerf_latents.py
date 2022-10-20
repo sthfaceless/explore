@@ -46,7 +46,7 @@ def get_parser():
     parser.add_argument("--nerf_hidden", default=128, type=int, help="Hidden dim shape")
     parser.add_argument("--nerf_blocks", default=4, type=int, help="NeRF residual blocks")
     parser.add_argument("--nerf_pe", default=12, type=int, help="L for positional encoding")
-    parser.add_argument("--nerf_spp", default=64, type=int, help="Samples per pixel in nerf")
+    parser.add_argument("--nerf_spp", default=128, type=int, help="Samples per pixel in nerf")
     parser.add_argument("--nerf_batch", default=3032, type=int, help="Rays in one batch for NeRF")
 
     # Meta settings
