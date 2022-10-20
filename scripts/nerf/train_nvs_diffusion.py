@@ -2,7 +2,7 @@ import os
 from argparse import ArgumentParser
 
 import clearml
-import pytorch_lightning
+import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.strategies import DDPStrategy
 
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     else:
         logger = None
 
-    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                                       filename=os.path.basename(args.out_model_name))
 
     dataset = PairViews(class_path=args.dataset, images_per_scene=args.images_batch, w=args.img_size, h=args.img_size,

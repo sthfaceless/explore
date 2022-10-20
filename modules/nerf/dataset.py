@@ -354,7 +354,7 @@ class PairViews(torch.utils.data.IterableDataset):
     def __next__(self):
         idx = randint(0, self.cache_size - 1)
         views = self.images[idx]
-        pair = sample(range(self.images_per_scene), k=2)
+        pair = sample(range(len(views)), k=2)
         return {
             'view': views[pair[0]],
             'view_poses': self.poses[idx][pair[0]],

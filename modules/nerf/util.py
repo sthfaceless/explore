@@ -53,9 +53,9 @@ def look_at_matrix(eye, target):
     side = torch.linalg.cross(fwd, torch.tensor([0, 1, 0]).type_as(eye).view(1, 3).repeat(len(fwd), 1))
     up = torch.linalg.cross(side, fwd)
     fwd, side, up = normalize_vector(fwd), normalize_vector(side), normalize_vector(up)
-    side = torch.cat([side, -torch.matmul(side.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1).squeeze(-1)], dim=-1)
+    side = torch.cat([side, -torch.matmul(side.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
     up = torch.cat([up, -torch.matmul(up.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
-    fwd = torch.cat([-fwd, -torch.matmul(fwd.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    fwd = torch.cat([-fwd, torch.matmul(fwd.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
     pad = torch.tensor([0, 0, 0, 1]).type_as(eye).view(1, 4).repeat(len(eye), 1)
     w2c = torch.stack([side, up, fwd, pad], dim=1)  # b 4 4
     c2w = torch.linalg.inv(w2c)[:, :3]

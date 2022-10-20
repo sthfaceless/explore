@@ -8,6 +8,7 @@ import torch.cuda
 from PIL import Image
 
 from modules.dd.model import *
+from modules.gen.trainer import Diffusion
 from modules.nerf.dataset import *
 from modules.nerf.model import *
 from modules.nerf.util import *
@@ -473,14 +474,18 @@ class NerfClassTrainer(pl.LightningModule):
                                            pin_memory=False, drop_last=False, prefetch_factor=1)
 
 
-class LatentDiffusion(pl.LightningModule):
+class LatentDiffusion(Diffusion):
 
-    def __init__(self, shape, unet_hiddens, dataset, decoder_path=None,
+    def __init__(self, shape, unet_hiddens, dataset=None, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=True,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
-        super(LatentDiffusion, self).__init__()
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
+        model = UNetDenoiser(shape=shape, steps=self.diffusion_steps, hidden_dims=unet_hiddens,
+                             attention_dim=attention_dim)
+        super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
+                                              learning_rate=learning_rate, min_lr_rate=min_lr_rate,
+                                              batch_size=batch_size, min_beta=min_beta, max_beta=max_beta)
 
         self.decoder_path = decoder_path
         self.is_latent = is_latent
@@ -488,44 +493,11 @@ class LatentDiffusion(pl.LightningModule):
         self.features_dim = features_dim
         self.features = self.shape[features_dim]
 
-        self.diffusion_steps = diffusion_steps
-        self.min_beta = min_beta
-        self.max_beta = max_beta
-
-        self.learning_rate = learning_rate
-        self.min_lr_rate = min_lr_rate
-        self.batch_size = batch_size
-
         self.log_samples = log_samples
         self.img_size = img_size
         self.focal = focal
 
-        self.register_buffer('betas', self.get_beta_schedule())
-        self.register_buffer('alphas', 1 - self.betas)
-        self.register_buffer('head_alphas', torch.cumprod(self.alphas, dim=-1))
-
         self.custom_logger = SimpleLogger(clearml)
-        self.dataset = dataset
-
-        self.model = UNetDenoiser(shape=shape, steps=self.diffusion_steps, hidden_dims=unet_hiddens,
-                                  attention_dim=attention_dim)
-
-    def get_beta_schedule(self):
-        return torch.linspace(start=self.min_beta, end=self.max_beta, steps=self.diffusion_steps)
-
-    def q_sample(self, x, t, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x)
-        t = t[:, None, None, None]  # b features h w
-        return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
-
-    def p_sample(self, x, t):
-        z = torch.randn_like(x)
-        z[t == 0] = 0
-        t = t[:, None, None, None]  # b features h w
-        x = (x - self.forward(x, t.view(-1)) * self.betas[t] / torch.sqrt(1 - self.head_alphas[t])) \
-            / torch.sqrt(self.alphas[t]) + self.betas[t] * z
-        return x
 
     def sample(self, n_samples):
         x = torch.randn((n_samples, *self.shape), device=self.device)
@@ -543,20 +515,6 @@ class LatentDiffusion(pl.LightningModule):
         latent_noised = self.q_sample(batch, t, noise)
         noise_pred = self.forward(latent_noised, t)
         loss = torch.nn.functional.mse_loss(noise, noise_pred)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-
-        loss = self.step(batch)
-        self.log('train_loss', loss, prog_bar=True)
-
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-
-        loss = self.step(batch)
-        self.log('val_loss', loss, prog_bar=True)
-
         return loss
 
     def on_validation_epoch_end(self):
@@ -580,24 +538,6 @@ class LatentDiffusion(pl.LightningModule):
 
         # log current lr
         self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
-                                                                            T_0=10, T_mult=1, last_epoch=-1,
-                                                                            eta_min=self.min_lr_rate
-                                                                                    * self.learning_rate)
-        return [optimizer], [lr_scheduler]
-
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=torch.cuda.device_count() * 2,
-                                           pin_memory=True, drop_last=False, prefetch_factor=2)
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=torch.cuda.device_count() * 2,
-                                           pin_memory=True, drop_last=False, prefetch_factor=2)
 
 
 class MultiVAETrainer(pl.LightningModule):
@@ -732,59 +672,27 @@ class MultiVAETrainer(pl.LightningModule):
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
 
-class NVSDiffusion(pl.LightningModule):
+class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
-        super(NVSDiffusion, self).__init__()
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
+        model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
+                              attention_dim=attention_dim, dropout=dropout)
+        super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
+                                           learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
+                                           min_beta=min_beta, max_beta=max_beta)
 
         self.shape = shape
         self.in_features, self.h, self.w = shape
         self.focal = focal
 
         self.classifier_free = classifier_free
-        self.diffusion_steps = diffusion_steps
-        self.min_beta = min_beta
-        self.max_beta = max_beta
-
-        self.learning_rate = learning_rate
-        self.min_lr_rate = min_lr_rate
-        self.batch_size = batch_size
 
         self.log_samples = log_samples
         self.log_length = log_length
-
-        self.register_buffer('betas', self.get_beta_schedule())
-        self.register_buffer('alphas', 1 - self.betas)
-        self.register_buffer('head_alphas', torch.cumprod(self.alphas, dim=-1))
-
         self.custom_logger = SimpleLogger(clearml)
-        self.dataset = dataset
-
-        self.model = XUNetDenoiser(shape=shape, steps=self.diffusion_steps, hidden_dims=xunet_hiddens,
-                                   attention_dim=attention_dim, dropout=dropout)
-
-    def get_beta_schedule(self, kind='linear'):
-        if kind == 'linear':
-            return torch.linspace(start=self.min_beta, end=self.max_beta, steps=self.diffusion_steps)
-        else:
-            raise NotImplementedError
-
-    def q_sample(self, x, t, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x)
-        t = t[:, None, None, None]  # b features h w
-        return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
-
-    def p_sample(self, x, t, ray_o, ray_d):
-        z = torch.randn_like(x)
-        z[t == 0] = 0
-        t = t[:, None, None, None]  # b features h w
-        x = (x - self.forward(x, t.view(-1), ray_o, ray_d) * self.betas[t] / torch.sqrt(1 - self.head_alphas[t])) \
-            / torch.sqrt(self.alphas[t]) + self.betas[t] * z
-        return x
 
     def sample(self, n_seq, cond, ray_o, ray_d, dist=4.0):
         n_samples = len(cond)
@@ -802,7 +710,7 @@ class NVSDiffusion(pl.LightningModule):
                                    dim=0)
                 _ray_d = torch.cat([ray_d.transpose(1, -1)] + [all_ray_d[idx][i].unsqueeze(0) for idx, i in
                                                                zip(ids, range(n_samples))], dim=0)
-                x = self.p_sample(_x, _t, _ray_o, _ray_d)
+                x = self.p_sample(_x, _t, ray_o=_ray_o, ray_d=_ray_d)
             all_cond.append(x)
             all_ray_o.append(ray_o)
             all_ray_d.append(ray_d)
@@ -832,20 +740,6 @@ class NVSDiffusion(pl.LightningModule):
         loss = torch.nn.functional.mse_loss(noise, noise_pred)
         return loss
 
-    def training_step(self, batch, batch_idx):
-
-        loss = self.step(batch)
-        self.log('train_loss', loss, prog_bar=True)
-
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-
-        loss = self.step(batch)
-        self.log('val_loss', loss, prog_bar=True)
-
-        return loss
-
     def on_validation_epoch_end(self):
         data_iter = iter(self.trainer.val_dataloaders[0])
         batch = next(data_iter)
@@ -862,19 +756,7 @@ class NVSDiffusion(pl.LightningModule):
         galleries = [denormalize_image(images[idx]) for idx in range(b)]
         self.custom_logger.log_images(galleries, 'sample', self.current_epoch)
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
-                                                                            T_0=10, T_mult=1, last_epoch=-1,
-                                                                            eta_min=self.min_lr_rate
-                                                                                    * self.learning_rate)
-        return [optimizer], [lr_scheduler]
-
     def train_dataloader(self):
         self.dataset.reset_cache()
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
-                                           pin_memory=False, drop_last=False, prefetch_factor=2)
-
-    def val_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=2,
                                            pin_memory=False, drop_last=False, prefetch_factor=2)
