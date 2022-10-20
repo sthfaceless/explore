@@ -4,6 +4,7 @@ import torch.nn
 
 from modules.common.model import *
 from modules.gen.model import *
+from modules.common.util import *
 from modules.nerf.util import render_gallery, positional_points_encoding
 
 
@@ -60,7 +61,7 @@ class Nerf(torch.nn.Module):
         self.pe_powers = pe_powers
         self.transmittance_weight = transmittance_weight
         self.transmittance_threshold = transmittance_threshold
-        input_dim = pe_powers * 3
+        input_dim = pe_powers * 6
 
         self.input_layer = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
@@ -121,7 +122,7 @@ class ConditionalNeRF(torch.nn.Module):
 
     def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12):
         super(ConditionalNeRF, self).__init__()
-        self.input_dim = pe_powers * 3 + latent_dim
+        self.input_dim = pe_powers * 6 + latent_dim
         self.blocks = torch.nn.ModuleList([])
         self.input_layer = torch.nn.Linear(self.input_dim, hidden_dim)
         for block_id in range(num_blocks):
@@ -152,7 +153,7 @@ class HiddenConditionalNeRF(torch.nn.Module):
 
     def __init__(self, latent_dim, hidden_dim=32, num_blocks=4, pe_powers=12):
         super(HiddenConditionalNeRF, self).__init__()
-        self.input_dim = pe_powers * 3 + latent_dim
+        self.input_dim = pe_powers * 6 + latent_dim
         self.blocks = torch.nn.ModuleList([])
         self.input_layer = torch.nn.Linear(self.input_dim, hidden_dim)
         for block_id in range(num_blocks):

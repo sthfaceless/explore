@@ -328,7 +328,9 @@ class NerfClassTrainer(pl.LightningModule):
         dists = sample_dists(near=near, far=far, spp=self.nerf_spp)
         mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
         positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
-
+        direction_features = get_positional_encoding(normalize_vector(-ray_d), self.nerf_pe * 3).unsqueeze(1)
+        positional_features = torch.cat([positional_features, direction_features.expand(positional_features.shape)],
+                                        dim=-1)
         total, spp, n_features = positional_features.shape
 
         # encode points to latent
@@ -758,7 +760,8 @@ class NVSDiffusion(Diffusion):
         # seq b 3 h w -> b seq 3 h w -> b seq h w 3
         images = torch.stack(images, dim=0).transpose(0, 1).movedim(2, -1)
         b, seq, h, w, d = images.shape
-        images = images.view(b, 4, seq // 4, h, w, d).transpose(2, 3).view(b, 4 * h, seq // 4 * w, d).cpu().numpy()
+        images = images.reshape(b, 4, seq // 4, h, w, d).transpose(2, 3).reshape(b, 4 * h, seq // 4 * w,
+                                                                                 d).cpu().numpy()
         galleries = [denormalize_image(images[idx]) for idx in range(b)]
         self.custom_logger.log_images(galleries, 'sample', self.current_epoch)
 

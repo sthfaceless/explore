@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-
+from modules.common.util import *
 
 def build_nerf_weights(layers, shapes, raw):
     weights = {}
@@ -220,6 +220,8 @@ def render_rays(model, ray_o, ray_d, near, far, base_radius, spp, pe_powers, sce
 
     else:
         x = conical_encoding(ray_o, ray_d, dists, pe_powers, base_radius)
+        direction_features = get_positional_encoding(normalize_vector(-ray_d), pe_powers * 3).unsqueeze(1)
+        x = torch.cat([x, direction_features.expand(x.shape)], dim=-1)
         b, spp, features = x.shape
         rgb, density = model.forward(x.view(b * spp, features))
         pixels, weights, trans = render_pixels(rgb.view(b, spp, 3), density.view(b, spp), dists)

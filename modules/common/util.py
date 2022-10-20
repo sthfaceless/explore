@@ -45,3 +45,26 @@ def normalize_image(image):
 
 def denormalize_image(image):
     return ((image + 1.0) / 2 * 255).astype(np.uint8)
+
+
+def get_timestep_encoding(t, dim, steps):
+    t = t.float()
+    powers = steps ** (2 / dim * torch.arange(dim // 2).type_as(t))
+    invert_powers = 1 / powers
+    x = torch.matmul(t.unsqueeze(-1), invert_powers.unsqueeze(0))
+    x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+    if dim % 2 == 1:
+        x = torch.nn.functional.pad(x, pad=(0, 1), value=0)
+    return x  # (b dim)
+
+
+def get_positional_encoding(x, features):
+    dim = x.shape[-1]
+    x = x.float()
+    powers = 2 ** torch.arange(features // (2 * dim)).type_as(x)
+    h = torch.matmul(x.unsqueeze(-1), powers.unsqueeze(0))
+    h = torch.cat([torch.sin(h), torch.cos(h)], dim=-1)
+    h = h.view(*h.shape[:-2], -1)  # dim, p -> dim * p
+    if h.shape[-1] < features:
+        h = torch.nn.functional.pad(h, pad=(0, features - h.shape[-1]), value=0)
+    return h
