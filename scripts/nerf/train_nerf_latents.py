@@ -20,7 +20,7 @@ def get_parser():
     parser.add_argument("--lr_embed", default=1e-3, type=float, help="Learning rate for embeddings")
     parser.add_argument("--initial_lr_ratio", default=0.5, type=float, help="Initial learning rate ratio")
     parser.add_argument("--min_lr_ratio", default=0.1, type=float, help="Minimal learning rate ratio")
-    parser.add_argument("--train_rate", default=0.8, type=float, help="Train data rate")
+    parser.add_argument("--transmittance_weight", default=0.1, type=float, help="Weight for transmittance reg")
     parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Epochs in training")
     parser.add_argument("--acc_grads", default=4, type=int,
@@ -89,6 +89,7 @@ if __name__ == "__main__":
                                                     os.path.basename(args.out_model_name) + '.parts'),
                              min_lr_ratio=args.min_lr_ratio, initial_lr_ratio=args.initial_lr_ratio,
                              val_samples=args.samples_epoch, image_size=args.img_size,
+                             transmittance_weight=args.transmittance_weight,
                              accumulate_gradients=args.acc_grads)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,

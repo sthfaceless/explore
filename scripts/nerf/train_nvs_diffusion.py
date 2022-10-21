@@ -70,7 +70,7 @@ if __name__ == "__main__":
                          classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
                          diffusion_steps=args.diffusion_steps, log_samples=args.samples_epoch, focal=args.focal,
                          log_length=args.samples_length, learning_rate=args.learning_rate)
-    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps,
+    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps//10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                       strategy=DDPStrategy(find_unused_parameters=False), precision=16,
                       accumulate_grad_batches=args.acc_grads,

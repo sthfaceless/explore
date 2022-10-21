@@ -113,7 +113,7 @@ class Attention2D(torch.nn.Module):
         b, c, h, w = q.shape
         q = q.reshape(b, c, h * w)  # b,c,hw
         k = k.reshape(b, c, h * w).transpose(-1, -2)  # b,hw,c
-        attn_weights = torch.nn.functional.softmax(torch.matmul(k, q) * (int(c) ** (-0.5)), dim=-1)  # b,hw,hw
+        attn_weights = torch.nn.functional.softmax(torch.matmul(k, q) * (int(c) ** (-0.5)), dim=-2)  # b,hw,hw
 
         # attend to values
         v = v.reshape(b, c, h * w)

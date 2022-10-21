@@ -309,7 +309,7 @@ class NerfClassTrainer(pl.LightningModule):
 
     def render_images(self, n_images):
 
-        idxs = torch.randint(low=0, high=self.latents.num_embeddings, size=(n_images,), device=self.device).long()
+        idxs = torch.tensor([sample(self.dataset.cache_keys, k=n_images)], device=self.device).long()
         latents = self.latents(idxs).view(n_images, *self.embed_shape)
         galleries = render_latent_nerf(latents=latents, model=self,
                                        w=self.image_size, h=self.image_size, focal=self.dataset.get_focal(),
@@ -344,27 +344,27 @@ class NerfClassTrainer(pl.LightningModule):
         coarse_pixels, coarse_weights, coarse_transmittance = render_pixels(coarse_rgb, coarse_density, dists)
 
         # adaptively find optimal distances based on coarse sampling
-        # dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
-        #                               weights=coarse_weights)
-        # mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
-        # positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
-        # total, spp, n_features = positional_features.shape
-        # nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
-        #     .repeat(1, total // n_objects, spp).view(total * spp)
-        # latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
-        #
-        # # render pixels
-        # fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
-        # fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
-        # fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
+        dists = adaptive_sample_dists(near=near, far=far, spp=self.nerf_spp, coarse_dists=dists,
+                                      weights=coarse_weights)
+        mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
+        positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
+        total, spp, n_features = positional_features.shape
+        nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
+            .repeat(1, total // n_objects, spp).view(total * spp)
+        latents = latent_encoding(mu.view(total * spp, 3), encodings, nums)
+
+        # render pixels
+        fine_rgb, fine_density = self.nerf.forward(positional_features.view(total * spp, n_features), latents)
+        fine_rgb, fine_density = fine_rgb.view(total, spp, 3), fine_density.view(total, spp)
+        fine_pixels, fine_weights, fine_transmittance = render_pixels(fine_rgb, fine_density, dists)
 
         return {
-            # 'coarse_pixels': coarse_pixels,
-            'fine_pixels': coarse_pixels,
-            # 'transmittance': torch.cat([coarse_transmittance, fine_transmittance], dim=-1),
-            'transmittance': coarse_transmittance,
-            # 'density': torch.cat([coarse_density, fine_density], dim=-1)
-            'density': coarse_density
+            'coarse_pixels': coarse_pixels,
+            'fine_pixels': fine_pixels,
+            'transmittance': torch.cat([coarse_transmittance, fine_transmittance], dim=-1),
+            # 'transmittance': coarse_transmittance,
+            'density': torch.cat([coarse_density, fine_density], dim=-1)
+            # 'density': coarse_density
         }
 
     def render(self, batch, train=True):
@@ -374,8 +374,9 @@ class NerfClassTrainer(pl.LightningModule):
         n_objects = len(idxs)
         latent = self.latents.forward(idxs)
         if train:
-            latent = latent + torch.randn_like(latent) * torch.std(latent.detach(), dim=-1,
-                                                                   keepdim=True, unbiased=True) * self.embed_noise
+            latents_std = torch.std(latent.detach(), dim=-1, keepdim=True, unbiased=True)
+            latents_std = torch.clip(latents_std, min=1 / latent.shape[1] ** (1 / 2), max=1.0)
+            latent = latent + torch.randn_like(latent) * latents_std * self.embed_noise
         latent = latent.view(n_objects, *self.embed_shape)
 
         near, far, base_radius = batch['near'].view(-1), batch['far'].view(-1), batch['base_radius'].view(-1)
@@ -386,8 +387,8 @@ class NerfClassTrainer(pl.LightningModule):
 
     def loss(self, out, gt_pixels):
         loss = {
-            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels),
-            # + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
+            'mse_loss': torch.nn.functional.mse_loss(out['fine_pixels'], gt_pixels)
+                        + torch.nn.functional.mse_loss(out['coarse_pixels'], gt_pixels) * self.coarse_weight,
             'mean_density': torch.mean(out['density']),
             'mean_transmittance': torch.mean(out['transmittance'])
         }
@@ -709,15 +710,11 @@ class NVSDiffusion(Diffusion):
             # b h w 3 -> b 3 h w
             ray_d = torch.movedim(ray_d, -1, 1)
             for t in reversed(range(self.diffusion_steps)):
-                ids = choices(range(len(cond_sequence)), k=n_samples)
-                x = torch.cat([x] + [cond_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
-                              dim=0)
+                idx = randint(0, len(cond_sequence) - 1)
+                x = torch.cat([x] + [cond_sequence[idx]], dim=0)
                 t = torch.cat([torch.ones(n_samples).type_as(x) * t, -torch.ones(n_samples).type_as(x)], dim=0).long()
-                _ray_o = torch.cat(
-                    [ray_o] + [ray_o_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))],
-                    dim=0)
-                _ray_d = torch.cat(
-                    [ray_d] + [ray_d_sequence[idx][i].unsqueeze(0) for idx, i in zip(ids, range(n_samples))], dim=0)
+                _ray_o = torch.cat([ray_o] + [ray_o_sequence[idx]], dim=0)
+                _ray_d = torch.cat([ray_d] + [ray_d_sequence[idx]], dim=0)
                 x = torch.chunk(self.p_sample(x, t, ray_o=_ray_o, ray_d=_ray_d), 2, dim=0)[0]
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)

@@ -28,7 +28,7 @@ class Diffusion(pl.LightningModule):
         if self.beta_schedule == 'linear':
             return torch.linspace(start=self.min_beta, end=self.max_beta, steps=self.diffusion_steps)
         elif self.beta_schedule == 'cos':
-            s = 1e-6
+            s = 0.008
             f = torch.cos(
                 (torch.linspace(start=0, end=1, steps=self.diffusion_steps + 1) + s) / (1 + s) * 3.1415926 / 2) ** 2
             head_alphas = f / f[0]
@@ -49,8 +49,8 @@ class Diffusion(pl.LightningModule):
         z[t == 0] = 0
         b, shape = len(t), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)
-        x = (x - self.forward(x, t.view(-1), **kwargs) * self.betas[t] / torch.sqrt(1 - self.head_alphas[t])) \
-            / torch.sqrt(self.alphas[t]) + self.betas[t] * z
+        x = (x - self.forward(x, t.view(-1), **kwargs).clamp(-1, 1) * self.betas[t]
+             / torch.sqrt(1 - self.head_alphas[t])) / torch.sqrt(self.alphas[t]) + self.betas[t] * z
         return x
 
     def step(self, batch):
