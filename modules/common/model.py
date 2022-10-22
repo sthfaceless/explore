@@ -1,5 +1,5 @@
-import torch
 from modules.common.util import *
+
 
 def nonlinear(x):
     return torch.nn.functional.silu(x)
@@ -7,6 +7,7 @@ def nonlinear(x):
 
 def norm(dims, num_groups=32):
     return torch.nn.GroupNorm(num_channels=dims, num_groups=min(dims, num_groups), eps=1e-6)
+
 
 class SinActivation(torch.nn.Module):
 
@@ -103,7 +104,8 @@ class Attention2D(torch.nn.Module):
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
-    def forward(self, _q, _v=None):
+    def forward(self, q, v=None):
+        _q, _v = q, v
         if _v is None:
             _v = _q
         q, v = self.norm_q(_q), self.norm_v(_v)
@@ -140,7 +142,8 @@ class MHAAttention2D(torch.nn.Module):
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
-    def forward(self, _q, _v=None):
+    def forward(self, q, v=None):
+        _q, _v = q, v
         if _v is None:
             _v = _q
         q, v = self.norm_q(_q), self.norm_v(_v)

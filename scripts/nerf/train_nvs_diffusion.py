@@ -20,8 +20,8 @@ def get_parser():
     parser.add_argument("--min_lr_rate", default=0.1, type=float, help="Minimal learning rate ratio")
     parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Epochs in training")
-    parser.add_argument("--batch_size", default=128, type=int, help="Batch size in training")
-    parser.add_argument("--acc_grads", default=1, type=int,
+    parser.add_argument("--batch_size", default=16, type=int, help="Batch size in training")
+    parser.add_argument("--acc_grads", default=4, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
     parser.add_argument("--images_batch", default=64, type=int, help="NeRF images in one batch")
     parser.add_argument("--cache_size", default=-1, type=int, help="NeRF scenes loaded in memory for epoch")
@@ -30,11 +30,11 @@ def get_parser():
     parser.add_argument("--img_size", default=128, type=int, help="Image size to train and render")
 
     # Model settings
-    parser.add_argument("--hidden_dims", default=[32, 32, 64, 64, 128, 128, 256, 256], nargs='+', type=int,
+    parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 512, 512, 1024, 1024], nargs='+', type=int,
                         help="Hidden dims for decoder")
-    parser.add_argument("--attention_dim", default=8, type=int, help="Width till the one attention would be done")
-    parser.add_argument("--diffusion_steps", default=256, type=int, help="Steps to do diffusion")
-    parser.add_argument("--dropout", default=0.0, type=float, help="Dropout regularization for model")
+    parser.add_argument("--attention_dim", default=128, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--diffusion_steps", default=1000, type=int, help="Steps to do diffusion")
+    parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
     parser.add_argument("--focal", default=1.5, type=float, help="Focal for rendering and dataset")
 
