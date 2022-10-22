@@ -348,6 +348,8 @@ class NerfClassTrainer(pl.LightningModule):
                                       weights=coarse_weights)
         mu, sigma = conical_gaussians(ray_o, ray_d, dists, radius=base_radius)
         positional_features = encode_gaussians(mu, sigma, pe_powers=self.nerf_pe)
+        positional_features = torch.cat([positional_features, direction_features.expand(positional_features.shape)],
+                                        dim=-1)
         total, spp, n_features = positional_features.shape
         nums = torch.arange(start=0, end=n_objects).type_as(latents).long().view(n_objects, 1, 1) \
             .repeat(1, total // n_objects, spp).view(total * spp)
