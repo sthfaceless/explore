@@ -488,7 +488,7 @@ class LatentDiffusion(Diffusion):
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=True,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
-        model = UNetDenoiser(shape=shape, steps=self.diffusion_steps, hidden_dims=unet_hiddens,
+        model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
                              attention_dim=attention_dim)
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,

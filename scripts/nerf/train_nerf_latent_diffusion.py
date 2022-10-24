@@ -28,14 +28,14 @@ def get_parser():
     parser.add_argument("--batch_size", default=256, type=int, help="Batch size")
     parser.add_argument("--diffusion_steps", default=1000, type=int, help="Steps in diffusion")
     parser.add_argument("--samples_epoch", default=10, type=int, help="Samples of generator in one epoch")
-    parser.add_argument("--latent_shape", default=(32, 16, 16), type=int, nargs='+', help="Shape of generated latents")
+    parser.add_argument("--latent_shape", default=(32, 8, 8), type=int, nargs='+', help="Shape of generated latents")
 
     # Model settings
     parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 512, 512, 1024, 1024], nargs='+', type=int,
                         help="Hidden dims for UNet")
-    parser.add_argument("--attention_dim", default=8, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
     parser.add_argument("--img_size", default=128, type=int, help="Image size for decoder rendering")
-    parser.add_argument("--focal", default=1.0, type=float, help="Focal for decoder rendering")
+    parser.add_argument("--focal", default=1.5, type=float, help="Focal for decoder rendering")
 
     # Meta settings
     parser.add_argument("--out_model_name", default="nerf_latent_sampler", help="Name of output model path")
