@@ -84,7 +84,7 @@ if __name__ == "__main__":
                                 diffusion_steps=args.diffusion_steps, learning_rate=args.learning_rate,
                                 log_samples=args.samples_epoch, clearml=logger, batch_size=args.batch_size)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 10,
-                          reload_dataloaders_every_n_epochs=1, enable_model_summary=True,
+                          enable_model_summary=True,
                           enable_progress_bar=True, enable_checkpointing=True,
                           accelerator='gpu', gpus=[0], callbacks=[checkpoint_callback], check_val_every_n_epoch=5)
         trainer.fit(model)

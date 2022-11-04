@@ -495,7 +495,7 @@ class XUNetDenoiser(torch.nn.Module):
         # Embed mapping
         self.emb_features = hidden_dims[0]
         self.embed_layers = torch.nn.ModuleList([
-            torch.nn.Conv2d(self.emb_features * 4, self.emb_features * 4, kernel_size=1),
+            torch.nn.Conv2d(self.emb_features, self.emb_features * 4, kernel_size=1),
             torch.nn.Conv2d(self.emb_features * 4, hidden_dims[0] * 2, kernel_size=1),
         ])
         self.embed_norm = norm(self.emb_features * 4, num_groups)
@@ -563,7 +563,8 @@ class XUNetDenoiser(torch.nn.Module):
         h_d = get_positional_encoding(ray_d.movedim(1, -1), self.emb_features).movedim(-1, 1)
         h_o = get_positional_encoding(ray_o, self.emb_features)[:, :, None, None] \
             .expand(b, self.emb_features, height, width)
-        emb = torch.cat([h_time, h_d, h_o, h_cond], dim=1)
+        # emb = torch.cat([h_time, h_d, h_o, h_cond], dim=1)
+        emb = h_time + h_d + h_o + h_cond
         emb = nonlinear(self.embed_norm(self.embed_layers[0](emb)))
         emb = self.embed_layers[1](emb)
         embs = [emb] + [downsample(emb) for downsample in self.emb_downsample_blocks]

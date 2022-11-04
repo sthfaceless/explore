@@ -49,7 +49,7 @@ class Diffusion(pl.LightningModule):
         z[t == 0] = 0
         b, shape = len(t), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)
-        x = (x - self.forward(x, t.view(-1), **kwargs).clamp(-1, 1) * self.betas[t]
+        x = (x - self.forward(x, t.view(-1), **kwargs) * self.betas[t]
              / torch.sqrt(1 - self.head_alphas[t])) / torch.sqrt(self.alphas[t]) + self.betas[t] * z
         return x
 

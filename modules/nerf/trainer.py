@@ -764,6 +764,10 @@ class NVSDiffusion(Diffusion):
         galleries = [denormalize_image(images[idx]) for idx in range(b)]
         self.custom_logger.log_images(galleries, 'sample', self.current_epoch)
 
+        del images, batch, galleries
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def train_dataloader(self):
         self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
