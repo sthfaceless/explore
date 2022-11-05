@@ -485,14 +485,16 @@ class LatentDiffusion(Diffusion):
 
     def __init__(self, shape, unet_hiddens, dataset=None, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
-                 min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, is_latent=True,
+                 min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, sample_steps=128,
+                 is_latent=True, kl_weight=1e-3,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
                              attention_dim=attention_dim)
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,
-                                              batch_size=batch_size, min_beta=min_beta, max_beta=max_beta)
+                                              sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,
+                                              max_beta=max_beta, kl_weight=kl_weight)
 
         self.decoder_path = decoder_path
         self.is_latent = is_latent
@@ -508,8 +510,10 @@ class LatentDiffusion(Diffusion):
 
     def sample(self, n_samples):
         x = torch.randn((n_samples, *self.shape), device=self.device)
-        for t in reversed(range(self.diffusion_steps)):
-            x = self.p_sample(x, torch.ones(n_samples).type_as(x).long() * t)
+        sample_steps = self.get_sample_steps()
+        for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
+            ones = torch.ones(n_samples).type_as(x).long()
+            x = self.p_sample_stride(x, ones * t_prev, ones * t_curr)
         return x
 
     def forward(self, x, t):
@@ -520,9 +524,10 @@ class LatentDiffusion(Diffusion):
         t = torch.randint(low=0, high=self.diffusion_steps - 1, size=[len(batch)]).type_as(batch).long()
 
         latent_noised = self.q_sample(batch, t, noise)
-        noise_pred = self.forward(latent_noised, t)
-        loss = torch.nn.functional.mse_loss(noise, noise_pred)
-        return loss
+        eps, var = torch.chunk(self.forward(latent_noised, t), 2, dim=1)
+        var = (var + 1) / 2
+
+        return self.get_losses(batch, latent_noised, t, noise, eps, var)
 
     def on_validation_epoch_end(self):
         with torch.no_grad():
@@ -683,13 +688,15 @@ class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
+                 sample_steps=128, kl_weight=1e-3,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
                               attention_dim=attention_dim, dropout=dropout)
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                            learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
-                                           min_beta=min_beta, max_beta=max_beta)
+                                           min_beta=min_beta, max_beta=max_beta, sample_steps=sample_steps,
+                                           kl_weight=kl_weight)
 
         self.shape = shape
         self.in_features, self.h, self.w = shape
@@ -741,11 +748,12 @@ class NVSDiffusion(Diffusion):
         # concat origin with conditional to run them simultaneously
         ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
         ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
-        x_noised = torch.cat([x_noised, x_cond], dim=0)
-        t = torch.cat([t, -torch.ones_like(t)], dim=0)
-        noise_pred = torch.chunk(self.forward(x_noised, t, ray_o, ray_d), 2, dim=0)[0]
-        loss = torch.nn.functional.mse_loss(noise, noise_pred)
-        return loss
+        x_noised_pair = torch.cat([x_noised, x_cond], dim=0)
+        t_pair = torch.cat([t, -torch.ones_like(t)], dim=0)
+        pred = torch.chunk(self.forward(x_noised_pair, t_pair, ray_o, ray_d), 2, dim=0)[0]
+        eps, var = torch.chunk(pred, 2, dim=1)
+        var = (var + 1) / 2
+        return self.get_losses(x, x_noised, t, noise, eps, var)
 
     def on_validation_epoch_end(self):
         data_iter = iter(self.trainer.val_dataloaders[0])

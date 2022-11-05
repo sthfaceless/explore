@@ -548,7 +548,7 @@ class XUNetDenoiser(torch.nn.Module):
 
         # Out latent prediction
         self.out_norm = norm(hidden_dims[0], num_groups=num_groups)
-        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features * 2, kernel_size=kernel_size, padding=kernel_size // 2)
 
     def forward(self, x, time, ray_o, ray_d):
         b, in_channels, height, width = x.shape

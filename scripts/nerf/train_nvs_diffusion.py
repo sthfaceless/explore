@@ -34,6 +34,7 @@ def get_parser():
                         help="Hidden dims for decoder")
     parser.add_argument("--attention_dim", default=128, type=int, help="Width till the one attention would be done")
     parser.add_argument("--diffusion_steps", default=1000, type=int, help="Steps to do diffusion")
+    parser.add_argument("--sample_steps", default=100, type=int, help="Steps for sampling")
     parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
     parser.add_argument("--focal", default=1.5, type=float, help="Focal for rendering and dataset")
@@ -61,7 +62,7 @@ if __name__ == "__main__":
         logger = None
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
-                                                                      filename=os.path.basename(args.out_model_name))
+                                                       filename=os.path.basename(args.out_model_name))
 
     dataset = PairViews(class_path=args.dataset, images_per_scene=args.images_batch, w=args.img_size, h=args.img_size,
                         cache_size=args.cache_size)
@@ -69,8 +70,9 @@ if __name__ == "__main__":
                          attention_dim=args.attention_dim, xunet_hiddens=args.hidden_dims, dropout=args.dropout,
                          classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
                          diffusion_steps=args.diffusion_steps, log_samples=args.samples_epoch, focal=args.focal,
-                         log_length=args.samples_length, learning_rate=args.learning_rate)
-    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps//10,
+                         log_length=args.samples_length, learning_rate=args.learning_rate,
+                         sample_steps=args.sample_steps)
+    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                       strategy=DDPStrategy(find_unused_parameters=False), precision=16,
                       accumulate_grad_batches=args.acc_grads,

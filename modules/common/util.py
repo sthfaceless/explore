@@ -68,3 +68,7 @@ def get_positional_encoding(x, features):
     if h.shape[-1] < features:
         h = torch.nn.functional.pad(h, pad=(0, features - h.shape[-1]), value=0)
     return h
+
+
+def approx_standard_normal_cdf(x):
+    return 0.5 * (1.0 + torch.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * torch.pow(x, 3))))

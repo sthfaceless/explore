@@ -20,13 +20,14 @@ def get_parser():
 
     # Training settings
     parser.add_argument("--learning_rate", default=5 * 1e-5, type=float, help="Learning rate for decoder and nerf")
-    parser.add_argument("--min_lr_rate", default=0.1, type=float, help="Learning rate for decoder and nerf")
+    parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--max_beta", default=0.0195, type=float, help="Max noise schedule")
     parser.add_argument("--min_beta", default=0.0015, type=float, help="Min noise schedule")
     parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Steps per epoch")
     parser.add_argument("--batch_size", default=256, type=int, help="Batch size")
     parser.add_argument("--diffusion_steps", default=1000, type=int, help="Steps in diffusion")
+    parser.add_argument("--sample_steps", default=100, type=int, help="Steps for sampling")
     parser.add_argument("--samples_epoch", default=10, type=int, help="Samples of generator in one epoch")
     parser.add_argument("--latent_shape", default=(32, 8, 8), type=int, nargs='+', help="Shape of generated latents")
 
@@ -34,7 +35,7 @@ def get_parser():
     parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 512, 512, 1024, 1024], nargs='+', type=int,
                         help="Hidden dims for UNet")
     parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
-    parser.add_argument("--img_size", default=128, type=int, help="Image size for decoder rendering")
+    parser.add_argument("--img_size", default=256, type=int, help="Image size for decoder rendering")
     parser.add_argument("--focal", default=1.5, type=float, help="Focal for decoder rendering")
 
     # Meta settings
@@ -78,6 +79,7 @@ if __name__ == "__main__":
                                                            save_on_train_epoch_end=True)
         dataset = NerfLatents(latents_checkpoint=args.latent_path, latent_shape=args.latent_shape)
         model = LatentDiffusion(shape=args.latent_shape, unet_hiddens=args.hidden_dims, dataset=dataset,
+                                sample_steps=args.sample_steps,
                                 decoder_path=args.latent_path, img_size=args.img_size, focal=args.focal,
                                 attention_dim=args.attention_dim, min_lr_rate=args.min_lr_rate, min_beta=args.min_beta,
                                 max_beta=args.max_beta, epochs=args.epochs, steps=args.steps,
