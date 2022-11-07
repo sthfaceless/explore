@@ -586,4 +586,7 @@ class XUNetDenoiser(torch.nn.Module):
 
         h = nonlinear(self.out_norm(h))
         out = self.out_mapper(h)
-        return out
+        eps, weight = torch.chunk(out, 2, dim=1)
+        weight = torch.sigmoid(weight)
+
+        return eps, weight

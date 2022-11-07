@@ -16,7 +16,7 @@ class KagglePokemons(torch.utils.data.IterableDataset):
     def __getitem__(self, idx):
         img = cv2.imread(os.path.join(self.root, self.image_paths[idx]))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (64, 64))
+        img = cv2.resize(img, (self.h, self.w))
         if random() < 0.5:
             img = img[:, ::-1]
         img = img.astype(np.float32) / (255.0 / 2) - 1.0

@@ -1,3 +1,5 @@
+import torch
+
 from modules.common.model import *
 from modules.gen.model import VAE
 
@@ -81,7 +83,11 @@ class UNetDenoiser(torch.nn.Module):
 
         h = nonlinear(self.out_norm(h))
         out = self.out_mapper(h)
-        return out
+
+        eps, weight = torch.chunk(out, 2, dim=1)
+        weight = torch.sigmoid(weight)
+
+        return eps, weight
 
 
 class VAEEncoder2D(torch.nn.Module):

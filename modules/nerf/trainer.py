@@ -524,10 +524,9 @@ class LatentDiffusion(Diffusion):
         t = torch.randint(low=0, high=self.diffusion_steps - 1, size=[len(batch)]).type_as(batch).long()
 
         latent_noised = self.q_sample(batch, t, noise)
-        eps, var = torch.chunk(self.forward(latent_noised, t), 2, dim=1)
-        var = (var + 1) / 2
+        eps, var_weight = self.forward(latent_noised, t)
 
-        return self.get_losses(batch, latent_noised, t, noise, eps, var)
+        return self.get_losses(batch, latent_noised, t, noise, eps, var_weight)
 
     def on_validation_epoch_end(self):
         with torch.no_grad():
@@ -750,10 +749,9 @@ class NVSDiffusion(Diffusion):
         ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
         x_noised_pair = torch.cat([x_noised, x_cond], dim=0)
         t_pair = torch.cat([t, -torch.ones_like(t)], dim=0)
-        pred = torch.chunk(self.forward(x_noised_pair, t_pair, ray_o, ray_d), 2, dim=0)[0]
-        eps, var = torch.chunk(pred, 2, dim=1)
-        var = (var + 1) / 2
-        return self.get_losses(x, x_noised, t, noise, eps, var)
+        eps, var_weight = self.forward(x_noised_pair, t_pair, ray_o, ray_d)
+        eps, var_weight = torch.chunk(eps, 2, dim=0)[0], torch.chunk(var_weight, 2, dim=0)
+        return self.get_losses(x, x_noised, t, noise, eps, var_weight)
 
     def on_validation_epoch_end(self):
         data_iter = iter(self.trainer.val_dataloaders[0])

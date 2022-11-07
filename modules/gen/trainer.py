@@ -26,13 +26,22 @@ class Diffusion(pl.LightningModule):
         self.beta_schedule = beta_schedule
 
         self.register_buffer('betas', self.get_beta_schedule())
+        self.register_buffer('log_betas', torch.log(self.betas.clamp(min=1e-8)))
         self.register_buffer('alphas', 1 - self.betas)
+        self.register_buffer('sqrt_alphas', torch.sqrt(self.alphas))
         self.register_buffer('head_alphas', torch.cumprod(self.alphas, dim=-1))
         self.register_buffer('head_alphas_pred', torch.cat([torch.ones(1, dtype=torch.float32), self.head_alphas[:-1]]))
         self.register_buffer('betas_tilde', self.betas *
                              (1 - torch.cat([torch.ones(1, dtype=torch.float32), self.head_alphas[:-1]])) /
                              (1 - self.head_alphas))
         self.register_buffer('betas_tilde_aligned', torch.cat([self.betas_tilde[1:2], self.betas_tilde[1:]]))
+        self.register_buffer('log_betas_tilde_aligned', torch.log(self.betas_tilde_aligned.clamp(min=1e-8)))
+        # precompute coefs for speed up training
+        self.register_buffer('q_posterior_x0_coef',
+                             torch.sqrt(self.head_alphas_pred) * self.betas / (1 - self.head_alphas))
+        self.register_buffer('q_posterior_xt_coef',
+                             torch.sqrt(self.alphas) * (1 - self.head_alphas_pred) / (1 - self.head_alphas))
+        self.register_buffer('p_posterior_eps_coef', self.betas / torch.sqrt(1 - self.head_alphas))
 
     def kl_loss(self, mean1, logvar1, mean2, logvar2):
         kl_tensor = 0.5 * (-1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2) + (mean1 - mean2) ** 2
@@ -48,7 +57,7 @@ class Diffusion(pl.LightningModule):
         log_probs_tensor = torch.where(x < -0.999, torch.log(upper_bound.clamp(min=1e-8)),
                                        torch.where(x > 0.999, torch.log((1 - lower_bound).clamp(min=1e-8)),
                                                    torch.log((upper_bound - lower_bound).clamp(min=1e-8))))
-        return - torch.sum(log_probs_tensor, dim=list(range(1, len(log_probs_tensor.shape))))
+        return - torch.mean(log_probs_tensor, dim=list(range(1, len(log_probs_tensor.shape))))
 
     def get_beta_schedule(self):
         if self.beta_schedule == 'linear':
@@ -72,9 +81,9 @@ class Diffusion(pl.LightningModule):
 
     def get_sample_steps(self):
         sample_steps = [-1, 0]
-        for t in range(self.sample_steps):
-            sample_steps.append(int((t + 1) / self.sample_steps * (self.diffusion_steps - 1)))
-        return reversed(sample_steps)
+        for t in range(self.sample_steps - 1):
+            sample_steps.append(int((t + 1) / (self.sample_steps - 1) * (self.diffusion_steps - 1)))
+        return list(reversed(sample_steps))
 
     def p_sample_stride(self, x, prev_t, curr_t, **kwargs):
 
@@ -84,59 +93,63 @@ class Diffusion(pl.LightningModule):
 
         # make noise for all except last step
         z = torch.randn_like(x)
-        z[curr_t == 0] = 0
+        z[curr_t.expand(z.shape) == 0] = 0
 
         # predict epsilon and variance (b 2*c h w)
-        eps, var = torch.chunk(self.forward(x, curr_t.view(-1), **kwargs), 2, dim=1)
-        var = (var + 1) / 2  # [-1; 1] -> [0; 1]
+        eps, var_weight = self.forward(x, curr_t.view(-1), **kwargs)
 
         # recalculate beta schedule with stride
-        prev_head_alphas = torch.where(prev_t >= 0, self.head_alphas[prev_t], 1)
+        prev_head_alphas = torch.where(prev_t >= 0, self.head_alphas[prev_t], torch.ones_like(self.head_alphas[prev_t]))
         head_alphas = self.head_alphas[curr_t]
-        betas = torch.clamp(1 - head_alphas / prev_head_alphas, min=0, max=0.999)
+        betas = torch.clamp(1 - head_alphas / prev_head_alphas, min=1e-8, max=0.999)
         alphas = 1 - betas
-        betas_tilde = torch.clamp((1 - prev_head_alphas) / (1 - head_alphas) * betas, min=0, max=0.999)
-        betas_tilde = torch.cat([betas_tilde[:, 1:2], betas_tilde[:, 1:]], dim=1)
+        # fix the problem when betas_tilde with t = 0 is zero
+        prev_head_alphas_aligned = torch.where(prev_t >= 0, self.head_alphas[prev_t],
+                                               self.head_alphas[torch.zeros_like(prev_t)])
+        head_alphas_aligned = torch.where(prev_t >= 0, self.head_alphas[curr_t],
+                                          self.head_alphas[torch.ones_like(curr_t)])
+        betas_aligned = torch.clamp(1 - head_alphas_aligned / prev_head_alphas_aligned, min=1e-8, max=0.999)
+        betas_tilde = torch.clamp((1 - prev_head_alphas_aligned) / (1 - head_alphas_aligned) * betas_aligned,
+                                  min=1e-8, max=0.999)
 
         mean = (x - eps * betas / torch.sqrt(1 - head_alphas)) / torch.sqrt(alphas)
-        logvar = torch.log(torch.clamp(betas, min=1e-8)) * var + torch.log(torch.clamp(betas_tilde, min=1e-8)) * (
-                1 - var)
+        logvar = torch.log(betas) * var_weight + torch.log(betas_tilde) * (1 - var_weight)
 
         x = mean + torch.exp(logvar / 2) * z
         return x
 
     def p_sample(self, x, t, **kwargs):
-        # z = torch.randn_like(x)
-        # z[t == 0] = 0
-        # b, shape = len(t), [1 for _ in x.shape[1:]]
-        # t = t.view(b, *shape)
-        # x = (x - self.forward(x, t.view(-1), **kwargs) * self.betas[t]
-        #      / torch.sqrt(1 - self.head_alphas[t])) / torch.sqrt(self.alphas[t]) + torch.sqrt(self.betas[t]) * z
-        # return x
-        return self.p_sample_stride(x, t - 1, t, **kwargs)
+        z = torch.randn_like(x)
+        z[t == 0] = 0
+        b, shape = len(t), [1 for _ in x.shape[1:]]
+        t = t.view(b, *shape)
+        eps, var_weight = self.forward(x, t.view(-1), **kwargs)
+
+        mean = (x - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
+        logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
+        x = mean + torch.exp(logvar / 2) * z
+        return x
 
     def q_posterior_mean_variance(self, x, x_noised, t):
         b, shape = len(x), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)
-        mean = (x * (torch.sqrt(self.head_alphas_pred[t]) * self.betas[t]) / (1 - self.head_alphas)
-                + x_noised * (torch.sqrt(self.alphas[t]) * (1 - self.head_alphas_pred[t]) / (1 - self.head_alphas[t])))
-        logvar = torch.log(self.betas_tilde_aligned[t].clamp(min=1e-8))
+        mean = x * self.q_posterior_x0_coef[t] + x_noised * self.q_posterior_xt_coef[t]
+        logvar = self.log_betas_tilde_aligned[t]
         return mean, logvar
 
-    def p_posterior_mean_variance(self, x_noised, t, eps, var):
+    def p_posterior_mean_variance(self, x_noised, t, eps, var_weight):
         b, shape = len(x_noised), [1 for _ in x_noised.shape[1:]]
         t = t.view(b, *shape)
-        mean = (x_noised - eps * self.betas[t] / torch.sqrt(1 - self.head_alphas[t])) / torch.sqrt(self.alphas[t])
-        logvar = torch.log(self.betas[t].clamp(min=1e-8)) * var + \
-                 torch.log(self.betas_tilde_aligned[t].clamp(min=1e-8)) * (1 - var)
+        mean = (x_noised - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
+        logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
         return mean, logvar
 
-    def get_losses(self, x, x_noised, t, noise, eps, var):
+    def get_losses(self, x, x_noised, t, noise, eps, var_weight):
 
         mse_loss = torch.nn.functional.mse_loss(noise, eps)
 
         true_mean, true_logvar = self.q_posterior_mean_variance(x, x_noised, t)
-        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, var)
+        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, var_weight)
 
         b, shape = len(t), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)
