@@ -1,0 +1,13 @@
+[Unit]
+Description=Downloads pdbs from ESMFold api
+Wants=network-online.target
+
+StartLimitBurst=5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+ExecStart=/bin/bash /home/sthfaceless/request_pdbs.sh
+
+[Install]
+WantedBy=multi-user.target
