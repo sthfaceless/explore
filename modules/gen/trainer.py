@@ -184,7 +184,7 @@ class Diffusion(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
-                                                                            T_0=10, T_mult=1, last_epoch=-1,
+                                                                            T_0=5, T_mult=1, last_epoch=-1,
                                                                             eta_min=self.min_lr_rate
                                                                                     * self.learning_rate)
         return [optimizer], [lr_scheduler]
