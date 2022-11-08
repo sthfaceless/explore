@@ -297,9 +297,9 @@ class NerfClassTrainer(pl.LightningModule):
         self.dataset = dataset
         self.custom_logger = SimpleLogger(clearml)
 
-        self.latents = torch.nn.Embedding(num_embeddings=self.n_objects, embedding_dim=self.embed_dim)
-        torch.nn.init.normal_(self.latents.weight, 0, 1 / self.latents.embedding_dim ** (1 / 2))
-        self.register_buffer('latent_std', torch.ones(self.embed_dim) / self.latents.embedding_dim ** (1 / 2))
+        self.latents = [torch.nn.Embedding(num_embeddings=self.n_objects, embedding_dim=self.embed_dim)]
+        torch.nn.init.normal_(self.latents[0].weight, 0, 1 / self.embed_dim ** (1 / 2))
+        self.register_buffer('latent_std', torch.ones(self.embed_dim) / self.embed_dim ** (1 / 2))
 
         self.decoder = NerfLatentDecoder(latent_shape=self.embed_shape, out_dim=positional_dim * 3,
                                          attention_dim=attention_dim, hidden_dims=decoder_hiddens,
@@ -309,10 +309,16 @@ class NerfClassTrainer(pl.LightningModule):
 
         self.automatic_optimization = False
 
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['latents'] = self.latents
+
+    def on_load_checkpoint(self, checkpoint):
+        self.latents = checkpoint['latents']
+
     def render_images(self, n_images):
 
         idxs = torch.tensor([sample(self.dataset.cache_keys, k=n_images)], device=self.device).long()
-        latents = self.latents(idxs).view(n_images, *self.embed_shape)
+        latents = self.latents[0](idxs.cpu()).view(n_images, *self.embed_shape).to(self.device)
         galleries = render_latent_nerf(latents=latents, model=self,
                                        w=self.image_size, h=self.image_size, focal=self.dataset.get_focal(),
                                        camera_distance=self.dataset.get_camera_distance(),
@@ -376,7 +382,7 @@ class NerfClassTrainer(pl.LightningModule):
         # take embedding for scene and decode it to positional features
         idxs = batch['id'].view(-1)
         n_objects = len(idxs)
-        latent = self.latents.forward(idxs)
+        latent = self.latents[0].forward(idxs.cpu()).type_as(batch['poses'])
         if train:
             latent = latent + torch.randn_like(latent) * self.latent_std.unsqueeze(0) * self.embed_noise
         latent = latent.view(n_objects, *self.embed_shape)
@@ -431,8 +437,10 @@ class NerfClassTrainer(pl.LightningModule):
 
     def on_train_epoch_start(self):
         if self.current_epoch <= self.transmittance_warmup:
-            current_std = torch.std(self.latents.weight.detach(), dim=0)
-            self.latent_std = torch.maximum(current_std, torch.ones_like(current_std) / self.embed_dim ** (1 / 2))
+            current_std = torch.std(self.latents[0].weight.detach(), dim=0)
+            self.latent_std = torch.maximum(current_std,
+                                            torch.ones_like(current_std) / self.embed_dim ** (1 / 2)).type_as(
+                self.latent_std)
             self.transmittance_reg = self.current_epoch / self.transmittance_warmup \
                                      * (self.transmittance_max - self.transmittance_min) + self.transmittance_min
 

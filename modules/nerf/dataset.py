@@ -5,7 +5,6 @@ from random import sample, choices, randint
 import cv2
 from tqdm import tqdm
 
-from modules.common.util import *
 from modules.nerf.util import *
 
 
@@ -118,17 +117,21 @@ class NerfScene(torch.utils.data.IterableDataset):
 
 class NerfClass(torch.utils.data.IterableDataset):
 
-    def __init__(self, class_path, batch_rays, images_per_scene=-1, batch_objects=1, cache_size=-1,
+    def __init__(self, root_path, batch_rays, images_per_scene=-1, batch_objects=1, cache_size=-1,
                  transforms='transforms.json', images_dir='images', w=128, h=128):
         self.batch_rays = batch_rays
         self.batch_objects = batch_objects
         self.w = w
         self.h = h
-        self.class_path = class_path
+        self.root_path = root_path
         self.transforms = transforms
         self.images_dir = images_dir
         self.images_per_scene = images_per_scene
-        self.items = [item for item in os.listdir(class_path) if os.path.isdir(os.path.join(class_path, item))]
+        self.items = []
+        class_paths = [os.path.join(root_path, item) for item in os.listdir(root_path) if item[0] == '0']
+        for class_path in class_paths:
+            self.items.extend([os.path.join(class_path, item) for item in os.listdir(class_path)
+                               if os.path.isdir(os.path.join(class_path, item))])
 
         if cache_size == -1:
             self.cache_size = len(self.items)
@@ -139,7 +142,7 @@ class NerfClass(torch.utils.data.IterableDataset):
         self.reset_cache()
 
     def load_nerf_scene(self, object_id):
-        return NerfScene(os.path.join(self.class_path, self.items[object_id]), self.batch_rays,
+        return NerfScene(self.items[object_id], self.batch_rays,
                          transforms=self.transforms, w=self.w, h=self.h,
                          images_dir=self.images_dir, n_images=self.images_per_scene)
 
