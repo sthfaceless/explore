@@ -297,7 +297,7 @@ class NerfClassTrainer(pl.LightningModule):
         self.custom_logger = SimpleLogger(clearml)
 
         self.latents = torch.nn.Embedding(num_embeddings=self.n_objects, embedding_dim=self.embed_dim)
-        torch.nn.init.zeros_(self.latents.weight)
+        torch.nn.init.normal(self.latents.weight, 0, 1 / self.latents.embedding_dim ** (1 / 2))
         self.register_buffer('latent_std', torch.ones(self.embed_dim) / self.latents.embedding_dim ** (1 / 2))
 
         self.decoder = NerfLatentDecoder(latent_shape=self.embed_shape, out_dim=positional_dim * 3,
