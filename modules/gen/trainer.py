@@ -8,7 +8,7 @@ class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
                  diffusion_steps=1000, sample_steps=128,
-                 min_beta=1e-2, max_beta=1e-4, beta_schedule='cos', kl_weight=1e-3):
+                 min_beta=1e-2, max_beta=1e-4, beta_schedule='cos', kl_weight=1e-3, ll_delta=1/255):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
@@ -18,6 +18,7 @@ class Diffusion(pl.LightningModule):
         self.min_lr_rate = min_lr_rate
         self.batch_size = batch_size
         self.kl_weight = kl_weight
+        self.ll_delta = ll_delta
 
         self.min_beta = min_beta
         self.max_beta = max_beta
@@ -51,7 +52,7 @@ class Diffusion(pl.LightningModule):
 
     def ll_loss(self, x, mean, logvar):
         x_std = (x - mean) * torch.exp(-logvar / 2)
-        delta = 1 / 255
+        delta = self.ll_delta
         upper_bound = approx_standard_normal_cdf(x_std + delta)
         lower_bound = approx_standard_normal_cdf(x_std - delta)
         log_probs_tensor = torch.where(x < -0.999, torch.log(upper_bound.clamp(min=1e-8)),

@@ -1,5 +1,6 @@
 import gc
 import os.path
+from functools import reduce
 from random import shuffle
 from time import time
 
@@ -492,10 +493,11 @@ class LatentDiffusion(Diffusion):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
                              attention_dim=attention_dim)
+        ll_delta = 1 / (2 * reduce((lambda x, y: x * y), shape) ** (1 / 2)) if is_latent else 1 / 255
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,
                                               sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,
-                                              max_beta=max_beta, kl_weight=kl_weight)
+                                              max_beta=max_beta, kl_weight=kl_weight, ll_delta=ll_delta)
 
         self.decoder_path = decoder_path
         self.is_latent = is_latent
