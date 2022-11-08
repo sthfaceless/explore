@@ -468,7 +468,7 @@ class NerfClassTrainer(pl.LightningModule):
     def configure_optimizers(self):
         opt_model = torch.optim.Adam(params=list(self.decoder.parameters()) + list(self.nerf.parameters()),
                                      lr=self.learning_rate, betas=(0.5, 0.9))
-        opt_embed = torch.optim.Adam(params=self.latents.parameters(), lr=self.lr_embed, betas=(0.5, 0.9))
+        opt_embed = torch.optim.Adam(params=self.latents[0].parameters(), lr=self.lr_embed, betas=(0.5, 0.9))
         scheduler_model = torch.optim.lr_scheduler.OneCycleLR(opt_model, max_lr=self.learning_rate,
                                                               pct_start=self.pct_start, div_factor=self.div_factor,
                                                               final_div_factor=self.final_div_factor,
