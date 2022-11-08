@@ -191,7 +191,7 @@ class ResBlock2d(torch.nn.Module):
 
 class TimestepResBlock2D(torch.nn.Module):
 
-    def __init__(self, hidden_dim, timestep_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False):
+    def __init__(self, hidden_dim, timestep_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, num_heads=4):
         super(TimestepResBlock2D, self).__init__()
 
         self.time_layer = torch.nn.Linear(timestep_dim, hidden_dim)
@@ -210,7 +210,7 @@ class TimestepResBlock2D(torch.nn.Module):
 
         self.need_attn = attn
         if self.need_attn:
-            self.attn = Attention2D(hidden_dim, num_groups=num_groups)
+            self.attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads)
 
     def forward(self, input, time):
         h = self.layer_1(nonlinear(self.ln_1(input)))
@@ -236,7 +236,8 @@ class ConditionalNorm2D(torch.nn.Module):
 
 
 class ConditionalNormResBlock2D(torch.nn.Module):
-    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, dropout=0.0):
+    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, dropout=0.0,
+                 num_heads=4):
         super(ConditionalNormResBlock2D, self).__init__()
 
         if in_dim == -1:
@@ -255,7 +256,7 @@ class ConditionalNormResBlock2D(torch.nn.Module):
 
         self.need_attn = attn
         if self.need_attn:
-            self.attn = Attention2D(hidden_dim, num_groups=num_groups)
+            self.attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads)
 
     def forward(self, x, emb):
         h = self.layer_1(nonlinear(self.ln_1(x)))

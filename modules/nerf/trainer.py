@@ -513,10 +513,14 @@ class LatentDiffusion(Diffusion):
 
     def sample(self, n_samples):
         x = torch.randn((n_samples, *self.shape), device=self.device)
+        # if not self.is_latent:
+        #     x = torch.clamp(x, min=-1.0, max=1.0)
         sample_steps = self.get_sample_steps()
         for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
             ones = torch.ones(n_samples).type_as(x).long()
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr)
+            # if not self.is_latent:
+            #     x = torch.clamp(x, min=-1.0, max=1.0)
         return x
 
     def forward(self, x, t):
@@ -690,11 +694,11 @@ class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
-                 sample_steps=128, kl_weight=1e-3,
+                 sample_steps=128, kl_weight=1e-3, num_heads=4,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
-                              attention_dim=attention_dim, dropout=dropout)
+                              attention_dim=attention_dim, dropout=dropout, num_heads=num_heads)
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                            learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
                                            min_beta=min_beta, max_beta=max_beta, sample_steps=sample_steps,
@@ -715,25 +719,29 @@ class NVSDiffusion(Diffusion):
         cond_sequence, ray_o_sequence, ray_d_sequence = [cond], [ray_o], [ray_d]
         for item_id in range(n_seq):
             x = torch.randn((n_samples, *self.shape)).type_as(cond)
+            # x = torch.clamp(x, min=-1.0, max=1.0)
             poses = get_random_poses(torch.ones(n_samples).type_as(cond) * dist)
             ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
                                            focal=torch.ones(n_samples).type_as(cond) * self.focal, poses=poses)
             # b h w 3 -> b 3 h w
             ray_d = torch.movedim(ray_d, -1, 1)
-            for t in reversed(range(self.diffusion_steps)):
+            sample_steps = self.get_sample_steps()
+            for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
                 idx = randint(0, len(cond_sequence) - 1)
-                x = torch.cat([x] + [cond_sequence[idx]], dim=0)
-                t = torch.cat([torch.ones(n_samples).type_as(x) * t, -torch.ones(n_samples).type_as(x)], dim=0).long()
                 _ray_o = torch.cat([ray_o] + [ray_o_sequence[idx]], dim=0)
                 _ray_d = torch.cat([ray_d] + [ray_d_sequence[idx]], dim=0)
-                x = torch.chunk(self.p_sample(x, t, ray_o=_ray_o, ray_d=_ray_d), 2, dim=0)[0]
+
+                ones = torch.ones(n_samples).type_as(x).long()
+                x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, x_cond=cond_sequence[idx],
+                                         time_cond=-ones, ray_o=_ray_o, ray_d=_ray_d)
+                # x = torch.clamp(x, min=-1.0, max=1.0)
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)
             ray_d_sequence.append(ray_d)
         return cond_sequence
 
-    def forward(self, x, t, ray_o, ray_d):
-        return self.model(x, t, ray_o, ray_d)
+    def forward(self, x, t, x_cond, time_cond, ray_o, ray_d):
+        return self.model(x, t, x_cond, time_cond, ray_o, ray_d)
 
     def step(self, batch):
         # extract origin view
@@ -747,13 +755,11 @@ class NVSDiffusion(Diffusion):
         # extract positional information
         origin_ray_o, origin_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['view_poses'])
         cond_ray_o, cond_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['cond_poses'])
-        # concat origin with conditional to run them simultaneously
+        # concat origin with conditional to use them simultaneously
         ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
         ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
-        x_noised_pair = torch.cat([x_noised, x_cond], dim=0)
-        t_pair = torch.cat([t, -torch.ones_like(t)], dim=0)
-        eps, var_weight = self.forward(x_noised_pair, t_pair, ray_o, ray_d)
-        eps, var_weight = torch.chunk(eps, 2, dim=0)[0], torch.chunk(var_weight, 2, dim=0)
+        eps, var_weight = self.forward(x_noised, t, x_cond=x_cond, time_cond=-torch.ones_like(t), ray_o=ray_o,
+                                       ray_d=ray_d)
         return self.get_losses(x, x_noised, t, noise, eps, var_weight)
 
     def on_validation_epoch_end(self):

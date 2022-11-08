@@ -72,3 +72,14 @@ def get_positional_encoding(x, features):
 
 def approx_standard_normal_cdf(x):
     return 0.5 * (1.0 + torch.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * torch.pow(x, 3))))
+
+
+def log_tensor_size(x, name):
+    size_bytes = x.element_size() * x.nelement()
+    size_mb = size_bytes / 1e6
+    print(f'{name} size --- {size_mb:.2f}mb')
+
+
+def log_tensors_size(tensors, name):
+    for idx, tensor in enumerate(tensors):
+        log_tensor_size(tensor, f'{name}_{idx}')

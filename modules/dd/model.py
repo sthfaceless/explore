@@ -1,12 +1,10 @@
-import torch
-
 from modules.common.model import *
 from modules.gen.model import VAE
 
 
 class UNetDenoiser(torch.nn.Module):
 
-    def __init__(self, shape, steps, kernel_size=3, hidden_dims=(16, 32, 64), attention_dim=32,
+    def __init__(self, shape, steps, kernel_size=3, hidden_dims=(16, 32, 64), attention_dim=32, num_heads=4,
                  residual_scaling=1 / 2 ** (1 / 2), num_groups=32):
         super(UNetDenoiser, self).__init__()
         features, h, w = shape
@@ -31,15 +29,17 @@ class UNetDenoiser(torch.nn.Module):
                 self.encoder_layers.append(torch.nn.ModuleList([]))
                 current_resolution /= 2
             block = TimestepResBlock2D(hidden_dim=dim, timestep_dim=self.timestep_features, num_groups=num_groups,
-                                       attn=current_resolution <= attention_dim)
+                                       attn=current_resolution <= attention_dim, num_heads=num_heads)
             self.encoder_layers[-1].append(block)
         self.downsample_blocks.append(torch.nn.Identity())
 
         self.mid_layers = torch.nn.Module()
         self.mid_layers.block_1 = TimestepResBlock2D(hidden_dim=hidden_dims[-1],
-                                                     timestep_dim=self.timestep_features, num_groups=num_groups)
+                                                     timestep_dim=self.timestep_features, num_groups=num_groups,
+                                                     num_heads=num_heads)
         self.mid_layers.block_2 = TimestepResBlock2D(hidden_dim=hidden_dims[-1],
-                                                     timestep_dim=self.timestep_features, num_groups=num_groups)
+                                                     timestep_dim=self.timestep_features, num_groups=num_groups,
+                                                     num_heads=num_heads)
 
         inverse_dims = hidden_dims[::-1]
         self.decoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
@@ -50,13 +50,14 @@ class UNetDenoiser(torch.nn.Module):
                 self.decoder_layers.append(torch.nn.ModuleList([]))
                 current_resolution *= 2
             block = TimestepResBlock2D(hidden_dim=dim, in_dim=2 * dim, attn=current_resolution <= attention_dim,
-                                       timestep_dim=self.timestep_features, num_groups=num_groups)
+                                       timestep_dim=self.timestep_features, num_groups=num_groups, num_heads=num_heads)
             self.decoder_layers[-1].append(block)
         self.upsample_blocks.append(torch.nn.Identity())
 
         # Out latent prediction
         self.out_norm = norm(hidden_dims[0], num_groups=num_groups)
-        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features * 2, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features * 2, kernel_size=kernel_size,
+                                          padding=kernel_size // 2)
 
     def forward(self, input, time):
         # Prepare input for mapping
