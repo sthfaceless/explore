@@ -298,6 +298,7 @@ class NerfClassTrainer(pl.LightningModule):
 
         self.latents = torch.nn.Embedding(num_embeddings=self.n_objects, embedding_dim=self.embed_dim)
         torch.nn.init.zeros_(self.latents.weight)
+        self.register_buffer('latent_std', torch.ones(self.embed_dim) / self.latents.embedding_dim ** (1 / 2))
 
         self.decoder = NerfLatentDecoder(latent_shape=self.embed_shape, out_dim=positional_dim * 3,
                                          attention_dim=attention_dim, hidden_dims=decoder_hiddens,
@@ -376,9 +377,7 @@ class NerfClassTrainer(pl.LightningModule):
         n_objects = len(idxs)
         latent = self.latents.forward(idxs)
         if train:
-            latents_std = torch.std(latent.detach(), dim=-1, keepdim=True, unbiased=True)
-            latents_std = torch.clip(latents_std, min=1 / latent.shape[1] ** (1 / 2), max=1.0)
-            latent = latent + torch.randn_like(latent) * latents_std * self.embed_noise
+            latent = latent + torch.randn_like(latent) * self.latent_std.unsqueeze(0) * self.embed_noise
         latent = latent.view(n_objects, *self.embed_shape)
 
         near, far, base_radius = batch['near'].view(-1), batch['far'].view(-1), batch['base_radius'].view(-1)
@@ -431,6 +430,8 @@ class NerfClassTrainer(pl.LightningModule):
 
     def on_train_epoch_start(self):
         if self.current_epoch <= self.transmittance_warmup:
+            current_std = torch.std(self.latents.weight.detach(), dim=0)
+            self.latent_std = torch.maximum(current_std, torch.ones_like(current_std) / self.embed_dim ** (1 / 2))
             self.transmittance_reg = self.current_epoch / self.transmittance_warmup \
                                      * (self.transmittance_max - self.transmittance_min) + self.transmittance_min
 
