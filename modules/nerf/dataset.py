@@ -282,7 +282,7 @@ class NerfLatents(torch.utils.data.IterableDataset):
 
     def __init__(self, latents_checkpoint, latent_shape=(32, 8, 8)):
         super(NerfLatents, self).__init__()
-        latents = torch.load(latents_checkpoint, map_location='cpu')['state_dict']['latents.weight']
+        latents = torch.load(latents_checkpoint, map_location='cpu')['latents'][0].weight.detach()
         latents = latents.view(-1, *latent_shape).numpy()
         self.latents = [latents[idx] for idx in range(len(latents))]
 
