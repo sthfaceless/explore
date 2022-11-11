@@ -88,5 +88,5 @@ if __name__ == "__main__":
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 1000,
                           enable_model_summary=True,
                           enable_progress_bar=True, enable_checkpointing=True,
-                          accelerator='gpu', gpus=[0], callbacks=[checkpoint_callback], check_val_every_n_epoch=5)
+                          accelerator='gpu', gpus=[0], callbacks=[checkpoint_callback], check_val_every_n_epoch=1)
         trainer.fit(model)

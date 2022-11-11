@@ -5,7 +5,6 @@ from PIL import Image
 from tqdm import tqdm
 
 from modules.common.util import *
-from modules.nerf.trainer import NerfClassTrainer
 
 
 def build_nerf_weights(layers, shapes, raw):
@@ -304,9 +303,7 @@ def render_latent_nerf(latents, model, w=128, h=128, focal=1.5, camera_distance=
     return galleries
 
 
-def make_scene_from_latent(decoder_path, out_path='.', n_objects=1, n_images=64, img_size=256, focal=1.5,
-                           device=torch.device('cpu')):
-    model = NerfClassTrainer.load_from_checkpoint(decoder_path, dataset=None).to(device)
+def make_scene_from_latent(model, out_path='.', n_objects=1, n_images=64, img_size=256, focal=1.5):
     for obj_id in range(n_objects):
 
         os.makedirs(f'{out_path}/{obj_id}/images', exist_ok=True)
