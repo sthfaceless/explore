@@ -213,7 +213,7 @@ class TimestepResBlock2D(torch.nn.Module):
 
     def forward(self, input, time):
         h = self.layer_1(nonlinear(self.ln_1(input)))
-        h = self.conditional_norm(h, time[:, :, None, None].expand(h.shape))
+        h = self.conditional_norm(h, time[:, :, None, None].expand(*time.shape[:2], *h.shape[2:]))
         skip = input if self.in_dim == self.hidden_dim else self.res_mapper(input)
         h = (self.layer_2(nonlinear(self.ln_2(h))) + skip) / 2 ** (1 / 2)
         if self.need_attn:
