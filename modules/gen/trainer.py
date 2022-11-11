@@ -25,6 +25,8 @@ class Diffusion(pl.LightningModule):
         self.diffusion_steps = diffusion_steps
         self.sample_steps = sample_steps
         self.beta_schedule = beta_schedule
+        self.steps = steps
+        self.epochs = epochs
 
         self.register_buffer('betas', self.get_beta_schedule())
         self.register_buffer('log_betas', torch.log(self.betas.clamp(min=1e-8)))
@@ -182,10 +184,10 @@ class Diffusion(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
-                                                                            T_0=5, T_mult=1, last_epoch=-1,
-                                                                            eta_min=self.min_lr_rate
-                                                                                    * self.learning_rate)
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
+                                                           pct_start=3 / self.epochs, div_factor=2.0,
+                                                           final_div_factor=1 / (2.0 * 0.5),
+                                                           epochs=self.epochs, steps_per_epoch=self.steps)
         return [optimizer], [lr_scheduler]
 
     def train_dataloader(self):
