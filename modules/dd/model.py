@@ -86,7 +86,7 @@ class UNetDenoiser(torch.nn.Module):
         out = self.out_mapper(h)
 
         eps, weight = torch.chunk(out, 2, dim=1)
-        weight = torch.sigmoid(weight)
+        weight = (torch.tanh(weight) + 1) / 2
 
         return eps, weight
 

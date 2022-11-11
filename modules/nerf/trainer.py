@@ -6,7 +6,6 @@ from time import time
 
 import pytorch_lightning as pl
 import torch.cuda
-from PIL import Image
 
 from modules.dd.model import *
 from modules.gen.trainer import Diffusion
@@ -496,7 +495,7 @@ class LatentDiffusion(Diffusion):
     def __init__(self, shape, unet_hiddens, dataset=None, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, sample_steps=128,
-                 is_latent=True, kl_weight=1e-3,
+                 is_latent=True, kl_weight=1e-3, beta_schedule='cos',
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
@@ -505,7 +504,8 @@ class LatentDiffusion(Diffusion):
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,
                                               sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,
-                                              max_beta=max_beta, kl_weight=kl_weight, ll_delta=ll_delta)
+                                              max_beta=max_beta, kl_weight=kl_weight, ll_delta=ll_delta,
+                                              beta_schedule=beta_schedule, steps=steps, epochs=epochs)
 
         self.decoder_path = decoder_path
         self.is_latent = is_latent
@@ -521,14 +521,14 @@ class LatentDiffusion(Diffusion):
 
     def sample(self, n_samples):
         x = torch.randn((n_samples, *self.shape), device=self.device)
-        # if not self.is_latent:
-        #     x = torch.clamp(x, min=-1.0, max=1.0)
+        if not self.is_latent:
+            x = torch.clamp(x, min=-1.0, max=1.0)
         sample_steps = self.get_sample_steps()
         for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
             ones = torch.ones(n_samples).type_as(x).long()
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr)
-            # if not self.is_latent:
-            #     x = torch.clamp(x, min=-1.0, max=1.0)
+            if not self.is_latent:
+                x = torch.clamp(x, min=-1.0, max=1.0)
         return x
 
     def forward(self, x, t):
@@ -702,7 +702,7 @@ class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
-                 sample_steps=128, kl_weight=1e-3, num_heads=4,
+                 sample_steps=128, kl_weight=1e-3, num_heads=4, steps=100, epochs=10000,
                  min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
@@ -710,7 +710,7 @@ class NVSDiffusion(Diffusion):
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                            learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
                                            min_beta=min_beta, max_beta=max_beta, sample_steps=sample_steps,
-                                           kl_weight=kl_weight)
+                                           kl_weight=kl_weight, steps=steps, epochs=epochs)
 
         self.shape = shape
         self.in_features, self.h, self.w = shape
@@ -727,7 +727,8 @@ class NVSDiffusion(Diffusion):
         cond_sequence, ray_o_sequence, ray_d_sequence = [cond], [ray_o], [ray_d]
         for item_id in range(n_seq):
             x = torch.randn((n_samples, *self.shape)).type_as(cond)
-            # x = torch.clamp(x, min=-1.0, max=1.0)
+            x = torch.clamp(x, min=-1.0, max=1.0)
+
             poses = get_random_poses(torch.ones(n_samples).type_as(cond) * dist)
             ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
                                            focal=torch.ones(n_samples).type_as(cond) * self.focal, poses=poses)
@@ -741,8 +742,8 @@ class NVSDiffusion(Diffusion):
 
                 ones = torch.ones(n_samples).type_as(x).long()
                 x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, x_cond=cond_sequence[idx],
-                                         time_cond=-ones, ray_o=_ray_o, ray_d=_ray_d)
-                # x = torch.clamp(x, min=-1.0, max=1.0)
+                                         time_cond=ones * t_curr, ray_o=_ray_o, ray_d=_ray_d)
+                x = torch.clamp(x, min=-1.0, max=1.0)
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)
             ray_d_sequence.append(ray_d)
@@ -766,8 +767,7 @@ class NVSDiffusion(Diffusion):
         # concat origin with conditional to use them simultaneously
         ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
         ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
-        eps, var_weight = self.forward(x_noised, t, x_cond=x_cond, time_cond=-torch.ones_like(t), ray_o=ray_o,
-                                       ray_d=ray_d)
+        eps, var_weight = self.forward(x_noised, t, x_cond=x_cond, time_cond=t, ray_o=ray_o, ray_d=ray_d)
         return self.get_losses(x, x_noised, t, noise, eps, var_weight)
 
     def on_validation_epoch_end(self):

@@ -1,6 +1,12 @@
-import numpy as np
-import torch
+import math
+import os
+
+from PIL import Image
+from tqdm import tqdm
+
 from modules.common.util import *
+from modules.nerf.trainer import NerfClassTrainer
+
 
 def build_nerf_weights(layers, shapes, raw):
     weights = {}
@@ -65,7 +71,7 @@ def look_at_matrix(eye, target):
 def get_random_poses(dist):
     n_poses = len(dist)
     target = torch.zeros(n_poses, 3).type_as(dist)
-    eye = normalize_vector(torch.rand(n_poses, 3).type_as(dist)) * dist.unsqueeze(-1)
+    eye = normalize_vector(torch.rand(n_poses, 3).type_as(dist) - 0.5) * dist.unsqueeze(-1)
     return look_at_matrix(eye, target)
 
 
@@ -262,11 +268,13 @@ def latent_encoding(points, encodings, nums, cube_clip=1.0):
 
 
 def render_latent_nerf(latents, model, w=128, h=128, focal=1.5, camera_distance=4.0,
-                       near_val=4 - 3 ** (1 / 2), far_val=4 + 3 ** (1 / 2), batch_rays=8192):
+                       near_val=4 - 3 ** (1 / 2), far_val=4 + 3 ** (1 / 2), batch_rays=8192, default_cams=None,
+                       gallery_h=2, gallery_w=4):
     n_pixels = w * h
     dirs = get_image_coords(h, w, focal, focal).view(n_pixels, 3).type_as(latents)
 
-    default_cams = get_default_cams()
+    if default_cams is None:
+        default_cams = get_default_cams()
 
     galleries = []
     for gallery_id in range(len(latents)):
@@ -290,9 +298,46 @@ def render_latent_nerf(latents, model, w=128, h=128, focal=1.5, camera_distance=
                 rendered_pixels = out['fine_pixels'] * 255
                 pixels.append(rendered_pixels.cpu().detach().numpy().astype(np.uint8))
             images.append(np.concatenate(pixels, axis=0).reshape((h, w, 3)))
-        gallery = np.array(images).reshape((2, 4, h, w, 3)).transpose(0, 2, 1, 3, 4).reshape((2 * h, 4 * w, 3))
+        gallery = np.array(images).reshape((gallery_h, gallery_w, h, w, 3)).transpose(0, 2, 1, 3, 4).reshape(
+            (gallery_h * h, gallery_w * w, 3))
         galleries.append(gallery)
     return galleries
+
+
+def make_scene_from_latent(decoder_path, out_path='.', n_objects=1, n_images=64, img_size=256, focal=1.5,
+                           device=torch.device('cpu')):
+    model = NerfClassTrainer.load_from_checkpoint(decoder_path, dataset=None).to(device)
+    for obj_id in range(n_objects):
+
+        os.makedirs(f'{out_path}/{obj_id}/images', exist_ok=True)
+        focal_screen = focal * img_size / 2
+        out = {
+            'camera_angle_x': math.atan(img_size / (focal_screen * 2)) * 2,
+            'fl_x': focal_screen,
+            "black_transparent": True,
+            'w': img_size,
+            'h': img_size,
+            'aabb_scale': 1.0,
+            'frames': []
+        }
+
+        idxs = torch.randint(low=0, high=model.n_objects - 1, size=(1,)).long().to(model.device)
+        latents = model.latents(idxs).view(1, *model.embed_shape)
+        for image_id in tqdm(range(n_images)):
+            poses = get_random_poses(dist=torch.ones(1).to(model.device) * 4.0)
+            galleries = render_latent_nerf(latents=latents, model=model,
+                                           w=img_size, h=img_size, focal=focal,
+                                           camera_distance=4.0,
+                                           near_val=4 - 3 ** (1 / 2), far_val=4 + 3 ** (1 / 2),
+                                           batch_rays=8192, default_cams=poses, gallery_h=1, gallery_w=1)
+            Image.fromarray(galleries[0]).save(f"{out_path}/{obj_id}/images/{image_id}.png")
+            out['frames'].append({
+                'file_path': f'./images/{image_id}.png',
+                'transform_matrix': np.concatenate([poses[0].detach().cpu().numpy(), np.array([[0, 0, 0, 1]])], axis=0).tolist()
+            })
+
+        with open(f'{out_path}/{obj_id}/transforms.json', "w") as outfile:
+            json.dump(out, outfile, indent=2)
 
 
 def render_batch(batch, model, pe_powers, spp):

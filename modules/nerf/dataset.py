@@ -1,9 +1,7 @@
 import glob
-import os
 from random import sample, choices, randint
 
 import cv2
-from tqdm import tqdm
 
 from modules.nerf.util import *
 
@@ -333,6 +331,8 @@ class PairViews(torch.utils.data.IterableDataset):
             for image_id, frame in enumerate(frames):
                 # read image and resize to desired resolution
                 img = cv2.imread(os.path.join(scene_root, self.images_dir, os.path.basename(frame['file_path'])))
+                img = img[int(img.shape[0] / 4):int(img.shape[0] * 3 / 4),
+                      int(img.shape[1] / 4):int(img.shape[1] * 3 / 4)]
                 img = cv2.resize(img, (self.h, self.w))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 # save camera poses of images

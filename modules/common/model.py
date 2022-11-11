@@ -194,8 +194,6 @@ class TimestepResBlock2D(torch.nn.Module):
     def __init__(self, hidden_dim, timestep_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, num_heads=4):
         super(TimestepResBlock2D, self).__init__()
 
-        self.time_layer = torch.nn.Linear(timestep_dim, hidden_dim)
-
         if in_dim == -1:
             in_dim = hidden_dim
         else:
@@ -205,6 +203,7 @@ class TimestepResBlock2D(torch.nn.Module):
 
         self.ln_1 = norm(in_dim, num_groups)
         self.layer_1 = torch.nn.Conv2d(in_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.conditional_norm = ConditionalNorm2D(hidden_dim, timestep_dim, num_groups)
         self.ln_2 = norm(hidden_dim, num_groups)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
@@ -214,7 +213,7 @@ class TimestepResBlock2D(torch.nn.Module):
 
     def forward(self, input, time):
         h = self.layer_1(nonlinear(self.ln_1(input)))
-        h = h + self.time_layer(nonlinear(time))[:, :, None, None]  # broadcast to image shape
+        h = self.conditional_norm(h, time[:, :, None, None].expand(h.shape))
         skip = input if self.in_dim == self.hidden_dim else self.res_mapper(input)
         h = (self.layer_2(nonlinear(self.ln_2(h))) + skip) / 2 ** (1 / 2)
         if self.need_attn:

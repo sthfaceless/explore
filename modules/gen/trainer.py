@@ -7,7 +7,7 @@ from modules.common.util import approx_standard_normal_cdf
 class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
-                 diffusion_steps=1000, sample_steps=128,
+                 diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100,
                  min_beta=1e-2, max_beta=1e-4, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
         super(Diffusion, self).__init__()
 
@@ -32,9 +32,7 @@ class Diffusion(pl.LightningModule):
         self.register_buffer('sqrt_alphas', torch.sqrt(self.alphas))
         self.register_buffer('head_alphas', torch.cumprod(self.alphas, dim=-1))
         self.register_buffer('head_alphas_pred', torch.cat([torch.ones(1, dtype=torch.float32), self.head_alphas[:-1]]))
-        self.register_buffer('betas_tilde', self.betas *
-                             (1 - torch.cat([torch.ones(1, dtype=torch.float32), self.head_alphas[:-1]])) /
-                             (1 - self.head_alphas))
+        self.register_buffer('betas_tilde', self.betas * (1 - self.head_alphas_pred) / (1 - self.head_alphas))
         self.register_buffer('betas_tilde_aligned', torch.cat([self.betas_tilde[1:2], self.betas_tilde[1:]]))
         self.register_buffer('log_betas_tilde_aligned', torch.log(self.betas_tilde_aligned.clamp(min=1e-8)))
         # precompute coefs for speed up training
@@ -66,7 +64,8 @@ class Diffusion(pl.LightningModule):
         elif self.beta_schedule == 'cos':
             s = 0.008
             f = torch.cos(
-                (torch.linspace(start=0, end=1, steps=self.diffusion_steps + 1) + s) / (1 + s) * torch.pi / 2) ** 2
+                (torch.linspace(start=0, end=1 - 1 / self.diffusion_steps, steps=self.diffusion_steps + 1) + s) / (
+                        1 + s) * torch.pi / 2) ** 2
             head_alphas = f / f[0]
             betas = torch.clip(1 - head_alphas[1:] / head_alphas[:-1], min=0, max=0.999)
             return betas

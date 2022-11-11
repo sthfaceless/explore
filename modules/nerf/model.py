@@ -601,6 +601,6 @@ class XUNetDenoiser(torch.nn.Module):
         # take only x
         out = torch.chunk(out, 2, dim=0)[0]
         eps, weight = torch.chunk(out, 2, dim=1)
-        weight = torch.sigmoid(weight)
+        weight = (torch.tanh(weight) + 1) / 2
 
         return eps, weight
