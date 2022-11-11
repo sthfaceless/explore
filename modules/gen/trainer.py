@@ -8,7 +8,7 @@ class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
                  diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100,
-                 min_beta=1e-2, max_beta=1e-4, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
+                 min_beta=0.0015, max_beta=0.0195, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
