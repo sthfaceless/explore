@@ -233,7 +233,7 @@ class ConditionalNorm2D(torch.nn.Module):
 
     def __init__(self, dim, emb_dim, num_groups=32):
         super(ConditionalNorm2D, self).__init__()
-        self.norm = norm(emb_dim, num_groups)
+        self.norm = norm(dim, num_groups)
         self.layer = torch.nn.Conv2d(emb_dim, dim * 2, kernel_size=1)
 
     def forward(self, h, emb):
