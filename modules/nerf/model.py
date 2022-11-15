@@ -468,15 +468,14 @@ class XUnetBlock(torch.nn.Module):
         self.block = block
         self.need_attn = need_attn
         if self.need_attn:
-            self.cross_attn_orig = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
-            self.cross_attn_cond = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
+            self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
 
     def forward(self, x, emb):
         h = self.block(x, emb)
         if self.need_attn:
             h_orig, h_cond = torch.chunk(h, 2, dim=0)
-            h_orig = self.cross_attn_orig(q=h_orig, v=h_cond)
-            h_cond = self.cross_attn_cond(q=h_cond, v=h_orig)
+            h_orig = self.cross_attn(q=h_orig, v=h_cond)
+            h_cond = self.cross_attn(q=h_cond, v=h_orig)
             h = torch.cat([h_orig, h_cond], dim=0)
         return h
 
@@ -498,7 +497,6 @@ class XUNetDenoiser(torch.nn.Module):
             torch.nn.Conv2d(self.emb_features * 2, self.emb_features * 4, kernel_size=1),
             torch.nn.Conv2d(self.emb_features * 4, hidden_dims[0] * 2, kernel_size=1),
         ])
-        self.embed_norm = norm(self.emb_features * 4, num_groups)
         self.embed_cond = torch.nn.Embedding(num_embeddings=2, embedding_dim=self.emb_features)
         self.embed_pixel = torch.nn.Parameter(torch.zeros(self.emb_features, shape[1], shape[2], requires_grad=True))
         torch.nn.init.xavier_uniform_(self.embed_pixel.data)
@@ -575,8 +573,7 @@ class XUNetDenoiser(torch.nn.Module):
             .expand(b, self.emb_features, height, width)
         h_pixel = self.embed_pixel[None, :, :, :].expand(b, self.emb_features, height, width)
         emb = torch.cat([h_time, h_d + h_o + h_cond + h_pixel], dim=1)
-        # emb = h_time + h_d + h_o + h_cond
-        emb = nonlinear(self.embed_norm(self.embed_layers[0](emb)))
+        emb = nonlinear(self.embed_layers[0](emb))
         emb = self.embed_layers[1](emb)
         embs = [emb] + [downsample(emb) for downsample in self.emb_downsample_blocks]
         # Encode latent

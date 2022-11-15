@@ -8,7 +8,7 @@ class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
                  diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100,
-                 min_beta=0.0015, max_beta=0.0195, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
+                 min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
@@ -66,7 +66,7 @@ class Diffusion(pl.LightningModule):
         elif self.beta_schedule == 'cos':
             s = 0.008
             f = torch.cos(
-                (torch.linspace(start=0, end=1 - 1 / self.diffusion_steps, steps=self.diffusion_steps + 1) + s) / (
+                (torch.linspace(start=0, end=1 - 1 / 32, steps=self.diffusion_steps + 1) + s) / (
                         1 + s) * torch.pi / 2) ** 2
             head_alphas = f / f[0]
             betas = torch.clip(1 - head_alphas[1:] / head_alphas[:-1], min=0, max=0.999)
@@ -81,10 +81,12 @@ class Diffusion(pl.LightningModule):
         t = t.view(b, *shape)
         return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
 
-    def get_sample_steps(self):
+    def get_sample_steps(self, steps=None):
+        if steps is None:
+            steps = self.sample_steps
         sample_steps = [-1, 0]
-        for t in range(self.sample_steps - 1):
-            sample_steps.append(int((t + 1) / (self.sample_steps - 1) * (self.diffusion_steps - 1)))
+        for t in range(steps - 1):
+            sample_steps.append(int((t + 1) / (steps - 1) * (self.diffusion_steps - 1)))
         return list(reversed(sample_steps))
 
     def p_sample_stride(self, x, prev_t, curr_t, **kwargs):
@@ -184,11 +186,15 @@ class Diffusion(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
-        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
-                                                           pct_start=3 / self.epochs, div_factor=2.0,
-                                                           final_div_factor=1 / (2.0 * 0.5),
-                                                           epochs=self.epochs, steps_per_epoch=self.steps)
-        return [optimizer], [lr_scheduler]
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
+                                                        pct_start=3 / self.epochs, div_factor=2.0,
+                                                        final_div_factor=1 / (2.0 * self.min_lr_rate),
+                                                        epochs=self.epochs, steps_per_epoch=self.steps)
+        scheduler = {
+            'scheduler': scheduler,
+            'interval': 'step'
+        }
+        return [optimizer], [scheduler]
 
     def train_dataloader(self):
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,

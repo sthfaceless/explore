@@ -105,10 +105,12 @@ class Attention2D(torch.nn.Module):
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, q, v=None):
-        _q, _v = q, v
-        if _v is None:
-            _v = _q
-        q, v = self.norm_q(_q), self.norm_v(_v)
+        q_in = q
+        q = self.norm_q(q)
+        if v is None:
+            v = self.norm_q(q)
+        else:
+            v = self.norm_v(v)
         q, k, v = self.q(q), self.k(v), self.v(v)
 
         # compute attention
@@ -123,15 +125,19 @@ class Attention2D(torch.nn.Module):
 
         out = self.out(out)
 
-        return (out + _q) / 2 ** (1 / 2)
+        return (out + q_in) / 2 ** (1 / 2)
 
 
 class MHAAttention2D(torch.nn.Module):
-    def __init__(self, dim, num_heads=8, dropout=0.0, num_groups=32):
+    def __init__(self, dim, num_heads=None, head_channel=32, dropout=0.0, num_groups=32):
         super().__init__()
         self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // self.num_heads
+        if num_heads:
+            self.num_heads = num_heads
+            self.head_dim = dim // self.num_heads
+        else:
+            self.num_heads = dim // head_channel
+            self.head_dim = head_channel
         self.scale = self.head_dim ** (-0.5)
         self.dropout = dropout
 
@@ -143,10 +149,12 @@ class MHAAttention2D(torch.nn.Module):
         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, q, v=None):
-        _q, _v = q, v
-        if _v is None:
-            _v = _q
-        q, v = self.norm_q(_q), self.norm_v(_v)
+        q_in = q
+        q = self.norm_q(q)
+        if v is None:
+            v = self.norm_q(q)
+        else:
+            v = self.norm_v(v)
         q, k, v = self.q(q), self.k(v), self.v(v)
 
         # compute attention
@@ -162,7 +170,7 @@ class MHAAttention2D(torch.nn.Module):
         out = out.transpose(-1, -2).reshape(b, self.dim, h, w)
         out = self.out(out)
 
-        return (out + _q) / 2 ** (1 / 2)
+        return (out + q_in) / 2 ** (1 / 2)
 
 
 class ResBlock2d(torch.nn.Module):
@@ -177,15 +185,15 @@ class ResBlock2d(torch.nn.Module):
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
 
-        self.ln_1 = torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_dim, eps=1e-6)
+        self.ln_1 = norm(in_dim, num_groups)
         self.layer_1 = torch.nn.Conv2d(in_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
-        self.ln_2 = torch.nn.GroupNorm(num_groups=num_groups, num_channels=hidden_dim, eps=1e-6)
+        self.ln_2 = norm(hidden_dim, num_groups)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
     def forward(self, input):
-        x = self.layer_1(torch.nn.functional.silu(self.ln_1(input)))
+        x = self.layer_1(nonlinear(self.ln_1(input)))
         skip = input if self.in_dim == self.hidden_dim else self.input_mapper(input)
-        x = (self.layer_2(torch.nn.functional.silu(self.ln_2(x))) + skip) / 2 ** (1 / 2)
+        x = (self.layer_2(nonlinear(self.ln_2(x))) + skip) / 2 ** (1 / 2)
         return x
 
 
@@ -229,9 +237,9 @@ class ConditionalNorm2D(torch.nn.Module):
         self.layer = torch.nn.Conv2d(emb_dim, dim * 2, kernel_size=1)
 
     def forward(self, h, emb):
-        emb = self.layer(nonlinear(self.norm(emb)))
+        emb = self.layer(nonlinear(emb))
         gamma, beta = torch.chunk(emb, 2, dim=1)  # split in channel dimension (b c h w)
-        return h * (1 + gamma) + beta
+        return self.norm(h) * (1 + gamma) + beta
 
 
 class ConditionalNormResBlock2D(torch.nn.Module):
@@ -249,7 +257,6 @@ class ConditionalNormResBlock2D(torch.nn.Module):
         self.ln_1 = norm(in_dim, num_groups)
         self.layer_1 = torch.nn.Conv2d(in_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
         self.conditional_norm = ConditionalNorm2D(hidden_dim, embed_dim, num_groups)
-        self.ln_2 = norm(hidden_dim, num_groups)
         self.dropout = torch.nn.Dropout2d(p=dropout)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
@@ -260,7 +267,7 @@ class ConditionalNormResBlock2D(torch.nn.Module):
     def forward(self, x, emb):
         h = self.layer_1(nonlinear(self.ln_1(x)))
         h = self.conditional_norm(h, emb)
-        h = self.layer_2(self.dropout(nonlinear(self.ln_2(h))))
+        h = self.layer_2(self.dropout(nonlinear(h)))
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
         h = (h + skip) / 2 ** (1 / 2)
         if self.need_attn:

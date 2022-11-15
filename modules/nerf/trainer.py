@@ -4,9 +4,11 @@ from functools import reduce
 from random import shuffle
 from time import time
 
+import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import torch.cuda
 
+from modules.common.trainer import *
 from modules.dd.model import *
 from modules.gen.trainer import Diffusion
 from modules.nerf.dataset import *
@@ -495,11 +497,11 @@ class LatentDiffusion(Diffusion):
     def __init__(self, shape, unet_hiddens, dataset=None, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, sample_steps=128,
-                 is_latent=True, kl_weight=1e-3, beta_schedule='cos',
-                 min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
+                 is_latent=True, kl_weight=1e-3, beta_schedule='cos', debug=False,
+                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
-                             attention_dim=attention_dim)
+                             attention_dim=attention_dim, num_heads=None)
         ll_delta = 1 / (2 * reduce((lambda x, y: x * y), shape) ** (1 / 2)) if is_latent else 1 / 255
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,
@@ -518,17 +520,54 @@ class LatentDiffusion(Diffusion):
         self.focal = focal
 
         self.custom_logger = SimpleLogger(clearml)
+        self.debug = debug
+
+        if self.debug:
+            if clearml is not None:
+                head_alphas = self.head_alphas.cpu().numpy()
+                plt.plot(np.linspace(0, 1, len(head_alphas)), head_alphas)
+                clearml.report_matplotlib_figure(title='head alphas', series='params', figure=plt)
+                plt.show()
+
+                betas = self.betas.cpu().numpy()
+                plt.plot(np.linspace(0, 1, len(betas)), betas)
+                clearml.report_matplotlib_figure(title='betas', series='params', figure=plt)
+                plt.show()
+
+                betas_tilde = self.betas_tilde.cpu().numpy()
+                plt.plot(np.linspace(0, 1, len(betas_tilde)), betas_tilde)
+                clearml.report_matplotlib_figure(title='betas tilde', series='params', figure=plt)
+                plt.show()
+            data_iter = iter(dataset)
+            orig = torch.stack([torch.tensor(next(data_iter)).to(self.device) for _ in range(5)], dim=0)
+            for t in [0, int(0.25 * self.diffusion_steps), int(0.5 * self.diffusion_steps),
+                      int(0.75 * self.diffusion_steps), int(0.95 * self.diffusion_steps)]:
+                x = self.q_sample(orig, torch.ones(5, device=self.device).long() * t)
+                images = x.detach().cpu().numpy()
+                images = np.clip(np.moveaxis(images, 1, -1), -1.0, 1.0)
+                images = ((images + 1.0) * (255 / 2)).astype(np.uint8)
+                self.custom_logger.log_images(images, f'q_noised_{t}', self.current_epoch)
 
     def sample(self, n_samples):
-        x = torch.randn((n_samples, *self.shape), device=self.device)
-        if not self.is_latent:
-            x = torch.clamp(x, min=-1.0, max=1.0)
+        noise = torch.randn((n_samples, *self.shape), device=self.device)
+        x = noise
         sample_steps = self.get_sample_steps()
-        for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
+        for sample_iter, (t_curr, t_prev) in enumerate(zip(sample_steps[:-1], sample_steps[1:])):
             ones = torch.ones(n_samples).type_as(x).long()
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr)
-            if not self.is_latent:
-                x = torch.clamp(x, min=-1.0, max=1.0)
+            if self.debug and sample_iter % 20 == 0:
+                images = x.detach().cpu().numpy()
+                images = np.clip(np.moveaxis(images, 1, -1), -1.0, 1.0)
+                images = ((images + 1.0) * (255 / 2)).astype(np.uint8)
+                self.custom_logger.log_images(images, f'step_{t_curr}', self.current_epoch)
+        if self.debug:
+            xx = noise
+            sample_steps = self.get_sample_steps(1000)
+            for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
+                ones = torch.ones(n_samples).type_as(xx).long()
+                xx = self.p_sample_stride(xx, ones * t_prev, ones * t_curr)
+            x = torch.cat([x, xx], dim=0)
+
         return x
 
     def forward(self, x, t):
@@ -702,8 +741,8 @@ class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
-                 sample_steps=128, kl_weight=1e-3, num_heads=4, steps=100, epochs=10000, beta_schedule='cos',
-                 min_beta=1e-4, max_beta=1e-2, clearml=None, log_samples=5, log_length=16, focal=1.5):
+                 sample_steps=128, kl_weight=1e-3, num_heads=None, steps=100, epochs=10000, beta_schedule='cos',
+                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_length=16, focal=1.5, use_ema=True):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
                               attention_dim=attention_dim, dropout=dropout, num_heads=num_heads)
@@ -715,8 +754,11 @@ class NVSDiffusion(Diffusion):
         self.shape = shape
         self.in_features, self.h, self.w = shape
         self.focal = focal
-
         self.classifier_free = classifier_free
+
+        self.use_ema = use_ema
+        if use_ema:
+            self.ema_model = EMA(self.model)
 
         self.log_samples = log_samples
         self.log_length = log_length
@@ -742,15 +784,19 @@ class NVSDiffusion(Diffusion):
 
                 ones = torch.ones(n_samples).type_as(x).long()
                 x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, x_cond=cond_sequence[idx],
-                                         time_cond=ones * t_curr, ray_o=_ray_o, ray_d=_ray_d)
+                                         time_cond=ones * t_curr, ray_o=_ray_o, ray_d=_ray_d, train=False)
                 x = torch.clamp(x, min=-1.0, max=1.0)
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)
             ray_d_sequence.append(ray_d)
         return cond_sequence
 
-    def forward(self, x, t, x_cond, time_cond, ray_o, ray_d):
-        return self.model(x, t, x_cond, time_cond, ray_o, ray_d)
+    def forward(self, x, t, x_cond, time_cond, ray_o, ray_d, train=True):
+        if (not self.training or not train) and self.use_ema:
+            model = self.ema_model.module
+        else:
+            model = self.model
+        return model(x, t, x_cond, time_cond, ray_o, ray_d)
 
     def step(self, batch):
         # extract origin view
@@ -790,6 +836,10 @@ class NVSDiffusion(Diffusion):
         del images, batch, galleries
         gc.collect()
         torch.cuda.empty_cache()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self.use_ema:
+            self.ema_model.update(self.model)
 
     def train_dataloader(self):
         self.dataset.reset_cache()

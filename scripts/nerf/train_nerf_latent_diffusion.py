@@ -19,20 +19,20 @@ def get_parser():
     parser.add_argument("--sampler", default="", help="Path to latent sampler")
 
     # Training settings
-    parser.add_argument("--learning_rate", default=5 * 1e-5, type=float, help="Learning rate for decoder and nerf")
+    parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Learning rate for decoder and nerf")
-    parser.add_argument("--max_beta", default=0.0195, type=float, help="Max noise schedule")
-    parser.add_argument("--min_beta", default=0.0015, type=float, help="Min noise schedule")
-    parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
+    parser.add_argument("--max_beta", default=0.02, type=float, help="Max noise schedule")
+    parser.add_argument("--min_beta", default=0.0001, type=float, help="Min noise schedule")
+    parser.add_argument("--epochs", default=30, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Steps per epoch")
-    parser.add_argument("--batch_size", default=256, type=int, help="Batch size")
-    parser.add_argument("--diffusion_steps", default=1000, type=int, help="Steps in diffusion")
-    parser.add_argument("--sample_steps", default=100, type=int, help="Steps for sampling")
+    parser.add_argument("--batch_size", default=16, type=int, help="Batch size")
+    parser.add_argument("--diffusion_steps", default=4000, type=int, help="Steps in diffusion")
+    parser.add_argument("--sample_steps", default=128, type=int, help="Steps for sampling")
     parser.add_argument("--samples_epoch", default=10, type=int, help="Samples of generator in one epoch")
     parser.add_argument("--latent_shape", default=(32, 8, 8), type=int, nargs='+', help="Shape of generated latents")
 
     # Model settings
-    parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 512, 512, 1024, 1024], nargs='+', type=int,
+    parser.add_argument("--hidden_dims", default=[64, 64, 128, 128, 256, 256, 512, 512], nargs='+', type=int,
                         help="Hidden dims for UNet")
     parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
     parser.add_argument("--img_size", default=256, type=int, help="Image size for decoder rendering")
