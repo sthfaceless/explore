@@ -507,11 +507,13 @@ class XUNetDenoiser(torch.nn.Module):
             self.embed_cond = torch.nn.Embedding(num_embeddings=2, embedding_dim=self.pos_features)
         elif cond == 'concat':
             self.embed_cond = torch.nn.Parameter(torch.zeros(self.pos_features, requires_grad=True))
-            torch.nn.init.xavier_uniform_(self.embed_cond.data)
+            torch.nn.init.uniform_(self.embed_cond.data, - 1 / (self.pos_features * 6) ** 0.5,
+                                   1 / (self.pos_features * 6) ** 0.5)
         else:
             raise NotImplementedError(f'Unknown conditional embedding {cond}')
         self.embed_pixel = torch.nn.Parameter(torch.zeros(self.pos_features, shape[1], shape[2], requires_grad=True))
-        torch.nn.init.xavier_uniform_(self.embed_pixel.data)
+        torch.nn.init.uniform_(self.embed_pixel.data, - 1 / (self.pos_features * 6) ** 0.5,
+                               1 / (self.pos_features * 6) ** 0.5)
         self.emb_maps = torch.nn.ModuleList([torch.nn.Conv2d(self.pos_features, self.emb_features,
                                                              kernel_size=kernel_size, padding=kernel_size // 2)])
 
