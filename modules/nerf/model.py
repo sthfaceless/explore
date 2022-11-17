@@ -609,7 +609,7 @@ class XUNetDenoiser(torch.nn.Module):
             h_cond = self.embed_cond(torch.cat([orig_id, cond_id], dim=0))[:, :, None, None] \
                 .expand(b, self.pos_features, height, width)
         elif self.cond == 'concat':
-            h_cond = self.embed_cond[:, :, None, None].expand(b, self.pos_features, height, width)
+            h_cond = self.embed_cond[None, :, None, None].expand(b, self.pos_features, height, width)
         else:
             raise NotImplementedError(f'Unknown conditional type for cond embedding {self.cond}')
         h_pos += h_cond
