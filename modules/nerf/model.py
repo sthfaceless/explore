@@ -513,7 +513,7 @@ class XUNetDenoiser(torch.nn.Module):
         self.embed_pixel = torch.nn.Parameter(torch.zeros(self.pos_features, shape[1], shape[2], requires_grad=True))
         torch.nn.init.xavier_uniform_(self.embed_pixel.data)
         self.emb_maps = torch.nn.ModuleList([torch.nn.Conv2d(self.pos_features, self.emb_features,
-                                                             kernel_size=kernel_size, stride=kernel_size // 2)])
+                                                             kernel_size=kernel_size, padding=kernel_size // 2)])
 
         self.encoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
         self.downsample_blocks = torch.nn.ModuleList([])
