@@ -582,14 +582,13 @@ class XUNetDenoiser(torch.nn.Module):
         # Encode time embeddings
         if self.cond == 'xunet':
             time = torch.cat([time, time_cond], dim=0)
-            h_time = get_timestep_encoding(time, self.emb_features, self.steps)[:, :, None, None] \
-                .expand(b, self.emb_features, height, width)
+            h_time = get_timestep_encoding(time, self.emb_features, self.steps)
         elif self.cond == 'concat':
-            h_time = get_timestep_encoding(time, self.emb_features, self.steps)[:, :, None, None] \
-                .expand(b, self.emb_features, height, width)
+            h_time = get_timestep_encoding(time, self.emb_features, self.steps)
         else:
             raise NotImplementedError(f'Unknown conditional type for time {self.cond}')
-        h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))
+        h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))[:, :, None, None] \
+            .expand(b, self.emb_features, height, width)
 
         # Encode pos embeddings
         if self.cond == 'xunet':
