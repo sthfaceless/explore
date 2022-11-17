@@ -12,6 +12,8 @@ class EMA(torch.nn.Module):
         self.device = device
         if self.device is not None:
             self.module.to(device=device)
+        for param in self.module.parameters():
+            param.requires_grad_(False)
 
     def _update(self, model, update_fn):
         with torch.no_grad():

@@ -108,9 +108,7 @@ class NerfScene(torch.utils.data.IterableDataset):
         return float(np.mean(np.linalg.norm(self.poses[:, :, -1], axis=-1)))
 
     def get_mean_point(self):
-        mid_dir = np.array([0, 0, -1], dtype=np.float32)
-        mid_point = np.mean(self.poses[:, :, -1] + (self.poses[:, :, :3] @ mid_dir) * self.get_mean_distance(), axis=0)
-        return mid_point
+        return np.mean(self.poses[:, :, -1], axis=0)
 
 
 class NerfClass(torch.utils.data.IterableDataset):
@@ -341,11 +339,11 @@ class PairViews(torch.utils.data.IterableDataset):
             self.images.append(images)
             # some standardizations
             poses = np.array(poses)
-            self.mean_distance = np.mean(np.linalg.norm(poses[:, :, -1], axis=-1))
-            mid_dir = np.array([0, 0, -1], dtype=np.float32)
-            mid_point = np.mean(poses[:, :, -1] + (poses[:, :, :3] @ mid_dir) * self.mean_distance, axis=0)
+
+            mid_point = np.mean(poses[:, :, -1], axis=0)
             poses[:, :, -1] -= mid_point.reshape(1, 3)
-            poses[:, :, -1] *= 4.0 / self.mean_distance
+            self.mean_distance = np.mean(np.linalg.norm(poses[:, :, -1], axis=-1))
+            poses[:, :, -1] *= 1.0 / self.mean_distance
             self.poses.append(poses)
 
     def get_mean_distance(self):

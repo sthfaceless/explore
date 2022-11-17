@@ -463,12 +463,12 @@ class NerfWeightsLinearDiscriminator(NerfWeightsDiscriminator):
 
 class XUnetBlock(torch.nn.Module):
 
-    def __init__(self, block, dim, num_groups=32, need_attn=False, num_heads=4):
+    def __init__(self, block, dim, num_groups=32, need_attn=False, cond='xunet', num_heads=4):
         super(XUnetBlock, self).__init__()
         self.block = block
         self.need_attn = need_attn
-        if self.need_attn:
-            self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
+        if self.need_attn and cond == 'xunet':
+            self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads, cross=True)
 
     def forward(self, x, emb):
         h = self.block(x, emb)
@@ -483,24 +483,37 @@ class XUnetBlock(torch.nn.Module):
 class XUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
-                 num_groups=32, dropout=0.0, num_heads=4):
+                 num_groups=32, dropout=0.0, num_heads=4, time_features=1024, pos_enc=16,
+                 extra_upsample_blocks=1, cond='xunet'):
         super(XUNetDenoiser, self).__init__()
+        self.cond = cond
         features, h, w = shape
         self.features = features
         self.steps = steps
         # Input mapping
-        self.input_mapper = torch.nn.Conv2d(features, hidden_dims[0], kernel_size=kernel_size, padding=kernel_size // 2)
+        input_features = 2 * features if cond == 'concat' else features
+        self.input_mapper = torch.nn.Conv2d(input_features, hidden_dims[0], kernel_size=kernel_size,
+                                            padding=kernel_size // 2)
 
-        # Embed mapping
-        self.emb_features = hidden_dims[0]
-        self.embed_layers = torch.nn.ModuleList([
-            torch.nn.Conv2d(self.emb_features * 2, self.emb_features * 4, kernel_size=1),
-            torch.nn.Conv2d(self.emb_features * 4, hidden_dims[0] * 2, kernel_size=1),
+        # Time embeddings
+        self.time_features = time_features
+        self.time_layers = torch.nn.ModuleList([
+            torch.nn.Linear(time_features, time_features),
+            torch.nn.Linear(time_features, time_features),
         ])
-        self.embed_cond = torch.nn.Embedding(num_embeddings=2, embedding_dim=self.emb_features)
-        self.embed_pixel = torch.nn.Parameter(torch.zeros(self.emb_features, shape[1], shape[2], requires_grad=True))
+        # Positional embeddings
+        self.pos_features = pos_enc * 3 * (2 if cond == 'concat' else 1)
+        if cond == 'xunet':
+            self.embed_cond = torch.nn.Embedding(num_embeddings=2, embedding_dim=self.pos_features)
+        elif cond == 'concat':
+            self.embed_cond = torch.nn.Parameter(torch.zeros(self.pos_features, requires_grad=True))
+            torch.nn.init.xavier_uniform_(self.embed_cond.data)
+        else:
+            raise NotImplementedError(f'Unknown conditional embedding {cond}')
+        self.embed_pixel = torch.nn.Parameter(torch.zeros(self.pos_features, shape[1], shape[2], requires_grad=True))
         torch.nn.init.xavier_uniform_(self.embed_pixel.data)
-        self.emb_downsample_blocks = torch.nn.ModuleList([])
+        self.emb_maps = torch.nn.ModuleList([torch.nn.Conv2d(self.pos_features, self.emb_features,
+                                                             kernel_size=kernel_size, stride=kernel_size // 2)])
 
         self.encoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
         self.downsample_blocks = torch.nn.ModuleList([])
@@ -508,32 +521,35 @@ class XUNetDenoiser(torch.nn.Module):
         for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
             if prev_dim != dim:
                 current_resolution //= 2
-                self.emb_downsample_blocks.append(DownSample2d(hidden_dims[0] * 2, dim * 2, kernel_size=kernel_size,
-                                                               scale_factor=current_resolution / h))
+                self.emb_maps.append(DownSample2d(self.pos_features, self.emb_features,
+                                                  kernel_size=kernel_size,
+                                                  scale_factor=current_resolution / h))
                 self.downsample_blocks.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.encoder_layers.append(torch.nn.ModuleList([]))
             need_attn = current_resolution <= attention_dim
-            block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=2 * dim, num_groups=num_groups,
+            block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=self.emb_features, num_groups=num_groups,
                                               kernel_size=kernel_size, attn=need_attn, dropout=dropout,
                                               num_heads=num_heads)
-            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads)
+            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads,
+                               cond=cond)
             self.encoder_layers[-1].append(block)
         self.downsample_blocks.append(torch.nn.Identity())
 
         self.mid_layers = torch.nn.Module()
         need_attn = current_resolution <= attention_dim
-        block1 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=hidden_dims[-1] * 2,
+        block1 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
                                            num_groups=num_groups, kernel_size=kernel_size,
                                            attn=need_attn, dropout=dropout, num_heads=num_heads)
         self.mid_layers.block_1 = XUnetBlock(block1, dim=hidden_dims[-1], num_groups=num_groups, need_attn=need_attn,
-                                             num_heads=num_heads)
-        block2 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=hidden_dims[-1] * 2,
-                                           num_groups=num_groups, kernel_size=kernel_size,
-                                           attn=need_attn, dropout=dropout, num_heads=num_heads)
-        self.mid_layers.block_2 = XUnetBlock(block2, dim=hidden_dims[-1], num_groups=num_groups, need_attn=need_attn,
-                                             num_heads=num_heads)
+                                             num_heads=num_heads, cond=cond)
 
-        inverse_dims = hidden_dims[::-1]
+        # add extra res blocks for upsampling as it harder than downsampling
+        _inverse_dims = hidden_dims[::-1]
+        inverse_dims = []
+        for dim_id in range(len(_inverse_dims)):
+            inverse_dims.append(_inverse_dims[dim_id])
+            if dim_id == 0 or _inverse_dims[dim_id] != _inverse_dims[dim_id - 1]:
+                inverse_dims += [_inverse_dims[dim_id] for _ in range(extra_upsample_blocks)]
         self.decoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
         self.upsample_blocks = torch.nn.ModuleList([])
         for prev_dim, dim in zip([inverse_dims[0]] + list(inverse_dims), inverse_dims):
@@ -542,11 +558,12 @@ class XUNetDenoiser(torch.nn.Module):
                 self.upsample_blocks.append(UpSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.decoder_layers.append(torch.nn.ModuleList([]))
             need_attn = current_resolution <= attention_dim
-            block = ConditionalNormResBlock2D(hidden_dim=dim, in_dim=2 * dim, embed_dim=2 * dim,
+            block = ConditionalNormResBlock2D(hidden_dim=dim, in_dim=2 * dim, embed_dim=self.emb_features,
                                               num_groups=num_groups,
                                               kernel_size=kernel_size, attn=need_attn, dropout=dropout,
                                               num_heads=num_heads)
-            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads)
+            block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads,
+                               cond=cond)
             self.decoder_layers[-1].append(block)
         self.upsample_blocks.append(torch.nn.Identity())
 
@@ -555,39 +572,66 @@ class XUNetDenoiser(torch.nn.Module):
         self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features * 2, kernel_size=kernel_size,
                                           padding=kernel_size // 2)
 
-    def forward(self, x, time, x_cond, time_cond, ray_o, ray_d):
-        x = torch.cat([x, x_cond], dim=0)
-        time = torch.cat([time, time_cond], dim=0)
+    def forward(self, x, time, x_cond, time_cond, ray_o, ray_d, ray_o_cond, ray_d_cond):
+        if self.cond == 'xunet':
+            x = torch.cat([x, x_cond], dim=0)
+        else:
+            x = torch.cat([x, x_cond], dim=1)
 
         b, in_channels, height, width = x.shape
+        # Encode time embeddings
+        if self.cond == 'xunet':
+            time = torch.cat([time, time_cond], dim=0)
+            h_time = get_timestep_encoding(time, self.emb_features, self.steps)[:, :, None, None] \
+                .expand(b, self.emb_features, height, width)
+        elif self.cond == 'concat':
+            h_time = get_timestep_encoding(time, self.emb_features, self.steps)[:, :, None, None] \
+                .expand(b, self.emb_features, height, width)
+        else:
+            raise NotImplementedError(f'Unknown conditional type for time {self.cond}')
+        h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))
+
+        # Encode pos embeddings
+        if self.cond == 'xunet':
+            ray_d = torch.cat([ray_d, ray_d_cond], dim=0)
+            ray_o = torch.cat([ray_o, ray_o_cond], dim=0)
+        elif self.cond == 'concat':
+            ray_d = torch.cat([ray_d, ray_d_cond], dim=1)
+            ray_o = torch.cat([ray_o, ray_o_cond], dim=1)
+        else:
+            raise NotImplementedError(f'Unknown conditional type for rays positional encoding {self.cond}')
+        h_d = get_positional_encoding(ray_d.movedim(1, -1), self.pos_features // 2).movedim(-1, 1)
+        h_o = get_positional_encoding(ray_o, self.pos_features // 2)[:, :, None, None] \
+            .expand(b, self.pos_features // 2, height, width)
+        h_pos = torch.cat([h_d, h_o], dim=1)
+        if self.cond == 'xunet':
+            orig_id, cond_id = torch.zeros(b // 2).type_as(x).long(), torch.ones(b // 2).type_as(x).long()
+            h_cond = self.embed_cond(torch.cat([orig_id, cond_id], dim=0))[:, :, None, None] \
+                .expand(b, self.pos_features, height, width)
+        elif self.cond == 'concat':
+            h_cond = self.embed_cond[:, :, None, None].expand(b, self.pos_features, height, width)
+        else:
+            raise NotImplementedError(f'Unknown conditional type for cond embedding {self.cond}')
+        h_pos += h_cond
+        h_pos += self.embed_pixel[None, :, :, :].expand(b, self.pos_features, height, width)
+
+        # Prepare embeddings for each layer
+        pose_embs = [map_emb(h_pos) for map_emb in self.emb_maps]
         # Prepare input for mapping
         h = self.input_mapper(x)
-        # Encode embeddings to (b features h w)
-        h_time = get_timestep_encoding(time, self.emb_features, self.steps)[:, :, None, None] \
-            .expand(b, self.emb_features, height, width)
-        orig_id, cond_id = torch.zeros(b // 2).type_as(x).long(), torch.ones(b // 2).type_as(x).long()
-        h_cond = self.embed_cond(torch.cat([orig_id, cond_id], dim=0))[:, :, None, None] \
-            .expand(b, self.emb_features, height, width)
-        h_d = get_positional_encoding(ray_d.movedim(1, -1), self.emb_features).movedim(-1, 1)
-        h_o = get_positional_encoding(ray_o, self.emb_features)[:, :, None, None] \
-            .expand(b, self.emb_features, height, width)
-        h_pixel = self.embed_pixel[None, :, :, :].expand(b, self.emb_features, height, width)
-        emb = torch.cat([h_time, h_d + h_o + h_cond + h_pixel], dim=1)
-        emb = nonlinear(self.embed_layers[0](emb))
-        emb = self.embed_layers[1](emb)
-        embs = [emb] + [downsample(emb) for downsample in self.emb_downsample_blocks]
-        # Encode latent
         outs = []
-        for blocks, downsample, emb in zip(self.encoder_layers, self.downsample_blocks, embs):
+        for blocks, downsample, pose_emb in zip(self.encoder_layers, self.downsample_blocks, pose_embs):
+            emb = h_time[:, :, None, None] + pose_emb
             for block in blocks:
                 h = block(h, emb)
                 outs.append(h)
             h = downsample(h)
         # Mid mapping
-        h = self.mid_layers.block_1(h, embs[-1])
-        h = self.mid_layers.block_2(h, embs[-1])
+        emb = h_time[:, :, None, None] + pose_embs[-1]
+        h = self.mid_layers.block_1(h, emb)
         # Decode latent
-        for blocks, upsample, emb in zip(self.decoder_layers, self.upsample_blocks, embs[::-1]):
+        for blocks, upsample, pose_emb in zip(self.decoder_layers, self.upsample_blocks, pose_embs[::-1]):
+            emb = h_time[:, :, None, None] + pose_emb
             for block in blocks:
                 h = block(torch.cat([h, outs.pop()], dim=1), emb)
             h = upsample(h)
@@ -596,7 +640,8 @@ class XUNetDenoiser(torch.nn.Module):
         out = self.out_mapper(h)
 
         # take only x
-        out = torch.chunk(out, 2, dim=0)[0]
+        if self.cond == 'xunet':
+            out = torch.chunk(out, 2, dim=0)[0]
         eps, weight = torch.chunk(out, 2, dim=1)
         weight = (torch.tanh(weight) + 1) / 2
 

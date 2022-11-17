@@ -1,14 +1,13 @@
+import numpy as np
 import pytorch_lightning as pl
 import torch
-
-from modules.common.util import approx_standard_normal_cdf
 
 
 class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
-                 diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100,
-                 min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3, ll_delta=1 / 255):
+                 diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100, clip_denoised=True,
+                 min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
@@ -18,13 +17,13 @@ class Diffusion(pl.LightningModule):
         self.min_lr_rate = min_lr_rate
         self.batch_size = batch_size
         self.kl_weight = kl_weight
-        self.ll_delta = ll_delta
 
         self.min_beta = min_beta
         self.max_beta = max_beta
         self.diffusion_steps = diffusion_steps
         self.sample_steps = sample_steps
         self.beta_schedule = beta_schedule
+        self.clip_denoised = clip_denoised
         self.steps = steps
         self.epochs = epochs
 
@@ -44,21 +43,23 @@ class Diffusion(pl.LightningModule):
                              torch.sqrt(self.alphas) * (1 - self.head_alphas_pred) / (1 - self.head_alphas))
         self.register_buffer('p_posterior_eps_coef', self.betas / torch.sqrt(1 - self.head_alphas))
 
+    def get_sample_steps(self, steps=None):
+        if steps is None:
+            steps = self.sample_steps
+        sample_steps = [-1, 0]
+        for t in range(steps - 1):
+            sample_steps.append(int((t + 1) / (steps - 1) * (self.diffusion_steps - 1)))
+        return list(reversed(sample_steps))
+
     def kl_loss(self, mean1, logvar1, mean2, logvar2):
         kl_tensor = 0.5 * (-1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2) + (mean1 - mean2) ** 2
                            * torch.exp(-logvar2))
         batch_losses = torch.mean(kl_tensor, dim=list(range(1, len(kl_tensor.shape))))
         return batch_losses
 
-    def ll_loss(self, x, mean, logvar):
-        x_std = (x - mean) * torch.exp(-logvar / 2)
-        delta = self.ll_delta
-        upper_bound = approx_standard_normal_cdf(x_std + delta)
-        lower_bound = approx_standard_normal_cdf(x_std - delta)
-        log_probs_tensor = torch.where(x < -0.999, torch.log(upper_bound.clamp(min=1e-8)),
-                                       torch.where(x > 0.999, torch.log((1 - lower_bound).clamp(min=1e-8)),
-                                                   torch.log((upper_bound - lower_bound).clamp(min=1e-8))))
-        return - torch.mean(log_probs_tensor, dim=list(range(1, len(log_probs_tensor.shape))))
+    def nll_loss(self, x, mean, logvar):
+        return 0.5 * torch.mean(np.log(2.0 * torch.pi) + logvar + (x - mean) ** 2 / torch.exp(logvar),
+                                dim=list(range(1, len(x.shape))))
 
     def get_beta_schedule(self):
         if self.beta_schedule == 'linear':
@@ -74,6 +75,15 @@ class Diffusion(pl.LightningModule):
         else:
             raise NotImplementedError
 
+    def predict_x0(self, xt, t, eps, clip_denoised=None):
+        b, shape = len(t), [1 for _ in xt.shape[1:]]
+        t = t.view(b, *shape)
+        x0 = xt / torch.sqrt(self.head_alphas[t]) - eps * torch.sqrt(1 / self.head_alphas[t] - 1)
+        clip_denoised = self.clip_denoised if clip_denoised is None else clip_denoised
+        if clip_denoised:
+            x0 = torch.clamp(x0, min=-1.0, max=1.0)
+        return x0
+
     def q_sample(self, x, t, noise=None):
         if noise is None:
             noise = torch.randn_like(x)
@@ -81,32 +91,56 @@ class Diffusion(pl.LightningModule):
         t = t.view(b, *shape)
         return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
 
-    def get_sample_steps(self, steps=None):
-        if steps is None:
-            steps = self.sample_steps
-        sample_steps = [-1, 0]
-        for t in range(steps - 1):
-            sample_steps.append(int((t + 1) / (steps - 1) * (self.diffusion_steps - 1)))
-        return list(reversed(sample_steps))
+    def q_posterior_mean_variance(self, x0, xt, t, var_weight=None):
+        b, shape = len(x0), [1 for _ in x0.shape[1:]]
+        t = t.view(b, *shape)
+        mean = x0 * self.q_posterior_x0_coef[t] + xt * self.q_posterior_xt_coef[t]
+        if var_weight is None:
+            var_weight = torch.zeros_like(mean)
+        logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
+        return mean, logvar
 
-    def p_sample_stride(self, x, prev_t, curr_t, **kwargs):
+    def p_posterior_mean_variance(self, x_noised, t, eps, var_weight, simplified=False, clip_denoised=None):
+        b, shape = len(x_noised), [1 for _ in x_noised.shape[1:]]
+        t = t.view(b, *shape)
+        if simplified:
+            mean = (x_noised - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
+            logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
+        else:
+            x0 = self.predict_x0(x_noised, t, eps, clip_denoised=clip_denoised)
+            mean, logvar = self.q_posterior_mean_variance(x0, x_noised, t, var_weight)
+        return mean, logvar
+
+    def p_sample_stride(self, xt, prev_t, curr_t, clip_denoised=None, simplified=False, **kwargs):
 
         # reshape for x shape
-        b, shape = len(curr_t), [1 for _ in x.shape[1:]]
+        b, shape = len(curr_t), [1 for _ in xt.shape[1:]]
         prev_t, curr_t = prev_t.view(b, *shape), curr_t.view(b, *shape)
 
         # make noise for all except last step
-        z = torch.randn_like(x)
+        z = torch.randn_like(xt)
         z[curr_t.expand(z.shape) == 0] = 0
 
         # predict epsilon and variance (b 2*c h w)
-        eps, var_weight = self.forward(x, curr_t.view(-1), **kwargs)
+        eps, var_weight = self.forward(xt, curr_t.view(-1), **kwargs)
 
         # recalculate beta schedule with stride
-        prev_head_alphas = torch.where(prev_t >= 0, self.head_alphas[prev_t], torch.ones_like(self.head_alphas[prev_t]))
         head_alphas = self.head_alphas[curr_t]
+        prev_head_alphas = torch.where(prev_t >= 0, self.head_alphas[prev_t], torch.ones_like(self.head_alphas[prev_t]))
         betas = torch.clamp(1 - head_alphas / prev_head_alphas, min=1e-8, max=0.999)
         alphas = 1 - betas
+
+        # calculate mean either with simplified formula from paper or with full formula
+        if simplified:
+            mean = (xt - eps * betas / torch.sqrt(1 - head_alphas)) / torch.sqrt(alphas)
+        else:
+            x0 = xt / torch.sqrt(head_alphas) - eps * torch.sqrt(1 / head_alphas - 1)
+            clip_denoised = self.clip_denoised if clip_denoised is None else clip_denoised
+            if clip_denoised:
+                x0 = torch.clamp(x0, min=-1.0, max=1.0)
+            mean = (x0 * torch.sqrt(prev_head_alphas) * betas / (1 - head_alphas) +
+                    xt * torch.sqrt(alphas) * (1 - prev_head_alphas) / (1 - head_alphas))
+
         # fix the problem when betas_tilde with t = 0 is zero
         prev_head_alphas_aligned = torch.where(prev_t >= 0, self.head_alphas[prev_t],
                                                self.head_alphas[torch.zeros_like(prev_t)])
@@ -115,49 +149,32 @@ class Diffusion(pl.LightningModule):
         betas_aligned = torch.clamp(1 - head_alphas_aligned / prev_head_alphas_aligned, min=1e-8, max=0.999)
         betas_tilde = torch.clamp((1 - prev_head_alphas_aligned) / (1 - head_alphas_aligned) * betas_aligned,
                                   min=1e-8, max=0.999)
-
-        mean = (x - eps * betas / torch.sqrt(1 - head_alphas)) / torch.sqrt(alphas)
         logvar = torch.log(betas) * var_weight + torch.log(betas_tilde) * (1 - var_weight)
 
         x = mean + torch.exp(logvar / 2) * z
         return x
 
-    def p_sample(self, x, t, **kwargs):
-        z = torch.randn_like(x)
+    def p_sample(self, xt, t, clip_denoised=None, **kwargs):
+        z = torch.randn_like(xt)
         z[t == 0] = 0
-        b, shape = len(t), [1 for _ in x.shape[1:]]
+        b, shape = len(t), [1 for _ in xt.shape[1:]]
         t = t.view(b, *shape)
-        eps, var_weight = self.forward(x, t.view(-1), **kwargs)
+        eps, var_weight = self.forward(xt, t.view(-1), **kwargs)
 
-        mean = (x - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
-        logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
+        mean, logvar = self.p_posterior_mean_variance(xt, t, eps, var_weight, clip_denoised=clip_denoised)
         x = mean + torch.exp(logvar / 2) * z
         return x
-
-    def q_posterior_mean_variance(self, x, x_noised, t):
-        b, shape = len(x), [1 for _ in x.shape[1:]]
-        t = t.view(b, *shape)
-        mean = x * self.q_posterior_x0_coef[t] + x_noised * self.q_posterior_xt_coef[t]
-        logvar = self.log_betas_tilde_aligned[t]
-        return mean, logvar
-
-    def p_posterior_mean_variance(self, x_noised, t, eps, var_weight):
-        b, shape = len(x_noised), [1 for _ in x_noised.shape[1:]]
-        t = t.view(b, *shape)
-        mean = (x_noised - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
-        logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
-        return mean, logvar
 
     def get_losses(self, x, x_noised, t, noise, eps, var_weight):
 
         mse_loss = torch.nn.functional.mse_loss(noise, eps)
 
         true_mean, true_logvar = self.q_posterior_mean_variance(x, x_noised, t)
-        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, var_weight)
+        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, var_weight, clip_denoised=False)
 
         b, shape = len(t), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)
-        kl_loss = torch.mean(torch.where(t == 0, self.ll_loss(x, pred_mean.detach(), pred_logvar),
+        kl_loss = torch.mean(torch.where(t == 0, self.nll_loss(x, pred_mean.detach(), pred_logvar),
                                          self.kl_loss(true_mean, true_logvar, pred_mean.detach(), pred_logvar)))
 
         return {

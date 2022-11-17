@@ -5,7 +5,7 @@ from modules.gen.model import VAE
 class UNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(16, 32, 64), attention_dim=32, num_heads=4,
-                 residual_scaling=1 / 2 ** (1 / 2), num_groups=32):
+                 num_groups=32):
         super(UNetDenoiser, self).__init__()
         features, h, w = shape
         self.features = features

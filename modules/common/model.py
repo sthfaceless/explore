@@ -91,14 +91,16 @@ class Attention(torch.nn.Module):
 
 
 class Attention2D(torch.nn.Module):
-    def __init__(self, dim, num_heads=8, dropout=0.0, num_groups=32):
+    def __init__(self, dim, num_heads=8, dropout=0.0, num_groups=32, cross=False):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.dropout = dropout
 
         self.norm_q = norm(dim, num_groups)
-        self.norm_v = norm(dim, num_groups)
+        self.cross = cross
+        if cross:
+            self.norm_v = norm(dim, num_groups)
         self.q = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.k = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
@@ -129,7 +131,7 @@ class Attention2D(torch.nn.Module):
 
 
 class MHAAttention2D(torch.nn.Module):
-    def __init__(self, dim, num_heads=None, head_channel=32, dropout=0.0, num_groups=32):
+    def __init__(self, dim, num_heads=None, head_channel=32, dropout=0.0, num_groups=32, cross=False):
         super().__init__()
         self.dim = dim
         if num_heads:
@@ -142,7 +144,9 @@ class MHAAttention2D(torch.nn.Module):
         self.dropout = dropout
 
         self.norm_q = norm(dim, num_groups)
-        self.norm_v = norm(dim, num_groups)
+        self.cross = cross
+        if cross:
+            self.norm_v = norm(dim, num_groups)
         self.q = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.k = torch.nn.Conv2d(dim, dim, kernel_size=1)
         self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)

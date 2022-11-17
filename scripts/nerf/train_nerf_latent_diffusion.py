@@ -79,7 +79,7 @@ if __name__ == "__main__":
                                                            save_on_train_epoch_end=True)
         dataset = NerfLatents(latents_checkpoint=args.latent_path, latent_shape=args.latent_shape)
         model = LatentDiffusion(shape=args.latent_shape, unet_hiddens=args.hidden_dims, dataset=dataset,
-                                sample_steps=args.sample_steps,
+                                sample_steps=args.sample_steps, is_latent=True, debug=False,
                                 decoder_path=args.latent_path, img_size=args.img_size, focal=args.focal,
                                 attention_dim=args.attention_dim, min_lr_rate=args.min_lr_rate, min_beta=args.min_beta,
                                 max_beta=args.max_beta, epochs=args.epochs, steps=args.steps,

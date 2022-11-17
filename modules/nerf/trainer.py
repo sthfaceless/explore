@@ -1,6 +1,5 @@
 import gc
 import os.path
-from functools import reduce
 from random import shuffle
 from time import time
 
@@ -497,16 +496,16 @@ class LatentDiffusion(Diffusion):
     def __init__(self, shape, unet_hiddens, dataset=None, decoder_path=None,
                  features_dim=0, steps=10000, batch_size=32, learning_rate=1e-4,
                  min_lr_rate=0.01, attention_dim=16, epochs=100, diffusion_steps=1000, sample_steps=128,
-                 is_latent=True, kl_weight=1e-3, beta_schedule='cos', debug=False,
-                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, img_size=128, focal=1.5):
+                 is_latent=True, kl_weight=1e-3, beta_schedule='cos', debug=False, num_heads=None,
+                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, img_size=128, focal=1.5,
+                 log_every=20):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = UNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
-                             attention_dim=attention_dim, num_heads=None)
-        ll_delta = 1 / (2 * reduce((lambda x, y: x * y), shape) ** (1 / 2)) if is_latent else 1 / 255
+                             attention_dim=attention_dim, num_heads=num_heads)
         super(LatentDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                               learning_rate=learning_rate, min_lr_rate=min_lr_rate,
                                               sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,
-                                              max_beta=max_beta, kl_weight=kl_weight, ll_delta=ll_delta,
+                                              max_beta=max_beta, kl_weight=kl_weight,
                                               beta_schedule=beta_schedule, steps=steps, epochs=epochs)
 
         self.decoder_path = decoder_path
@@ -521,6 +520,7 @@ class LatentDiffusion(Diffusion):
 
         self.custom_logger = SimpleLogger(clearml)
         self.debug = debug
+        self.log_every = log_every
 
         if self.debug:
             if clearml is not None:
@@ -555,18 +555,22 @@ class LatentDiffusion(Diffusion):
         for sample_iter, (t_curr, t_prev) in enumerate(zip(sample_steps[:-1], sample_steps[1:])):
             ones = torch.ones(n_samples).type_as(x).long()
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr)
-            if self.debug and sample_iter % 20 == 0:
+            if self.debug and sample_iter % self.log_every == 0:
                 images = x.detach().cpu().numpy()
                 images = np.clip(np.moveaxis(images, 1, -1), -1.0, 1.0)
                 images = ((images + 1.0) * (255 / 2)).astype(np.uint8)
                 self.custom_logger.log_images(images, f'step_{t_curr}', self.current_epoch)
         if self.debug:
             xx = noise
-            sample_steps = self.get_sample_steps(1000)
-            for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
+            for t in reversed(range(self.diffusion_steps)):
                 ones = torch.ones(n_samples).type_as(xx).long()
-                xx = self.p_sample_stride(xx, ones * t_prev, ones * t_curr)
+                xx = self.p_sample(xx, t * ones)
             x = torch.cat([x, xx], dim=0)
+            xxx = noise
+            for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
+                ones = torch.ones(n_samples).type_as(xxx).long()
+                xxx = self.p_sample_stride(xxx, ones * t_prev, ones * t_curr, clip_denoised=False)
+            x = torch.cat([x, xx, xxx], dim=0)
 
         return x
 
@@ -739,13 +743,15 @@ class MultiVAETrainer(pl.LightningModule):
 
 class NVSDiffusion(Diffusion):
 
-    def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.0, classifier_free=0.1,
-                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=16, diffusion_steps=256,
+    def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.1, classifier_free=0.1,
+                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, diffusion_steps=256,
                  sample_steps=128, kl_weight=1e-3, num_heads=None, steps=100, epochs=10000, beta_schedule='cos',
+                 time_features=1024, pos_enc=16, cond='xunet',
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_length=16, focal=1.5, use_ema=True):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
-                              attention_dim=attention_dim, dropout=dropout, num_heads=num_heads)
+                              attention_dim=attention_dim, dropout=dropout, num_heads=num_heads,
+                              time_features=time_features, pos_enc=pos_enc, cond=cond)
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                            learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
                                            min_beta=min_beta, max_beta=max_beta, sample_steps=sample_steps,
@@ -764,39 +770,36 @@ class NVSDiffusion(Diffusion):
         self.log_length = log_length
         self.custom_logger = SimpleLogger(clearml)
 
-    def sample(self, n_seq, cond, ray_o, ray_d, dist=4.0):
+    def sample(self, n_seq, cond, ray_o, ray_d, dist=1.0):
         n_samples = len(cond)
+        ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
         cond_sequence, ray_o_sequence, ray_d_sequence = [cond], [ray_o], [ray_d]
         for item_id in range(n_seq):
             x = torch.randn((n_samples, *self.shape)).type_as(cond)
-            x = torch.clamp(x, min=-1.0, max=1.0)
 
             poses = get_random_poses(torch.ones(n_samples).type_as(cond) * dist)
             ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
                                            focal=torch.ones(n_samples).type_as(cond) * self.focal, poses=poses)
             # b h w 3 -> b 3 h w
-            ray_d = torch.movedim(ray_d, -1, 1)
+            ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
             sample_steps = self.get_sample_steps()
             for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
                 idx = randint(0, len(cond_sequence) - 1)
-                _ray_o = torch.cat([ray_o] + [ray_o_sequence[idx]], dim=0)
-                _ray_d = torch.cat([ray_d] + [ray_d_sequence[idx]], dim=0)
-
                 ones = torch.ones(n_samples).type_as(x).long()
-                x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, x_cond=cond_sequence[idx],
-                                         time_cond=ones * t_curr, ray_o=_ray_o, ray_d=_ray_d, train=False)
-                x = torch.clamp(x, min=-1.0, max=1.0)
+                x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
+                                         x_cond=cond_sequence[idx], time_cond=ones * t_curr,
+                                         ray_o_cond=ray_o_sequence[idx], ray_d_cond=ray_d_sequence[idx], train=False)
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)
             ray_d_sequence.append(ray_d)
         return cond_sequence
 
-    def forward(self, x, t, x_cond, time_cond, ray_o, ray_d, train=True):
+    def forward(self, x, t, train=True, **kwargs):
         if (not self.training or not train) and self.use_ema:
             model = self.ema_model.module
         else:
             model = self.model
-        return model(x, t, x_cond, time_cond, ray_o, ray_d)
+        return model(x, t, **kwargs)
 
     def step(self, batch):
         # extract origin view
@@ -806,14 +809,17 @@ class NVSDiffusion(Diffusion):
         x_noised = self.q_sample(x, t, noise)
         # extract conditional view with classifier free guidance
         clf_free_msk = torch.rand(len(x)).type_as(x) > self.classifier_free
-        x_cond = torch.where(clf_free_msk[:, None, None, None], batch['cond'], torch.randn_like(batch['cond']))
+        x_cond = torch.where(clf_free_msk[:, None, None, None], batch['cond'],
+                             self.q_sample(batch['cond'], torch.ones((len(x),)).type_as(t) * (self.diffusion_steps - 1),
+                                           torch.randn_like(x)))
         # extract positional information
         origin_ray_o, origin_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['view_poses'])
         cond_ray_o, cond_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['cond_poses'])
-        # concat origin with conditional to use them simultaneously
-        ray_o = torch.cat([origin_ray_o, cond_ray_o], dim=0)
-        ray_d = torch.cat([origin_ray_d, cond_ray_d], dim=0).movedim(-1, 1)  # b h w 3 -> b 3 h w
-        eps, var_weight = self.forward(x_noised, t, x_cond=x_cond, time_cond=t, ray_o=ray_o, ray_d=ray_d)
+        # normalize direction vectors and move dims (b h w 3 -> b 3 h w)
+        origin_ray_d = (origin_ray_d / torch.norm(origin_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        cond_ray_d = (cond_ray_d / torch.norm(cond_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        eps, var_weight = self.forward(x_noised, t, ray_o=origin_ray_o, ray_d=origin_ray_d, x_cond=x_cond, time_cond=t,
+                                       ray_o_cond=cond_ray_o, ray_d_cond=cond_ray_d)
         return self.get_losses(x, x_noised, t, noise, eps, var_weight)
 
     def on_validation_epoch_end(self):
@@ -824,7 +830,7 @@ class NVSDiffusion(Diffusion):
         focal = batch['focal'][:self.log_samples].to(self.device)
         ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
         with torch.no_grad():
-            images = self.sample(self.log_length - 1, cond, ray_o, ray_d.movedim(-1, 1))
+            images = self.sample(self.log_length - 1, cond, ray_o, ray_d)
         # seq b 3 h w -> b seq 3 h w -> b seq h w 3
         images = torch.stack(images, dim=0).transpose(0, 1).movedim(2, -1)
         b, seq, h, w, d = images.shape
