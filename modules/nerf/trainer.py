@@ -746,7 +746,7 @@ class NVSDiffusion(Diffusion):
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.1, classifier_free=0.1,
                  batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, diffusion_steps=256,
                  sample_steps=128, kl_weight=1e-3, num_heads=None, steps=100, epochs=10000, beta_schedule='cos',
-                 embed_features=1024, pos_enc=16, cond='xunet',
+                 embed_features=512, pos_enc=16, cond='xunet',
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_length=16, focal=1.5, use_ema=True):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
