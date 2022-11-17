@@ -466,8 +466,8 @@ class XUnetBlock(torch.nn.Module):
     def __init__(self, block, dim, num_groups=32, need_attn=False, cond='xunet', num_heads=4):
         super(XUnetBlock, self).__init__()
         self.block = block
-        self.need_attn = need_attn
-        if self.need_attn and cond == 'xunet':
+        self.need_attn = need_attn and cond == 'xunet'
+        if self.need_attn:
             self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads, cross=True)
 
     def forward(self, x, emb):
