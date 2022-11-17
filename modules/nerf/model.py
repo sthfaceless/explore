@@ -483,7 +483,7 @@ class XUnetBlock(torch.nn.Module):
 class XUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
-                 num_groups=32, dropout=0.0, num_heads=4, time_features=1024, pos_enc=16,
+                 num_groups=32, dropout=0.0, num_heads=4, embed_features=1024, pos_enc=16,
                  extra_upsample_blocks=1, cond='xunet'):
         super(XUNetDenoiser, self).__init__()
         self.cond = cond
@@ -496,10 +496,10 @@ class XUNetDenoiser(torch.nn.Module):
                                             padding=kernel_size // 2)
 
         # Time embeddings
-        self.time_features = time_features
+        self.emb_features = embed_features
         self.time_layers = torch.nn.ModuleList([
-            torch.nn.Linear(time_features, time_features),
-            torch.nn.Linear(time_features, time_features),
+            torch.nn.Linear(embed_features, embed_features),
+            torch.nn.Linear(embed_features, embed_features),
         ])
         # Positional embeddings
         self.pos_features = pos_enc * 3 * (2 if cond == 'concat' else 1)
