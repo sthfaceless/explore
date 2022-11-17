@@ -587,8 +587,7 @@ class XUNetDenoiser(torch.nn.Module):
             h_time = get_timestep_encoding(time, self.emb_features, self.steps)
         else:
             raise NotImplementedError(f'Unknown conditional type for time {self.cond}')
-        h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))[:, :, None, None] \
-            .expand(b, self.emb_features, height, width)
+        h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))
 
         # Encode pos embeddings
         if self.cond == 'xunet':
