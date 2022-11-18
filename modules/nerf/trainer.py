@@ -824,19 +824,22 @@ class NVSDiffusion(Diffusion):
 
     def on_validation_epoch_end(self):
         data_iter = iter(self.trainer.val_dataloaders[0])
-        batch = next(data_iter)
-        cond = batch['cond'][:self.log_samples].to(self.device)
-        poses = batch['cond_poses'][:self.log_samples].to(self.device)
-        focal = batch['focal'][:self.log_samples].to(self.device)
-        ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
-        with torch.no_grad():
-            images = self.sample(self.log_length - 1, cond, ray_o, ray_d)
-        # seq b 3 h w -> b seq 3 h w -> b seq h w 3
-        images = torch.stack(images, dim=0).transpose(0, 1).movedim(2, -1)
-        b, seq, h, w, d = images.shape
-        images = images.reshape(b, 4, seq // 4, h, w, d).transpose(2, 3).reshape(b, 4 * h, seq // 4 * w,
-                                                                                 d).cpu().numpy()
-        galleries = [denormalize_image(images[idx]) for idx in range(b)]
+        galleries = []
+        while len(galleries) < self.log_samples:
+            batch = next(data_iter)
+            n_items = min(len(batch['focal']), self.log_samples - len(galleries))
+            cond = batch['cond'][:n_items].to(self.device)
+            poses = batch['cond_poses'][:n_items].to(self.device)
+            focal = batch['focal'][:n_items].to(self.device)
+            ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
+            with torch.no_grad():
+                images = self.sample(self.log_length - 1, cond, ray_o, ray_d)
+            # seq b 3 h w -> b seq 3 h w -> b seq h w 3
+            images = torch.stack(images, dim=0).transpose(0, 1).movedim(2, -1)
+            b, seq, h, w, d = images.shape
+            images = images.reshape(b, 4, seq // 4, h, w, d).transpose(2, 3).reshape(b, 4 * h, seq // 4 * w,
+                                                                                     d).cpu().numpy()
+            galleries.extend([denormalize_image(images[idx]) for idx in range(b)])
         self.custom_logger.log_images(galleries, 'sample', self.current_epoch)
 
         del images, batch, galleries
