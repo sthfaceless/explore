@@ -483,7 +483,7 @@ class XUnetBlock(torch.nn.Module):
 class XUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
-                 num_groups=32, dropout=0.0, num_heads=4, embed_features=512, pos_enc=16,
+                 num_groups=32, dropout=0.0, num_heads=4, embed_features=512, pos_enc=32,
                  extra_upsample_blocks=0, cond='xunet'):
         super(XUNetDenoiser, self).__init__()
         self.cond = cond
