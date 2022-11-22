@@ -1,7 +1,7 @@
 from copy import deepcopy
 
 import torch
-
+from PIL import Image
 
 class EMA(torch.nn.Module):
     def __init__(self, model, decay=0.9999, device=None):
@@ -27,3 +27,19 @@ class EMA(torch.nn.Module):
 
     def set(self, model):
         self._update(model, update_fn=lambda e, m: m)
+
+
+class SimpleLogger:
+
+    def __init__(self, clearml=None):
+        self.clearml = clearml
+
+    def log_image(self, image, name, epoch=0):
+        if self.clearml:
+            self.clearml.report_image('valid', f"{name}", iteration=epoch, image=image)
+        else:
+            Image.fromarray(image).save(f"{name}.png")
+
+    def log_images(self, images, prefix, epoch=0):
+        for image_id, image in enumerate(images):
+            self.log_image(image, f'{prefix}_{image_id}', epoch)

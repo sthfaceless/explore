@@ -13,23 +13,7 @@ from modules.gen.trainer import Diffusion
 from modules.nerf.dataset import *
 from modules.nerf.model import *
 from modules.nerf.util import *
-
-
-class SimpleLogger:
-
-    def __init__(self, clearml=None):
-        self.clearml = clearml
-
-    def log_image(self, image, name, epoch=0):
-        if self.clearml:
-            self.clearml.report_image('valid', f"{name}", iteration=epoch, image=image)
-        else:
-            Image.fromarray(image).save(f"{name}.png")
-
-    def log_images(self, images, prefix, epoch=0):
-        for image_id, image in enumerate(images):
-            self.log_image(image, f'{prefix}_{image_id}', epoch)
-
+from modules.common.trainer import SimpleLogger
 
 class NerfTrainer:
 

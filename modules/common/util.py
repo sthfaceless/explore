@@ -4,6 +4,19 @@ import numpy as np
 import torch
 
 
+class IndexedListWrapper:
+
+    def __init__(self, lst, indexes):
+        self.lst = lst
+        self.indexes = indexes
+
+    def __len__(self):
+        return len(self.indexes)
+
+    def __getitem__(self, idx):
+        return self.lst[self.indexes[idx]]
+
+
 def merge_history(history, outs, key='train'):
     if key not in history:
         history[key] = {}

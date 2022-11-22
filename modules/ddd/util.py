@@ -43,12 +43,9 @@ def loss_f(mesh_verts, mesh_faces, points, it, iterations, laplacian_weight):
     return chamfer
 
 
-def get_tetrahedra_verts(grid_resolution):
-    return None
+def get_tetrahedras_grid(grid_resolution):
+    pass
 
-
-def get_tetrahedras(grid_resolution):
-    return None
 
 
 def normalize_points(points):

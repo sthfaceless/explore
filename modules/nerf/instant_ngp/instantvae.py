@@ -675,4 +675,4 @@ if __name__ == "__main__":
         with open(f'{args.save_model}.history', 'w') as fp:
             json.dump(history, fp)
 
-# CUDA_VISIBLE_DEVICES=1 http_proxy= nohup python scripts/instantvae.py --dataset /dsk1/danil/dmtet/instant_16_4L_x2 --save_model /dsk1/danil/dmtet/instant_16_4L_x2/model > vae.log & disown
+# CUDA_VISIBLE_DEVICES=1 http_proxy= nohup python scripts/instantvae.py --dataset /dsk1/danil/ddd/instant_16_4L_x2 --save_model /dsk1/danil/ddd/instant_16_4L_x2/model > vae.log & disown
