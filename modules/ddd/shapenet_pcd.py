@@ -3,10 +3,12 @@ import torch
 import kaolin
 from modules.ddd.util import normalize_points
 
+
 def preprocessing_transform(inputs):
     mesh = inputs['mesh']
     vertices = mesh.vertices.unsqueeze(0)
     faces = mesh.faces
+    vertices = normalize_points(vertices)
 
     # Some materials don't contain an RGB texture map, so we are considering the single value
     # to be a single pixel texture map (1, 3, 1, 1)
@@ -81,9 +83,9 @@ class SamplePointsTransform(object):
 
         outputs = {
             'coords': coords,
-            'face_idx': face_idx,
             'colors': all_point_colors,
-            'name': inputs['name']
+            'vertices': inputs['vertices'],
+            'faces': inputs['faces'],
         }
         return outputs
 
@@ -117,6 +119,9 @@ class ShapenetPointClouds(torch.utils.data.Dataset):
         return len(self.pc_ds)
 
     def __getitem__(self, idx):
-        pcd = self.pc_ds[idx]['coords']
-        pcd = normalize_points(pcd)
-        return pcd
+        item = self.pc_ds[idx]
+        return {
+            'pcd': item['coords'],
+            'vertices': item['vertices'],
+            'faces': item['faces']
+        }

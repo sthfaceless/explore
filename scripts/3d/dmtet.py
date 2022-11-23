@@ -7,7 +7,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.strategies import DDPStrategy
 
 from modules.ddd.shapenet_pcd import ShapenetPointClouds
-from modules.ddd.trainer import PCD2Mesh
+from modules.ddd.dmtet_trainer import PCD2Mesh
 
 
 def get_parser():

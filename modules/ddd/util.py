@@ -1,51 +1,51 @@
-import kaolin
 import torch
 from sklearn.neighbors import KDTree
 
+def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
+                         scale_x=2.0, scale_y=2.0, scale_z=2.0):
+    coords = torch.linspace(start=0, end=1, steps=grid_resolution)
+    x, y, z = torch.meshgrid(torch.arange(grid_resolution), torch.arange(grid_resolution),
+                             torch.arange(grid_resolution))
+    x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
 
-# Laplacian regularization using umbrella operator (Fujiwara / Desbrun).
-# https://mgarland.org/class/geom04/material/smoothing.pdf
-def laplace_regularizer_const(mesh_verts, mesh_faces):
-    term = torch.zeros_like(mesh_verts)
-    norm = torch.zeros_like(mesh_verts[..., 0:1])
+    vertexes = torch.stack([(coords[x] - offset_x) * scale_x,
+                            (coords[y] - offset_y) * scale_y,
+                            (coords[z] - offset_z) * scale_z], dim=-1)
 
-    v0 = mesh_verts[mesh_faces[:, 0], :]
-    v1 = mesh_verts[mesh_faces[:, 1], :]
-    v2 = mesh_verts[mesh_faces[:, 2], :]
+    # six tetrahedras vertexes divides unit cube
+    ###
+    # 0 4 1 3
+    # 1 4 5 3
+    # 4 7 5 3
+    # 4 6 7 3
+    # 2 6 4 3
+    # 0 2 4 3
+    ###
+    x, y, z = torch.meshgrid(torch.arange(grid_resolution - 1), torch.arange(grid_resolution - 1),
+                             torch.arange(grid_resolution - 1))
+    x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
+    v0 = get_vertex_id(x, y, z, grid_res=grid_resolution)
+    v1 = get_vertex_id(x, y + 1, z, grid_res=grid_resolution)
+    v2 = get_vertex_id(x, y, z + 1, grid_res=grid_resolution)
+    v3 = get_vertex_id(x, y + 1, z + 1, grid_res=grid_resolution)
+    v4 = get_vertex_id(x + 1, y, z, grid_res=grid_resolution)
+    v5 = get_vertex_id(x + 1, y + 1, z, grid_res=grid_resolution)
+    v6 = get_vertex_id(x + 1, y, z + 1, grid_res=grid_resolution)
+    v7 = get_vertex_id(x + 1, y + 1, z + 1, grid_res=grid_resolution)
+    tetrahedras = torch.cat([
+        torch.stack([v0, v4, v1, v3], dim=-1),
+        torch.stack([v1, v4, v5, v3], dim=-1),
+        torch.stack([v4, v7, v5, v3], dim=-1),
+        torch.stack([v4, v6, v7, v3], dim=-1),
+        torch.stack([v2, v6, v4, v3], dim=-1),
+        torch.stack([v0, v2, v4, v3], dim=-1)
+    ], dim=0)
 
-    #     d01 = torch.norm(v1-v0, dim=-1, keepdim=True).clamp(min=1e-3)
-    #     d02 = torch.norm(v2-v0, dim=-1, keepdim=True).clamp(min=1e-3)
-    #     d12 = torch.norm(v2-v1, dim=-1, keepdim=True).clamp(min=1e-3)
-    #     term.scatter_add_(0, mesh_faces[:, 0:1].repeat(1,3), (v1 - v0) / d01  + (v2 - v0) / d02)
-    #     term.scatter_add_(0, mesh_faces[:, 1:2].repeat(1,3), (v0 - v1) / d01 + (v2 - v1) / d12)
-    #     term.scatter_add_(0, mesh_faces[:, 2:3].repeat(1,3), (v0 - v2) / d02 + (v1 - v2) / d12)
-
-    term.scatter_add_(0, mesh_faces[:, 0:1].repeat(1, 3), (v1 - v0) + (v2 - v0))
-    term.scatter_add_(0, mesh_faces[:, 1:2].repeat(1, 3), (v0 - v1) + (v2 - v1))
-    term.scatter_add_(0, mesh_faces[:, 2:3].repeat(1, 3), (v0 - v2) + (v1 - v2))
-    two = torch.ones_like(v0) * 2.0
-    norm.scatter_add_(0, mesh_faces[:, 0:1], two)
-    norm.scatter_add_(0, mesh_faces[:, 1:2], two)
-    norm.scatter_add_(0, mesh_faces[:, 2:3], two)
-    term = term / torch.clamp(norm, min=1.0)
-
-    return torch.mean(term ** 2)
-
-
-def loss_f(mesh_verts, mesh_faces, points, it, iterations, laplacian_weight):
-    areas = kaolin.ops.mesh.face_areas(mesh_verts.unsqueeze(0), mesh_faces)[0]
-    pred_points = kaolin.ops.mesh.sample_points(mesh_verts.unsqueeze(0), mesh_faces, len(points) // 2,
-                                                areas=areas.unsqueeze(0))[0][0]
-    chamfer = kaolin.metrics.pointcloud.chamfer_distance(pred_points.unsqueeze(0), points.unsqueeze(0)).mean()
-    if it > iterations // 4:
-        lap = laplace_regularizer_const(mesh_verts, mesh_faces)
-        return chamfer + lap * laplacian_weight
-    return chamfer
+    return vertexes, tetrahedras
 
 
-def get_tetrahedras_grid(grid_resolution):
-    pass
-
+def get_vertex_id(x, y, z, grid_res):
+    return x * grid_res * grid_res + y * grid_res + z
 
 
 def normalize_points(points):
@@ -66,3 +66,116 @@ def filter_pcd_outliers(points, neighbour_rate=1e-3):
     normal_points = ind[dist < threshold_dist]
     points = points[torch.tensor(normal_points).long().to(points.device)]
     return points
+
+
+def voxelize_points3d(points, features, grid_res):
+    b, n_points, dim = features.shape
+    points, features = points.view(b * n_points, 3), features.view(b * n_points, dim)
+    # retrieve indexes inside grid
+    indexes = torch.tensor_split(torch.floor((points + 1.0) / 2 * (grid_res - 1) + 0.5).long(), 3, dim=-1)
+    indexes = [torch.arange(b).type_as(indexes[0]).view(b, 1).repeat(1, n_points).view(b * n_points)] + [
+        index.squeeze(-1) for index in indexes]
+    # setup grid
+    grid = torch.zeros(b, grid_res, grid_res, grid_res, dim).type_as(features)
+    denom = torch.zeros(b, grid_res, grid_res, grid_res, dim).type_as(features)
+    grid.index_put_(indexes, features, accumulate=True)
+    denom.index_put_(indexes, torch.ones_like(features), accumulate=True)
+    grid /= torch.clamp(torch.sqrt(denom), min=1.0)
+    return grid
+
+
+def devoxelize_points3d(points, grid):
+    b, grid_res, _, _, dim = grid.shape
+    b, n_points, _ = points.shape
+    points = points.view(b * n_points, 3)
+    # retrieve values in grid scale
+    grid_points = (points + 1.0) / 2 * (grid_res - 1)
+    xval, yval, zval = torch.tensor_split(grid_points, 3, dim=-1)
+    xval, yval, zval = xval.squeeze(-1), yval.squeeze(-1), zval.squeeze(-1)
+    # retrieve indexes of voxel in grid
+    x, y, z = torch.tensor_split(torch.clamp(torch.floor(grid_points), max=grid_res - 2).long(), 3, dim=-1)
+    x, y, z = x.squeeze(-1), y.squeeze(-1), z.squeeze(-1)
+    bb = torch.arange(b).type_as(x).view(b, 1).repeat(1, n_points).view(b * n_points)
+    # apply trilinear interpolation for each point
+    xd, yd, zd = (xval - x.type_as(xval)).unsqueeze(-1), (yval - y.type_as(yval)).unsqueeze(-1), (
+            zval - z.type_as(zval)).unsqueeze(-1)
+    first_plane = ((grid[bb, x, y, z] * zd + grid[bb, x, y, z + 1] * (1 - zd)) * yd
+                   + (grid[bb, x, y + 1, z] * zd + grid[bb, x, y + 1, z + 1] * (1 - zd)) * (1 - yd))
+    second_plane = ((grid[bb, x + 1, y, z] * zd + grid[bb, x + 1, y, z + 1] * (1 - zd)) * yd
+                    + (grid[bb, x + 1, y + 1, z] * zd + grid[bb, x + 1, y + 1, z + 1] * (1 - zd)) * (1 - yd))
+    features = first_plane * xd + second_plane * (1 - xd)
+    features = features.view(b, n_points, -1)
+    return features
+
+
+def get_surface_tetrahedras(tetrahedras, sdf):
+    vertex_outside = sdf > 0
+    surface, non_surface = [], []
+    for batch_idx in range(len(sdf)):
+        tet_sdf = vertex_outside[batch_idx][tetrahedras.reshape(-1)].reshape(-1, 4)
+        tet_sum = torch.sum(tet_sdf, dim=-1)
+        surface_msk = (tet_sum > 0) & (tet_sum < 4)
+        surface.append(tetrahedras[surface_msk])
+        non_surface.append(tetrahedras[~surface_msk])
+
+    return surface, non_surface
+
+
+def get_tetrahedras_edges(tets):
+    n = torch.max(tets) + 1
+    codes = torch.cat([
+        tets[:, 0] * n + tets[:, 1],
+        tets[:, 1] * n + tets[:, 0],
+
+        tets[:, 1] * n + tets[:, 2],
+        tets[:, 2] * n + tets[:, 1],
+
+        tets[:, 2] * n + tets[:, 0],
+        tets[:, 0] * n + tets[:, 2],
+
+        tets[:, 0] * n + tets[:, 3],
+        tets[:, 3] * n + tets[:, 0],
+
+        tets[:, 1] * n + tets[:, 3],
+        tets[:, 3] * n + tets[:, 1],
+
+        tets[:, 2] * n + tets[:, 3],
+        tets[:, 3] * n + tets[:, 2]
+    ], dim=0).unique()
+
+    edges = torch.stack([codes.div(n, rounding_mode='trunc'), codes % n], dim=0)
+    return edges
+
+
+def get_mesh_edges(faces):
+    n = torch.max(faces) + 1
+    codes = torch.cat([
+        faces[:, 0] * n + faces[:, 1],
+        faces[:, 1] * n + faces[:, 0],
+
+        faces[:, 1] * n + faces[:, 2],
+        faces[:, 2] * n + faces[:, 1],
+
+        faces[:, 2] * n + faces[:, 0],
+        faces[:, 0] * n + faces[:, 2]
+    ], dim=0).unique()
+
+    edges = torch.stack([codes.div(n, rounding_mode='trunc'), codes % n], dim=0)
+    return edges
+
+
+def calculate_gaussian_curvature(vertices, faces):
+    v1, v2, v3 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+    angles = torch.zeros(len(vertices)).type_as(vertices)
+
+    angles.index_put_(faces[:, 0], torch.arccos(torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(-1)
+                                                / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))),
+                      accumulate=True)
+    angles.index_put_(faces[:, 1], torch.arccos(torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(-1)
+                                                / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))),
+                      accumulate=True)
+    angles.index_put_(faces[:, 2], torch.arccos(torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(-1)
+                                                / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))),
+                      accumulate=True)
+
+    return 2 * torch.pi - angles
