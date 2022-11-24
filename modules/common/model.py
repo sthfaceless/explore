@@ -344,18 +344,4 @@ class ResBlockConv1D(torch.nn.Module):
         return torch.nn.functional.gelu((self.block(x) + x) / 2 ** (1 / 2))
 
 
-class SimpleMLP(torch.nn.Module):
 
-    def __init__(self, input_dim, out_dim, hidden_dims=(256, 128, 64)):
-        super(SimpleMLP, self).__init__()
-        self.input_layer = torch.nn.Linear(input_dim, hidden_dims[0])
-        self.layers = torch.nn.ModuleList([torch.nn.Linear(dim, nxt_dim) for dim, nxt_dim in
-                                           zip(hidden_dims[:-1], hidden_dims[1:])])
-        self.out_layer = torch.nn.Linear(hidden_dims[-1], out_dim)
-
-    def forward(self, x):
-        h = self.input_layer(x)
-        for layer in self.layers:
-            h = layer(nonlinear(h))
-        out = self.out_layer(nonlinear(h))
-        return out

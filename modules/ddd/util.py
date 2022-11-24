@@ -1,6 +1,7 @@
 import torch
 from sklearn.neighbors import KDTree
 
+
 def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
                          scale_x=2.0, scale_y=2.0, scale_z=2.0):
     coords = torch.linspace(start=0, end=1, steps=grid_resolution)
@@ -108,17 +109,29 @@ def devoxelize_points3d(points, grid):
     return features
 
 
-def get_surface_tetrahedras(tetrahedras, sdf):
-    vertex_outside = sdf > 0
-    surface, non_surface = [], []
-    for batch_idx in range(len(sdf)):
-        tet_sdf = vertex_outside[batch_idx][tetrahedras.reshape(-1)].reshape(-1, 4)
+def get_surface_tetrahedras(bvertexes, btetrahedras, bsdf, bfeatures):
+    vsurface, vsdf, vfeatures, surface, extra_vertexes, extra_sdf = [], [], [], [], [], []
+    for vertexes, tets, sdf, features in zip(bvertexes, btetrahedras, bsdf, bfeatures):
+        vertex_outside = sdf > 0
+        tet_sdf = vertex_outside[tets.reshape(-1)].reshape(-1, 4).byte()
         tet_sum = torch.sum(tet_sdf, dim=-1)
-        surface_msk = (tet_sum > 0) & (tet_sum < 4)
-        surface.append(tetrahedras[surface_msk])
-        non_surface.append(tetrahedras[~surface_msk])
+        surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
 
-    return surface, non_surface
+        tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
+        tet_vertexes_msk[surface_tets.view(-1).unique()] = True
+        tet_vertexes_ids = torch.arange(len(vertexes)).type_as(tet_vertexes_msk).long()[tet_vertexes_msk]
+        vsurface.append(vertexes[tet_vertexes_ids])
+        vsdf.append(sdf[tet_vertexes_ids])
+        vfeatures.append(vfeatures[tet_vertexes_ids])
+        extra_vertexes.append(vertexes[~tet_vertexes_msk])
+        extra_sdf.append(sdf[~tet_vertexes_msk])
+
+        # we need to recalculate tetrahedras ids
+        indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1
+        surface_tets = indicators[surface_tets.view(-1)].view(-1, 4)
+        surface.append(surface_tets)
+
+    return vsurface, surface, vsdf, vfeatures, extra_vertexes, extra_sdf
 
 
 def get_tetrahedras_edges(tets):

@@ -52,6 +52,15 @@ class PointVoxelCNN(torch.nn.Module):
         # features (b, input_dim)
         return (self.map_points(features) + self.devoxelize(points, self.voxelize(points, features))) / 2 ** 0.5
 
+    def bvoxelize(self, points, features):
+        return [self.voxelize(p.unsqueeze(0), f.unsqueeze(0)).squeeze(0) for p, f in zip(points, features)]
+
+    def bdevoxelize(self, points, grid):
+        return [self.devoxelize(p.unsqueeze(0), g.unsqueeze(0)).squeeze(0) for p, g in zip(points, grid)]
+
+    def bforward(self, points, features):
+        return [self.forward(p.unsqueeze(0), f.unsqueeze(0)).squeeze(0) for p, f in zip(points, features)]
+
 
 class MultiPointVoxelCNN(torch.nn.Module):
 
@@ -71,12 +80,23 @@ class MultiPointVoxelCNN(torch.nn.Module):
     def forward(self, points, features):
         return torch.cat([module(points, features) for module in self.models], dim=-1)
 
+    def bvoxelize(self, points, features):
+        return [[model.voxelize(p.unsqueeze(0), f.unsqueeze(0)).squeeze(0) for model in self.models]
+                for p, f in zip(points, features)]
 
-class SFDDiscriminator(torch.nn.Module):
+    def bdevoxelize(self, points, bgrids):
+        return [torch.cat([model.devoxelize(p.unsqueeze(0), g.unsqueeze(0)).squeeze(0)
+                           for g, model in zip(grids, self.models)], dim=-1) for p, grids in zip(points, bgrids)]
 
-    def __init__(self, hidden_dims=(32, 64, 128, 256), num_groups=16):
-        super(SFDDiscriminator, self).__init__()
-        self.input_conv = torch.nn.Conv3d(in_channels=1, out_channels=hidden_dims[0], kernel_size=5)
+    def bforward(self, points, features):
+        return [self.forward(p.unsqueeze(0), f.unsqueeze(0)).squeeze(0) for p, f in zip(points, features)]
+
+
+class SDFDiscriminator(torch.nn.Module):
+
+    def __init__(self, input_dim, hidden_dims=(32, 64, 128, 256), num_groups=16):
+        super(SDFDiscriminator, self).__init__()
+        self.input_conv = torch.nn.Conv3d(in_channels=input_dim, out_channels=hidden_dims[0], kernel_size=5)
         self.norm1 = norm(hidden_dims[0], num_groups)
         self.downsample_conv = torch.nn.Conv3d(in_channels=hidden_dims[0], out_channels=hidden_dims[1],
                                                stride=2, kernel_size=3)
@@ -85,12 +105,12 @@ class SFDDiscriminator(torch.nn.Module):
         self.out_norm = norm(hidden_dims[-1], num_groups)
         self.out_layer = torch.nn.Linear(hidden_dims[-1], 1)
 
-    def forward(self, x, emb):
+    def forward(self, x):
         h = self.input_conv(x)  # 16 -> 12
         h = self.downsample_conv(nonlinear(self.norm1(h)))  # 12 -> 5
         h = self.conv1(nonlinear(h))  # 5 -> 3
         h = self.conv2(nonlinear(h))  # 3 -> 1
-        h = h.reshape(h.shape[0], -1) + emb
+        h = h.reshape(h.shape[0], -1)
         h = self.out_layer(nonlinear(self.out_norm(h)))
         out = torch.sigmoid(h)
         return out
@@ -113,10 +133,10 @@ class TetConv(torch.nn.Module):
         self.layer2 = torch.nn.Linear(mlp_dims[1], out_dim)
 
     def forward(self, x_verts, tets):
-        outs = []
-        for item_id, tet in enumerate(tets):
+        delta_v, delta_s, features = [], [], []
+        for x_vert, tet in zip(x_verts, tets):
             edges = get_tetrahedras_edges(tet)
-            x_vert = self.gcn1.input(x_verts[item_id])
+            x_vert = self.gcn1.input(x_vert)
             h_vert = self.gcn1.first(nonlinear(x_vert), edges)
             h_vert = self.gcn1.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5
@@ -129,12 +149,10 @@ class TetConv(torch.nn.Module):
 
             h_vert = self.layer1(nonlinear(h_vert))
             h_vert = self.layer2(nonlinear(h_vert))
-            outs.append(h_vert)
-        out = torch.stack(outs, dim=0)
-        delta_v = out[:, :, :3]
-        delta_sdf = out[:, :, 3]
-        features = out[:, :, 4:]
-        return delta_v, delta_sdf, features
+            delta_v.append(h_vert[:, :3])
+            delta_s.append(h_vert[:, 3])
+            features.append(h_vert[:, 4:])
+        return delta_v, delta_s, features
 
 
 class MeshConv(torch.nn.Module):
@@ -154,10 +172,10 @@ class MeshConv(torch.nn.Module):
         self.layer2 = torch.nn.Linear(mlp_dims[1], out_dim)
 
     def forward(self, x_verts, faces):
-        outs = []
-        for item_id, face in enumerate(faces):
+        delta_v, alphas = [], []
+        for x_vert, face in zip(x_verts, faces):
             edges = get_mesh_edges(face)
-            x_vert = self.gcn1.input(x_verts[item_id])
+            x_vert = self.gcn1.input(x_vert)
             h_vert = self.gcn1.first(nonlinear(x_vert), edges)
             h_vert = self.gcn1.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5
@@ -170,8 +188,26 @@ class MeshConv(torch.nn.Module):
 
             h_vert = self.layer1(nonlinear(h_vert))
             h_vert = self.layer2(nonlinear(h_vert))
-            outs.append(h_vert)
-        out = torch.stack(outs, dim=0)
-        v = out[:, :, :3]
-        alpha = out[:, :, 3]
-        return v, alpha
+            delta_v.append(h_vert[:, :3])
+            alphas.append(h_vert[:, 3])
+        return delta_v, alphas
+
+
+class SimpleMLP(torch.nn.Module):
+
+    def __init__(self, input_dim, out_dim, hidden_dims=(256, 128, 64)):
+        super(SimpleMLP, self).__init__()
+        self.input_layer = torch.nn.Linear(input_dim, hidden_dims[0])
+        self.layers = torch.nn.ModuleList([torch.nn.Linear(dim, nxt_dim) for dim, nxt_dim in
+                                           zip(hidden_dims[:-1], hidden_dims[1:])])
+        self.out_layer = torch.nn.Linear(hidden_dims[-1], out_dim)
+
+    def forward(self, x):
+        h = self.input_layer(x)
+        for layer in self.layers:
+            h = layer(nonlinear(h))
+        out = self.out_layer(nonlinear(h))
+        return out
+
+    def bforward(self, bx):
+        return [self.forward(x.unsqueeze(0)).squeeze(0) for x in bx]
