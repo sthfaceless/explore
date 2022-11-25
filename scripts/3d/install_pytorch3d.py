@@ -21,4 +21,4 @@ if need_pytorch3d:
         os.system("curl -LO https://github.com/NVIDIA/cub/archive/1.10.0.tar.gz")
         os.system("tar xzf 1.10.0.tar.gz")
         os.environ["CUB_HOME"] = os.getcwd() + "/cub-1.10.0"
-        os.system("pip install 'git+https://github.com/facebookresearch/pytorch3d.git@stable'")
+        os.system("pip install git+https://github.com/facebookresearch/pytorch3d.git@stable")

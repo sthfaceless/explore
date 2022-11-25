@@ -1,10 +1,12 @@
 from random import shuffle
 
+import numpy as np
 import pytorch_lightning as pl
 
 import kaolin
 from modules.common.trainer import SimpleLogger
 from modules.ddd.model import *
+from render_util import render_mesh
 
 
 class PCD2Mesh(pl.LightningModule):
@@ -404,6 +406,13 @@ class PCD2Mesh(pl.LightningModule):
             vertices_list=[v.cpu() for v in mesh_vertices],
             faces_list=[f.cpu() for f in mesh_faces]
         )
+
+        images = np.stack([render_mesh(v.detach().cpu().numpy(), f.detach().cpu().numpy())
+                           for v, f in zip(mesh_vertices, mesh_faces)], axis=0)
+        b, views, h, w = images.shape
+        images = images.reshape((b, 2, views // 2, h, w)).moveaxis(1, 3).reshape((b, 2 * h, views // 2 * w))
+        images = [images[idx] for idx in range(len(images))]
+        self.simple_logger.log_images(images, 'rendered_mesh', self.global_step)
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         # generator optimization
