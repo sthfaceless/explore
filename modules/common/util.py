@@ -1,4 +1,5 @@
 import json
+import random
 
 import numpy as np
 import torch
@@ -16,6 +17,19 @@ class IndexedListWrapper:
     def __getitem__(self, idx):
         return self.lst[self.indexes[idx]]
 
+
+class RandomIndexedListWrapper:
+
+    def __init__(self, lst, indexes):
+        self.lst = lst
+        self.indexes = indexes
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        idx = random.randint(0, len(self.indexes)-1)
+        return self.lst[self.indexes[idx]]
 
 def merge_history(history, outs, key='train'):
     if key not in history:
@@ -80,6 +94,13 @@ def get_positional_encoding(x, features):
     h = h.view(*h.shape[:-2], -1)  # dim, p -> dim * p
     if h.shape[-1] < features:
         h = torch.nn.functional.pad(h, pad=(0, features - h.shape[-1]), value=0)
+    return h
+
+def get_numpy_positional_encoding(points, pe_features=16):
+    powers = 2 ** np.arange(pe_features // 2, dtype=np.float32)
+    h = np.matmul(np.expand_dims(points, axis=-1), np.expand_dims(powers, axis=0))
+    h = np.concatenate([np.sin(h), np.cos(h)], axis=-1)
+    h = h.reshape((*h.shape[:-2], -1))  # dim, p -> dim * p
     return h
 
 

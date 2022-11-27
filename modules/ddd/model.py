@@ -5,7 +5,8 @@ import torch_geometric
 from modules.common.model import *
 from modules.ddd.util import *
 
-
+def nonlinear(x):
+    return torch.nn.functional.leaky_relu(x)
 class PointVoxelCNN(torch.nn.Module):
 
     def __init__(self, input_dim, dim, grid_res=32, kernel_size=3, num_groups=32, do_points_map=True):

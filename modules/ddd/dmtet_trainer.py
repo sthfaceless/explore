@@ -455,13 +455,13 @@ class PCD2Mesh(pl.LightningModule):
         return [gen_optimizer, dis_optimizer], [gen_scheduler, dis_scheduler]
 
     def train_dataloader(self):
-        train_items = IndexedListWrapper(self.dataset, self.train_idxs)
-        return torch.utils.data.DataLoader(train_items, batch_size=self.batch_size, shuffle=True,
+        train_items = RandomIndexedListWrapper(self.dataset, self.train_idxs)
+        return torch.utils.data.DataLoader(train_items, batch_size=self.batch_size, shuffle=False,
                                            num_workers=2 * torch.cuda.device_count(), collate_fn=lambda lst: lst,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
     def val_dataloader(self):
-        val_items = IndexedListWrapper(self.dataset, self.val_idxs)
-        return torch.utils.data.DataLoader(val_items, batch_size=self.batch_size, shuffle=True,
+        val_items = RandomIndexedListWrapper(self.dataset, self.val_idxs)
+        return torch.utils.data.DataLoader(val_items, batch_size=self.batch_size, shuffle=False,
                                            num_workers=2 * torch.cuda.device_count(), collate_fn=lambda lst: lst,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)

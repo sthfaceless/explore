@@ -12,7 +12,7 @@ from modules.ddd.shapenet_pcd import ShapenetPointClouds
 
 
 def get_parser():
-    parser = ArgumentParser(description="Training NeRF latents")
+    parser = ArgumentParser(description="Training deep marching tetrahedras representation")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to shapenet")
     parser.add_argument("--cats", default=['plane'], nargs='+', help="Shapenet categories to train")

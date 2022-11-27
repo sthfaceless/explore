@@ -61,6 +61,7 @@ class Attention(torch.nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.norm = torch.nn.LayerNorm(embed_dim)
         self.to_q = torch.nn.Linear(input_dim, embed_dim, bias=bias)
         self.to_kv = torch.nn.Linear(input_dim, embed_dim * 2, bias=bias)
         self.to_out = torch.nn.Sequential(
@@ -69,9 +70,11 @@ class Attention(torch.nn.Module):
         )
 
     def forward(self, q, v=None):
+        q = self.norm(q)
         if v is None:
             v = q
-
+        else:
+            v = self.norm(v)
         q = self.to_q(q)
         k, v = self.to_kv(v).chunk(2, dim=-1)
 
@@ -86,7 +89,7 @@ class Attention(torch.nn.Module):
         out = torch.matmul(attn, v)
 
         # b h n d -> b n (h d)
-        out = out.transpose(1, 2).view(b, n, self.num_heads * self.head_dim)
+        out = out.transpose(1, 2).reshape(b, n, self.num_heads * self.head_dim)
         out = self.to_out(out)
 
         return out
