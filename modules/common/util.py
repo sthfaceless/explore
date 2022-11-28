@@ -133,3 +133,10 @@ def collate_dicts(dicts):
                 result[k] = [v]
 
     return result
+
+
+def exists(*args):
+    exist = True
+    for arg in args:
+        exist = exist and arg is not None
+    return exist

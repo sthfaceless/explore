@@ -8,7 +8,9 @@ def nonlinear(x):
 
 
 def norm(dims, num_groups=32):
-    return torch.nn.GroupNorm(num_channels=dims, num_groups=min(dims, num_groups), eps=1e-6)
+    while dims % num_groups != 0:
+        num_groups -= 1
+    return torch.nn.GroupNorm(num_channels=dims, num_groups=num_groups, eps=1e-6)
 
 
 class SinActivation(torch.nn.Module):

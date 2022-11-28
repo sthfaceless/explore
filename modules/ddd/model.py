@@ -5,8 +5,11 @@ import torch_geometric
 from modules.common.model import *
 from modules.ddd.util import *
 
+
 def nonlinear(x):
     return torch.nn.functional.leaky_relu(x)
+
+
 class PointVoxelCNN(torch.nn.Module):
 
     def __init__(self, input_dim, dim, grid_res=32, kernel_size=3, num_groups=32, do_points_map=True):
@@ -142,7 +145,7 @@ class TetConv(torch.nn.Module):
             h_vert = self.gcn1.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5
 
-            x_vert = self.gcn2.input(nonlinear(x_vert), edges)
+            x_vert = self.gcn2.input(nonlinear(x_vert))
             h_vert = self.gcn2.first(nonlinear(x_vert), edges)
             h_vert = self.gcn2.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5
@@ -181,7 +184,7 @@ class MeshConv(torch.nn.Module):
             h_vert = self.gcn1.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5
 
-            x_vert = self.gcn2.input(nonlinear(x_vert), edges)
+            x_vert = self.gcn2.input(nonlinear(x_vert))
             h_vert = self.gcn2.first(nonlinear(x_vert), edges)
             h_vert = self.gcn2.second(nonlinear(h_vert), edges)
             x_vert = (x_vert + h_vert) / 2 ** 0.5

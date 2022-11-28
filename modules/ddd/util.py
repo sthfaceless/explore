@@ -109,7 +109,7 @@ def devoxelize_points3d(points, grid):
     second_plane = ((grid[bb, x + 1, y, z] * zd + grid[bb, x + 1, y, z + 1] * (1 - zd)) * yd
                     + (grid[bb, x + 1, y + 1, z] * zd + grid[bb, x + 1, y + 1, z + 1] * (1 - zd)) * (1 - yd))
     features = first_plane * xd + second_plane * (1 - xd)
-    features = features.view(b, n_points, -1)
+    features = features.view(b, n_points, dim)
     return features
 
 
@@ -117,29 +117,29 @@ def get_surface_tetrahedras(bvertexes, btetrahedras, bsdf, bfeatures):
     vsurface, vsdf, vfeatures, surface, extra_vertexes, extra_sdf = [], [], [], [], [], []
     for vertexes, tets, sdf, features in zip(bvertexes, btetrahedras, bsdf, bfeatures):
         vertex_outside = sdf > 0
-        tet_sdf = vertex_outside[tets.reshape(-1)].reshape(-1, 4).byte()
+        tet_sdf = vertex_outside[tets.reshape(len(tets) * 4)].reshape(len(tets), 4).byte()
         tet_sum = torch.sum(tet_sdf, dim=-1)
         surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
 
         tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
-        tet_vertexes_msk[surface_tets.view(-1).unique()] = True
+        tet_vertexes_msk[surface_tets.view(len(surface_tets) * 4).unique()] = True
         tet_vertexes_ids = torch.arange(len(vertexes)).type_as(tet_vertexes_msk).long()[tet_vertexes_msk]
         vsurface.append(vertexes[tet_vertexes_ids])
         vsdf.append(sdf[tet_vertexes_ids])
-        vfeatures.append(vfeatures[tet_vertexes_ids])
+        vfeatures.append(features[tet_vertexes_ids])
         extra_vertexes.append(vertexes[~tet_vertexes_msk])
         extra_sdf.append(sdf[~tet_vertexes_msk])
 
         # we need to recalculate tetrahedras ids
         indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1
-        surface_tets = indicators[surface_tets.view(-1)].view(-1, 4)
+        surface_tets = indicators[surface_tets.view(len(surface_tets) * 4)].view(len(surface_tets), 4)
         surface.append(surface_tets)
 
     return vsurface, surface, vsdf, vfeatures, extra_vertexes, extra_sdf
 
 
 def get_tetrahedras_edges(tets):
-    n = torch.max(tets) + 1
+    n = torch.max(tets) + 1 if len(tets) > 0 else torch.ones(1).type_as(tets)
     codes = torch.cat([
         tets[:, 0] * n + tets[:, 1],
         tets[:, 1] * n + tets[:, 0],
@@ -165,7 +165,7 @@ def get_tetrahedras_edges(tets):
 
 
 def get_mesh_edges(faces):
-    n = torch.max(faces) + 1
+    n = torch.max(faces) + 1 if len(faces) > 0 else torch.ones(1).type_as(faces)
     codes = torch.cat([
         faces[:, 0] * n + faces[:, 1],
         faces[:, 1] * n + faces[:, 0],
@@ -182,17 +182,22 @@ def get_mesh_edges(faces):
 
 
 def calculate_gaussian_curvature(vertices, faces):
+    if len(vertices) == 0 or len(faces) == 0:
+        return torch.zeros_like(vertices)
     v1, v2, v3 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
     angles = torch.zeros(len(vertices)).type_as(vertices)
-
-    angles.index_put_(faces[:, 0], torch.arccos(torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(-1)
-                                                / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))),
+    n_faces = len(faces)
+    angles.index_put_((faces[:, 0],),
+                      torch.arccos(torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(n_faces)
+                                   / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))),
                       accumulate=True)
-    angles.index_put_(faces[:, 1], torch.arccos(torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(-1)
-                                                / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))),
+    angles.index_put_((faces[:, 1],),
+                      torch.arccos(torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(n_faces)
+                                   / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))),
                       accumulate=True)
-    angles.index_put_(faces[:, 2], torch.arccos(torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(-1)
-                                                / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))),
+    angles.index_put_((faces[:, 2],),
+                      torch.arccos(torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(n_faces)
+                                   / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))),
                       accumulate=True)
 
     return 2 * torch.pi - angles

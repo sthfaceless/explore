@@ -122,6 +122,6 @@ class ShapenetPointClouds(torch.utils.data.Dataset):
         item = self.pc_ds[idx]
         return {
             'pcd': item['coords'],
-            'vertices': item['vertices'],
+            'vertices': item['vertices'][0],
             'faces': item['faces']
         }

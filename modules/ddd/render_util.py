@@ -55,7 +55,5 @@ def render_mesh(verts, faces, img_size=256, n_views=8, device=torch.device('cpu'
     meshes = mesh.extend(n_views)
     with torch.no_grad():
         images = renderer(meshes, cameras=cameras, lights=lights).cpu().numpy()[..., :3]
-
-    images = images.cpu().numpy()
     images = (images * 255).astype(np.uint8)
     return images
