@@ -18,7 +18,7 @@ class IndexedListWrapper:
         return self.lst[self.indexes[idx]]
 
 
-class RandomIndexedListWrapper:
+class RandomIndexedListWrapper(torch.utils.data.IterableDataset):
 
     def __init__(self, lst, indexes):
         self.lst = lst
@@ -28,8 +28,9 @@ class RandomIndexedListWrapper:
         return self
 
     def __next__(self):
-        idx = random.randint(0, len(self.indexes)-1)
+        idx = random.randint(0, len(self.indexes) - 1)
         return self.lst[self.indexes[idx]]
+
 
 def merge_history(history, outs, key='train'):
     if key not in history:
@@ -96,6 +97,7 @@ def get_positional_encoding(x, features):
         h = torch.nn.functional.pad(h, pad=(0, features - h.shape[-1]), value=0)
     return h
 
+
 def get_numpy_positional_encoding(points, pe_features=16):
     powers = 2 ** np.arange(pe_features // 2, dtype=np.float32)
     h = np.matmul(np.expand_dims(points, axis=-1), np.expand_dims(powers, axis=0))
@@ -117,3 +119,17 @@ def log_tensor_size(x, name):
 def log_tensors_size(tensors, name):
     for idx, tensor in enumerate(tensors):
         log_tensor_size(tensor, f'{name}_{idx}')
+
+
+def collate_dicts(dicts):
+    if len(dicts) == 0:
+        return {}
+    result = {}
+    for d in dicts:
+        for k, v in d.items():
+            if k in result:
+                result[k].append(v)
+            else:
+                result[k] = [v]
+
+    return result

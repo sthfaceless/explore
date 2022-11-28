@@ -50,8 +50,12 @@ def get_vertex_id(x, y, z, grid_res):
 
 
 def normalize_points(points):
-    center = (points.max(0)[0] + points.min(0)[0]) / 2
-    max_l = (points.max(0)[0] - points.min(0)[0]).max()
+    if len(points.shape) == 2:
+        center = (points.max(0)[0] + points.min(0)[0]) / 2
+        max_l = (points.max(0)[0] - points.min(0)[0]).max()
+    else:
+        center = (points.max(dim=1)[0] + points.min(dim=1)[0]) / 2
+        max_l = (points.max(dim=1)[0] - points.min(dim=1)[0]).max(dim=-1)[0]
     points = ((points - center) / max_l)
     return points
 

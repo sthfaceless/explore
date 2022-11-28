@@ -191,6 +191,7 @@ class PCD2Mesh(pl.LightningModule):
         # make features based on conditional point cloud and predict initial sdf
         bpcd, bpcd_faces, pcd_noised, pe_features = [], [], [], []
         for vertices, faces in zip(bvertices, bfaces):
+            assert faces.max().detach().cpu().numpy() < len(vertices), 'Faces idxs more than vertices'
             pcd, faces_ids = kaolin.ops.mesh.sample_points(vertices.unsqueeze(0), faces, self.chamfer_samples)
             pcd = pcd.squeeze(0)
             bpcd.append(pcd)
@@ -457,11 +458,11 @@ class PCD2Mesh(pl.LightningModule):
     def train_dataloader(self):
         train_items = RandomIndexedListWrapper(self.dataset, self.train_idxs)
         return torch.utils.data.DataLoader(train_items, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=2 * torch.cuda.device_count(), collate_fn=lambda lst: lst,
+                                           num_workers=2 * torch.cuda.device_count(), collate_fn=collate_dicts,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)
 
     def val_dataloader(self):
         val_items = RandomIndexedListWrapper(self.dataset, self.val_idxs)
         return torch.utils.data.DataLoader(val_items, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=2 * torch.cuda.device_count(), collate_fn=lambda lst: lst,
+                                           num_workers=2 * torch.cuda.device_count(), collate_fn=collate_dicts,
                                            pin_memory=True, drop_last=False, prefetch_factor=2)

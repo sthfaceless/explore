@@ -98,7 +98,7 @@ if __name__ == "__main__":
                      disc_sdf_grid=args.disc_sdf_grid, curvature_samples=args.curvature_samples,
                      curvature_threshold=args.curvature_threshold, disc_v_noise=args.disc_v_noise,
                      noise=args.noise, batch_size=args.batch_size)
-    trainer = Trainer(max_steps=args.steps_schedule[-1], val_check_interval=1 / args.validations,
+    trainer = Trainer(max_steps=args.steps_schedule[-1], val_check_interval=args.steps_schedule[-1] // args.validations,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                       strategy=DDPStrategy(find_unused_parameters=True),
                       accumulate_grad_batches=args.acc_grads,
