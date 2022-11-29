@@ -52,10 +52,10 @@ def get_vertex_id(x, y, z, grid_res):
 def normalize_points(points):
     if len(points.shape) == 2:
         center = (points.max(0)[0] + points.min(0)[0]) / 2
-        max_l = (points.max(0)[0] - points.min(0)[0]).max()
+        max_l = (torch.abs(points).max(0)[0]).max()
     else:
         center = (points.max(dim=1)[0] + points.min(dim=1)[0]) / 2
-        max_l = (points.max(dim=1)[0] - points.min(dim=1)[0]).max(dim=-1)[0]
+        max_l = (torch.abs(points).max(dim=1)[0]).max(dim=-1)[0]
     points = ((points - center) / max_l)
     return points
 
@@ -69,7 +69,7 @@ def filter_pcd_outliers(points, neighbour_rate=1e-3):
     mean_dist, std_dist = dist.mean(), dist.std()
     threshold_dist = mean_dist + 3 * std_dist
     normal_points = ind[dist < threshold_dist]
-    points = points[torch.tensor(normal_points).long().to(points.device)]
+    points = points[torch.tensor(normal_points).type_as(points).long()]
     return points
 
 
@@ -113,29 +113,23 @@ def devoxelize_points3d(points, grid):
     return features
 
 
-def get_surface_tetrahedras(bvertexes, btetrahedras, bsdf, bfeatures):
-    vsurface, vsdf, vfeatures, surface, extra_vertexes, extra_sdf = [], [], [], [], [], []
-    for vertexes, tets, sdf, features in zip(bvertexes, btetrahedras, bsdf, bfeatures):
-        vertex_outside = sdf > 0
-        tet_sdf = vertex_outside[tets.reshape(len(tets) * 4)].reshape(len(tets), 4).byte()
-        tet_sum = torch.sum(tet_sdf, dim=-1)
-        surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
+def get_surface_tetrahedras(vertexes, tets, sdf, features):
+    vertex_outside = sdf > 0
+    tet_sdf = vertex_outside[tets.reshape(len(tets) * 4)].reshape(len(tets), 4).byte()
+    tet_sum = torch.sum(tet_sdf, dim=-1)
+    surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
 
-        tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
-        tet_vertexes_msk[surface_tets.view(len(surface_tets) * 4).unique()] = True
-        tet_vertexes_ids = torch.arange(len(vertexes)).type_as(tet_vertexes_msk).long()[tet_vertexes_msk]
-        vsurface.append(vertexes[tet_vertexes_ids])
-        vsdf.append(sdf[tet_vertexes_ids])
-        vfeatures.append(features[tet_vertexes_ids])
-        extra_vertexes.append(vertexes[~tet_vertexes_msk])
-        extra_sdf.append(sdf[~tet_vertexes_msk])
+    tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
+    tet_vertexes_msk[surface_tets.view(len(surface_tets) * 4).unique()] = True
+    tet_vertexes_ids = torch.arange(len(vertexes)).type_as(tet_vertexes_msk).long()[tet_vertexes_msk]
 
-        # we need to recalculate tetrahedras ids
-        indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1
-        surface_tets = indicators[surface_tets.view(len(surface_tets) * 4)].view(len(surface_tets), 4)
-        surface.append(surface_tets)
+    # we need to recalculate tetrahedras ids
+    indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1
+    surface_tets = indicators[surface_tets.view(len(surface_tets) * 4)].view(len(surface_tets), 4)
 
-    return vsurface, surface, vsdf, vfeatures, extra_vertexes, extra_sdf
+    return vertexes[tet_vertexes_ids], surface_tets, sdf[tet_vertexes_ids], \
+           features[tet_vertexes_ids], vertexes[~tet_vertexes_msk], \
+           sdf[~tet_vertexes_msk]
 
 
 def get_tetrahedras_edges(tets):
@@ -188,16 +182,19 @@ def calculate_gaussian_curvature(vertices, faces):
     angles = torch.zeros(len(vertices)).type_as(vertices)
     n_faces = len(faces)
     angles.index_put_((faces[:, 0],),
-                      torch.arccos(torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(n_faces)
-                                   / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))),
+                      torch.arccos((torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(n_faces)
+                                    / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))
+                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
                       accumulate=True)
     angles.index_put_((faces[:, 1],),
-                      torch.arccos(torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(n_faces)
-                                   / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))),
+                      torch.arccos((torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(n_faces)
+                                    / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))
+                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
                       accumulate=True)
     angles.index_put_((faces[:, 2],),
-                      torch.arccos(torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(n_faces)
-                                   / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))),
+                      torch.arccos((torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(n_faces)
+                                    / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))
+                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
                       accumulate=True)
 
     return 2 * torch.pi - angles

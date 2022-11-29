@@ -1,6 +1,8 @@
+import functools
 from random import shuffle
 
 import pytorch_lightning as pl
+import torch
 
 import kaolin
 from modules.common.trainer import SimpleLogger
@@ -78,248 +80,237 @@ class PCD2Mesh(pl.LightningModule):
 
         self.sdf_disc = SDFDiscriminator(input_dim=1 + self.pos_features, hidden_dims=disc_dims)
 
-    def get_mesh_sdf(self, bpoints, bvertices, bfaces):
-        bsdf = []
-        for points, vertices, faces in zip(bpoints, bvertices, bfaces):
-            if len(points) == 0:
-                bsdf.append(torch.Tensor().type_as(points))
-                continue
-            points, vertices = points.unsqueeze(0), vertices.unsqueeze(0)
-            face_vertices = kaolin.ops.mesh.index_vertices_by_faces(vertices, faces)
-            dists, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(points, face_vertices)
-            signs = kaolin.ops.mesh.check_sign(vertices, faces, points).squeeze(0)
-            sdf = dists.squeeze(0) * (signs.type_as(dists) - 0.5) * 2 * (-1)  # inside is -1
-            bsdf.append(sdf)
-        return bsdf
+        # state variables
+        self.volume_refinement = False
+        self.adversarial_training = False
+        self.surface_subdivision = False
 
-    def calculate_sdf_loss(self, btet_vertexes, btet_sdf, bvertices, bfaces):
-        btrue_sdf = self.get_mesh_sdf(btet_vertexes, bvertices, bfaces)
-        sdf_loss = None
-        for tet_vertexes, tet_sdf, true_sdf in zip(btet_vertexes, btet_sdf, btrue_sdf):
-            if len(tet_vertexes) == 0:
-                if sdf_loss is None:
-                    sdf_loss = torch.tensor(0).type_as(tet_sdf)
-                continue
-            true_sdf = torch.clamp(true_sdf, min=-self.sdf_clamp, max=self.sdf_clamp)
-            loss = torch.sum((tet_sdf - true_sdf) ** 2)
-            if sdf_loss is None:
-                sdf_loss = loss
-            else:
-                sdf_loss += loss
-        sdf_loss = sdf_loss / len(btet_vertexes)
-        return sdf_loss
+    def get_mesh_sdf(self, points, vertices, faces):
+        if len(faces) == 0 or len(points[0]) == 0:
+            return torch.zeros(1, len(points)).type_as(points)
+        face_vertices = kaolin.ops.mesh.index_vertices_by_faces(vertices, faces)
+        dists, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(points, face_vertices)
+        signs = kaolin.ops.mesh.check_sign(vertices, faces, points)
+        sdf = dists * (signs.type_as(dists) - 0.5) * 2 * (-1)  # inside is -1
+        return sdf
 
-    def mesh_step(self, pcd_noised=None, bvertices=None, bfaces=None, n_volume_division=None, n_surface_division=None):
-        # sample pcd for train
-        if exists(bvertices, bfaces):
-            bpcd, bpcd_faces, pcd_noised, pe_features = [], [], [], []
-            for vertices, faces in zip(bvertices, bfaces):
-                assert faces.max().detach().cpu().numpy() < len(vertices), 'Faces idxs more than vertices'
-                pcd, faces_ids = kaolin.ops.mesh.sample_points(vertices.unsqueeze(0), faces, self.chamfer_samples)
-                pcd = pcd.squeeze(0)
-                bpcd.append(pcd)
-                bpcd_faces.append(faces_ids.squeeze(0))
-                _pcd_noised = pcd + torch.randn_like(pcd) * self.noise
-                pcd_noised.append(_pcd_noised)
-        # NeRF like encoding
-        pe_features = [torch.cat([_pcd_noised, get_positional_encoding(_pcd_noised, self.pe_powers * 3)], dim=-1)
-                       for _pcd_noised in pcd_noised]
+    def calculate_sdf_loss(self, tet_vertexes, tet_sdf, vertices, faces):
+        if len(tet_vertexes[0]) == 0:
+            return torch.tensor(0).type_as(tet_sdf)
+        true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+        true_sdf = torch.clamp(true_sdf, min=-self.sdf_clamp, max=self.sdf_clamp)
+        loss = torch.mean((tet_sdf - true_sdf) ** 2)
+        return loss
 
-        sdf_grids = self.sdf_points_encoder.bvoxelize(pcd_noised, pe_features)
-        tet_vertexes = [self.tet_vertexes for _ in range(len(pcd_noised))]
-        pos_vertex_features = self.sdf_points_encoder.bdevoxelize(tet_vertexes, sdf_grids)
-        tet_out = self.sdf_model.bforward(pos_vertex_features)
-        tet_sdf, tet_features = [out[:, 0] for out in tet_out], [out[:, 1:] for out in tet_out]
-
-        out = {
-            'sdf_grids': sdf_grids
-        }
-        # if we're training only on SDF
-        if self.global_step < self.steps_schedule[0] and exists(bvertices, bfaces):
-            true_sdf = self.get_mesh_sdf(tet_vertexes, bvertices, bfaces)
-            out['sdf_loss'] = torch.mean(torch.stack([torch.sum((t_sdf - p_sdf) ** 2)
-                                                      for t_sdf, p_sdf in zip(true_sdf, tet_sdf)], dim=0), dim=0)
-            out['loss'] = out['sdf_loss']
-        # add volume subdivision and refinement
+    def on_train_batch_start(self, batch, batch_idx):
         if self.global_step >= self.steps_schedule[0]:
-            # calc sdf loss for extra tetrahedras
-            tetrahedras = [self.tetrahedras for _ in range(len(tet_vertexes))]
+            self.volume_refinement = True
+        if self.global_step >= self.steps_schedule[1]:
+            self.adversarial_training = True
+        if self.global_step >= self.steps_schedule[2]:
+            self.surface_subdivision = True
+
+    def surf_batchify(self, out):
+        tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf = out
+        return tet_vertexes.unsqueeze(0), tetrahedras, tet_sdf.unsqueeze(0), tet_features.unsqueeze(0), \
+               extra_vertexes.unsqueeze(0), extra_sdf.unsqueeze(0)
+
+    def single_mesh_step(self, pcd_noised=None, vertices=None, faces=None, n_volume_division=None,
+                         n_surface_division=None):
+        # create output dict
+        out = {}
+        # sample pcd for train
+        if exists(vertices, faces):
+            # make vertices batched as all models and losses are expecting batched input
+            vertices = vertices.unsqueeze(0)
+            pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples)
+            pcd_noised = torch.clamp(pcd + torch.randn_like(pcd) * self.noise, min=-1.0, max=1.0)
+
+        # NeRF like encoding
+        pe_features = torch.cat([pcd_noised, get_positional_encoding(pcd_noised, self.pe_powers * 3)], dim=-1)
+
+        # create first positional encoding grids for SDF prediction and save it for SDF discriminator
+        sdf_grids = self.sdf_points_encoder.voxelize(pcd_noised, pe_features)
+        out['sdf_grids'] = sdf_grids
+
+        # create feature for each tetrahedras vertex and predict initial sdf + features
+        tet_vertexes = self.tet_vertexes.unsqueeze(0)  # make batched
+        pos_vertex_features = self.sdf_points_encoder.devoxelize(tet_vertexes, sdf_grids)
+        tet_out = self.sdf_model.forward(pos_vertex_features)
+        tet_sdf, tet_features = tet_out[:, :, 0], tet_out[:, :, 1:]
+
+        # if we're training only on SDF
+        if not self.volume_refinement and exists(vertices, faces):
+            true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+            out['sdf_loss'] = torch.mean((true_sdf - tet_sdf) ** 2)
+            out['loss'] = out['sdf_loss']
+
+        # add volume subdivision and refinement
+        if self.volume_refinement:
             tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf \
-                = get_surface_tetrahedras(tet_vertexes, tetrahedras, tet_sdf, tet_features)
-            if exists(bvertices, bfaces):
-                out['sdf_loss'] = self.calculate_sdf_loss(extra_vertexes, extra_sdf, bvertices, bfaces)
-            # first refinement step
-            grids = self.ref_points_encoder.bvoxelize(pcd_noised, pe_features)
-            pos_features = self.ref_points_encoder.bdevoxelize(tet_vertexes, grids)
-            delta_v, delta_s, tet_features = self.ref1([
-                torch.cat([v, s.unsqueeze(-1), f, pf], dim=-1)
-                for v, s, f, pf in zip(tet_vertexes, tet_sdf, tet_features, pos_features)], tetrahedras)
+                = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], self.tetrahedras,
+                                                             tet_sdf[0], tet_features[0]))
+            if exists(vertices, faces):
+                out['sdf_loss'] = self.calculate_sdf_loss(extra_vertexes, extra_sdf, vertices, faces)
+
+            # encode same tetrahedras with another volume encoder
+            grids = self.ref_points_encoder.voxelize(pcd_noised, pe_features)
+            pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
+            delta_v, delta_s, tet_features = self.ref1(torch.cat([tet_vertexes[0], tet_sdf.unsqueeze(-1)[0],
+                                                                  tet_features[0], pos_features[0]], dim=-1),
+                                                       tetrahedras)
+            tet_features = tet_features.unsqueeze(0)
+
             # update vertexes
-            tet_vertexes = [vertexes + delta_vertexes for vertexes, delta_vertexes in zip(tet_vertexes, delta_v)]
-            tet_sdf = [sdf + delta_sdf for sdf, delta_sdf in zip(tet_sdf, delta_s)]
+            tet_vertexes = tet_vertexes + delta_v.unsqueeze(0)
+            tet_sdf = tet_sdf + delta_s.unsqueeze(0)
+
             # add regularization on vertex delta
-            out['delta_vertex'] = torch.mean(torch.stack(
-                [torch.sum(delta_vertexes ** 2) for delta_vertexes in delta_v], dim=0), dim=0)
+            if len(delta_v) > 0:
+                out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
+            else:
+                out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
 
             if n_volume_division is None:
                 n_volume_division = self.n_volume_division
             for div_id in range(n_volume_division):
-                new_tetrahedras, new_tet_vertexes, new_tet_sdf, new_tet_features = [], [], [], []
-                for vertexes, tets, sdf, features in zip(tet_vertexes, tetrahedras, tet_sdf, tet_features):
-                    # volume subdivision
-                    _vertexes, _tets, _out = kaolin.ops.mesh.subdivide_tetmesh(
-                        vertexes.unsqueeze(0), tets, torch.cat([sdf.unsqueeze(-1), features], dim=-1).unsqueeze(0))
-                    new_tet_vertexes.append(_vertexes.squeeze(0))
-                    new_tetrahedras.append(_tets)
-                    new_tet_sdf.append(_out[0, :, 0])
-                    new_tet_features.append(_out[0, :, 1:])
+
+                # volume subdivision
+                tet_vertexes, tetrahedras, out_features = kaolin.ops.mesh.subdivide_tetmesh(
+                    tet_vertexes, tetrahedras, torch.cat([tet_sdf.unsqueeze(-1), tet_features], dim=-1))
+                tet_sdf, tet_features = out_features[:, :, 0], out_features[:, :, 1:]
 
                 # take only surface tetrahedras and add sdf loss to others
                 tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf \
-                    = get_surface_tetrahedras(new_tet_vertexes, new_tetrahedras, new_tet_sdf, new_tet_features)
-                if exists(bvertices, bfaces):
-                    out['sdf_loss'] += self.calculate_sdf_loss(extra_vertexes, extra_sdf, bvertices, bfaces)
+                    = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
+                                                                 tet_sdf[0], tet_features[0]))
+                if exists(vertices, faces):
+                    out['sdf_loss'] += self.calculate_sdf_loss(extra_vertexes, extra_sdf, vertices, faces)
 
             # additional volume refinement step
-            pos_features = self.ref_points_encoder.bdevoxelize(tet_vertexes, grids)
-            delta_v, delta_s, tet_features = self.ref2([
-                torch.cat([v, s.unsqueeze(-1), f, pf], dim=-1)
-                for v, s, f, pf in zip(tet_vertexes, tet_sdf, tet_features, pos_features)], tetrahedras)
-            # update vertexes
-            tet_vertexes = [vertexes + delta_vertexes for vertexes, delta_vertexes in zip(tet_vertexes, delta_v)]
-            tet_sdf = [sdf + delta_sdf for sdf, delta_sdf in zip(tet_sdf, delta_s)]
-            # add regularization on vertex delta
-            out['delta_vertex'] += torch.mean(torch.stack(
-                [torch.sum(delta_vertexes ** 2) for delta_vertexes in delta_v], dim=0), dim=0)
-            if exists(bvertices, bfaces):
-                out['sdf_loss'] += self.calculate_sdf_loss(tet_vertexes, tet_sdf, bvertices, bfaces)
+            pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
+            delta_v, delta_s, tet_features = self.ref2(torch.cat([tet_vertexes[0], tet_sdf.unsqueeze(-1)[0],
+                                                                  tet_features[0], pos_features[0]], dim=-1),
+                                                       tetrahedras)
+            tet_features = tet_features.unsqueeze(0)
 
-            if exists(bvertices, bfaces):
+            # update vertexes
+            tet_vertexes = tet_vertexes + delta_v.unsqueeze(0)
+            tet_sdf = tet_sdf + delta_s.unsqueeze(0)
+
+            # add all sdf loss on all remaining vertices
+            if exists(vertices, faces):
+                out['sdf_loss'] += self.calculate_sdf_loss(tet_vertexes, tet_sdf, vertices, faces)
                 out['loss'] = out['sdf_loss'] * self.sdf_weight
+
+            # add regularization on vertex delta
+            if exists(vertices, faces) and len(delta_v) > 0:
+                out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
                 out['loss'] += out['delta_vertex'] * self.delta_weight
 
-            mesh_vertices, mesh_faces = [], []
-            for vertexes, tets, sdf in zip(tet_vertexes, tetrahedras, tet_sdf):
-                vertices, faces = kaolin.ops.conversions.marching_tetrahedra(vertexes.unsqueeze(0), tets,
-                                                                             sdf.unsqueeze(0))
-                mesh_vertices.append(vertices[0])
-                mesh_faces.append(faces[0])
+            # apply marching tetrahedra on surface tetrahedras to extract mesh
+            mesh_vertices, mesh_faces = kaolin.ops.conversions.marching_tetrahedra(tet_vertexes, tetrahedras, tet_sdf)
+            mesh_vertices, mesh_faces = mesh_vertices[0].unsqueeze(0), mesh_faces[0]
+            out['mesh_vertices'] = mesh_vertices
+            out['mesh_faces'] = mesh_faces
 
         # surface subdivision
         if n_surface_division is None:
             n_surface_division = self.n_surface_division
-        if self.global_step >= self.steps_schedule[2]:
-            pos_features = self.ref_points_encoder.bdevoxelize(mesh_vertices, grids)
-            delta_v, alphas = self.surface_ref([torch.cat([v, pf], dim=-1)
-                                                for v, pf in zip(mesh_vertices, pos_features)], mesh_faces)
-            mesh_vertices = [vertices + delta_vertices for vertices, delta_vertices in zip(mesh_vertices, delta_v)]
-            new_mesh_vertices, new_mesh_faces = [], []
-            for vertices, faces, alpha in zip(mesh_vertices, mesh_faces, alphas):
-                if len(vertices) > 0 and len(faces) > 0:
-                    vertices, faces = kaolin.ops.mesh.subdivide_trianglemesh(
-                        vertices.unsqueeze(0), faces, iterations=n_surface_division, alpha=alpha.unsqueeze(0))
-                    vertices = vertices[0]
-                new_mesh_vertices.append(vertices)
-                new_mesh_faces.append(faces)
-            mesh_vertices, mesh_faces = new_mesh_vertices, new_mesh_faces
+        if self.surface_subdivision:
+            # positional features for mesh vertices
+            pos_features = self.ref_points_encoder.devoxelize(mesh_vertices, grids)
 
-        if self.global_step >= self.steps_schedule[0]:
+            # learnable surface subdivision predicts changed vertices and alpha smoothing factor
+            delta_v, alphas = self.surface_ref(torch.cat([mesh_vertices[0], pos_features[0]], dim=-1), mesh_faces)
+            mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
+            if len(mesh_faces) > 0:
+                mesh_vertices, mesh_faces = kaolin.ops.mesh.subdivide_trianglemesh(
+                    mesh_vertices, mesh_faces, iterations=n_surface_division, alpha=alphas.unsqueeze(0))
+
             out['mesh_vertices'] = mesh_vertices
             out['mesh_faces'] = mesh_faces
 
-        if self.global_step >= self.steps_schedule[0] and exists(bvertices, bfaces):
-            chamfer_loss, normal_loss = None, None
-            for pred_vertices, pred_faces, true_vertices, true_faces, true_pcd, true_faces_ids in zip(mesh_vertices,
-                                                                                                      mesh_faces,
-                                                                                                      bvertices, bfaces,
-                                                                                                      bpcd, bpcd_faces):
-                if len(pred_vertices) == 0 or len(pred_faces) == 0:
-                    continue
+        # calculate losses on predicted mesh
+        if self.volume_refinement and exists(vertices, faces):
+            if len(mesh_faces) == 0:
+                chamfer_loss = torch.tensor(0).type_as(vertices)
+                normal_loss = torch.tensor(0).type_as(vertices)
+            else:
                 # calculate pcd chamfer loss
-                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(
-                    pred_vertices.unsqueeze(0), pred_faces, self.chamfer_samples)
-                loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, true_pcd.unsqueeze(0),
-                                                                  w1=len(pred_pcd), w2=len(true_pcd))
-                if chamfer_loss is None:
-                    chamfer_loss = loss
-                else:
-                    chamfer_loss += loss
+                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples)
+                chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)
+
                 # calculate mesh normal loss with finding normal for each point in pcd
                 pred_normals = kaolin.ops.mesh.face_normals(
-                    kaolin.ops.mesh.index_vertices_by_faces(pred_vertices.unsqueeze(0), pred_faces),
-                    unit=True).squeeze(0)
-                pred_normals = pred_normals[faces_ids.squeeze(0)]
-                # finding normal of the closest points
-                dist, point_ids = kaolin.metrics.pointcloud.sided_distance(pred_pcd, true_pcd.unsqueeze(0))
-                true_normals = kaolin.ops.mesh.face_normals(
-                    kaolin.ops.mesh.index_vertices_by_faces(true_vertices.unsqueeze(0), true_faces),
-                    unit=True).squeeze(0)
-                true_normals = true_normals[true_faces_ids[point_ids.squeeze(0)]]
-                loss = torch.sum(1 - torch.abs(
-                    torch.matmul(pred_normals.unsqueeze(1), true_normals.unsqueeze(2)).view(-1)))
-                if normal_loss is None:
-                    normal_loss = loss
-                else:
-                    normal_loss += loss
+                    kaolin.ops.mesh.index_vertices_by_faces(mesh_vertices, mesh_faces), unit=True)[0]
+                pred_normals = pred_normals[faces_ids[0]]
 
-            if chamfer_loss is not None:
-                out['chamfer_loss'] = chamfer_loss / len(bpcd)
-                out['loss'] += out['chamfer_loss'] * self.chamfer_weight
-            if normal_loss is not None:
-                out['normal_loss'] = normal_loss / len(bpcd)
-                out['loss'] += out['normal_loss'] * self.normal_weight
+                # finding normal of the closest points
+                dist, point_ids = kaolin.metrics.pointcloud.sided_distance(pred_pcd, pcd)
+                true_normals = kaolin.ops.mesh.face_normals(
+                    kaolin.ops.mesh.index_vertices_by_faces(mesh_vertices, mesh_faces), unit=True)[0]
+                true_normals = true_normals[true_faces_ids[0][point_ids[0]]]
+                normal_loss = torch.mean(1 - torch.abs(
+                    torch.matmul(pred_normals.unsqueeze(1), true_normals.unsqueeze(2)).view(-1)))
+
+            out['chamfer_loss'] = chamfer_loss
+            out['loss'] += out['chamfer_loss'] * self.chamfer_weight
+            out['normal_loss'] = normal_loss
+            out['loss'] += out['normal_loss'] * self.normal_weight
 
         return out
 
-    def shared_step(self, bvertices, bfaces, optimizer_idx, n_volume_division=None, n_surface_division=None,
+    def shared_step(self, vertices, faces, optimizer_idx, n_volume_division=None, n_surface_division=None,
                     kind='train'):
 
         if optimizer_idx == 1:  # for optimizing discriminator
             with torch.no_grad():
-                out = self.mesh_step(bvertices=bvertices, bfaces=bfaces, n_volume_division=n_volume_division,
-                                     n_surface_division=n_surface_division)
+                out = self.single_mesh_step(vertices=vertices, faces=faces, n_volume_division=n_volume_division,
+                                            n_surface_division=n_surface_division)
         else:
-            out = self.mesh_step(bvertices=bvertices, bfaces=bfaces, n_volume_division=n_volume_division,
-                                 n_surface_division=n_surface_division)
+            out = self.single_mesh_step(vertices=vertices, faces=faces, n_volume_division=n_volume_division,
+                                        n_surface_division=n_surface_division)
 
         # discriminator
-        if self.global_step >= self.steps_schedule[1]:
-            mesh_vertices, mesh_faces = out['mesh_vertices'], out['mesh_faces']
-            curvatures = [calculate_gaussian_curvature(vertices, faces) for vertices, faces in zip(bvertices, bfaces)]
-            indexes = [torch.arange(len(curvature)).type_as(curvature).long()[curvature >= self.curvature_threshold]
-                       for curvature in curvatures]
-            indexes = [index[torch.randint(0, len(index), (self.curvature_samples,)).type_as(index).long()]
-                       for index in indexes]
+        if self.adversarial_training:
+            # find high curvature points on mesh
+            curvatures = calculate_gaussian_curvature(vertices, faces)
+            indexes = torch.arange(len(curvatures)).type_as(curvatures).long()[curvatures >= self.curvature_threshold]
+            indexes = indexes[torch.randint(0, len(indexes), (self.curvature_samples,)).type_as(indexes).long()]
+
+            # create uniform grid nearby selected point
             grid = torch.stack(torch.meshgrid(
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(bvertices[0]),
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(bvertices[0]),
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(bvertices[0]), ), dim=-1) * self.disc_sdf_scale
-            bgrids = [(vertices[index] + torch.randn_like(vertices[index]) * self.disc_v_noise)
-                      .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
-                      for vertices, index in zip(bvertices, indexes)]
+                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
+                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
+                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices), ), dim=-1) * self.disc_sdf_scale
+            grids = (vertices[indexes] + torch.randn_like(vertices[indexes]) * self.disc_v_noise) \
+                        .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
+
+            # extract mesh output of generator
+            mesh_vertices, mesh_faces, sdf_grids = out['mesh_vertices'], out['mesh_faces'], out['sdf_grids']
             pred_sdf_features, true_sdf_features = [], []
-            sdf_grids = out['sdf_grids']
-            for item_idx, pred_vertices, pred_faces, true_vertices, true_faces, grids in zip(range(len(mesh_vertices)),
-                                                                                             mesh_vertices, mesh_faces,
-                                                                                             bvertices, bfaces, bgrids):
-                for grid in grids:
-                    grid_points = grid.view(self.disc_sdf_grid ** 3, 3)
-                    pos_features = self.sdf_points_encoder.bdevoxelize([grid_points], [sdf_grids[item_idx]])[0]. \
-                        view(self.pos_features, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid)
-                    true_sdf_features.append(torch.cat([
-                        self.get_mesh_sdf([grid_points], [true_vertices], [true_faces])[0]
-                        .view(1, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid), pos_features], dim=0))
-                    if len(pred_vertices) > 0 and len(pred_faces) > 0:
-                        pred_sdf_features.append(torch.cat([
-                            self.get_mesh_sdf([grid_points], [pred_vertices], [pred_faces])[0]
-                            .view(1, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid), pos_features], dim=0))
+
+            # generate true sdf and positional features for each grid
+            for grid_idx in range(len(grids)):
+                # make each grid as n points as expected by models
+                grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
+                pos_features = self.sdf_points_encoder.devoxelize(grid_points, sdf_grids). \
+                    view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
+                true_sdf_features.append(torch.cat([
+                    self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0]
+                    .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1), pos_features], dim=-1))
+                if len(mesh_faces) > 0:
+                    pred_sdf_features.append(torch.cat([
+                        self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0]
+                        .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1), pos_features], dim=-1))
 
             sdf_features = torch.stack(true_sdf_features, dim=0)
             if len(pred_sdf_features) > 0:
                 sdf_features = torch.cat([sdf_features, torch.stack(pred_sdf_features, dim=0)], dim=0)
-            disc_preds = self.sdf_disc(sdf_features)
+            disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
             if len(pred_sdf_features) > 0:
-                out['adv_loss'] = torch.mean((disc_preds[:len(pred_sdf_features)] - 1) ** 2)
+                out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_sdf_features)]) ** 2)
                 out['loss'] += out['adv_loss'] * self.disc_weight
                 out['disc_loss'] = torch.mean(disc_preds[:len(pred_sdf_features)] ** 2) \
                                    + torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
@@ -327,8 +318,8 @@ class PCD2Mesh(pl.LightningModule):
                 out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
 
         for k, v in out.items():
-            if isinstance(v, torch.Tensor):
-                self.log(f'{kind}_{k}', v, prog_bar=True, sync_dist=True)
+            if isinstance(v, torch.Tensor) and v.numel() == 1:
+                self.log(f'{kind}_{k}', v, prog_bar=True, sync_dist=True, batch_size=1)
         return out
 
     def on_validation_epoch_end(self):
@@ -336,13 +327,7 @@ class PCD2Mesh(pl.LightningModule):
         data_iter = iter(self.trainer.val_dataloaders[0])
         batch = next(data_iter)
         pcd = [_pcd.to(self.device) for _pcd in batch['pcd']]
-        pcd_noised = [_pcd + torch.randn_like(_pcd) * self.noise for _pcd in pcd]
-        with torch.no_grad():
-            out = self.mesh_step(pcd_noised=pcd_noised)
-            if 'mesh_vertices' not in out or 'mesh_faces' not in out:
-                return
-            else:
-                mesh_vertices, mesh_faces = out['mesh_vertices'], out['mesh_faces']
+        pcd_noised = [torch.clamp(_pcd + torch.randn_like(_pcd) * self.noise, min=-1.0, max=1.0) for _pcd in pcd]
 
         self.timelapse.add_pointcloud_batch(category='input',
                                             pointcloud_list=[_pcd.cpu() for _pcd in pcd],
@@ -352,6 +337,14 @@ class PCD2Mesh(pl.LightningModule):
                                             pointcloud_list=[_pcd.cpu() for _pcd in pcd_noised],
                                             points_type="usd_geom_points",
                                             iteration=self.global_step)
+        mesh_vertices, mesh_faces = [], []
+        with torch.no_grad():
+            for _pcd_noised in pcd_noised:
+                out = self.single_mesh_step(pcd_noised=_pcd_noised.unsqueeze(0))
+                if 'mesh_vertices' in out and 'mesh_faces' in out:
+                    mesh_vertices.append(out['mesh_vertices'][0])
+                    mesh_vertices.append(out['mesh_faces'])
+
         self.timelapse.add_mesh_batch(
             iteration=self.global_step,
             category='predicted_mesh',
@@ -360,7 +353,7 @@ class PCD2Mesh(pl.LightningModule):
         )
 
         rendered_images = [render_mesh(v, f, device=self.device) for v, f in zip(mesh_vertices, mesh_faces)
-                           if len(v) > 0 and len(f) > 0]
+                           if len(f) > 0]
         if len(rendered_images) > 0:
             images = np.stack(rendered_images, axis=0)
             b, views, h, w = images.shape
@@ -369,20 +362,26 @@ class PCD2Mesh(pl.LightningModule):
             self.simple_logger.log_images(images, 'rendered_mesh', self.global_step)
 
     def validation_step(self, batch, batch_idx):
-        out = self.shared_step(batch['vertices'], batch['faces'], 0, kind='val')
-        return out['loss']
+        loss = functools.reduce(lambda l1, l2: l1 + l2,
+                                [self.shared_step(v, f, 0, kind='val')['loss']
+                                 for v, f in zip(batch['vertices'], batch['faces'])])
+        return loss
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         # generator optimization
         if optimizer_idx == 0:
-            out = self.shared_step(batch['vertices'], batch['faces'], optimizer_idx)
-            return out['loss']
+            loss = functools.reduce(lambda l1, l2: l1 + l2,
+                                    [self.shared_step(v, f, optimizer_idx)['loss']
+                                     for v, f in zip(batch['vertices'], batch['faces'])])
+            return loss
         # discriminator optimization
         if optimizer_idx == 1:
-            if self.global_step < self.steps_schedule[2]:
+            if not self.adversarial_training:
                 return None
-            out = self.shared_step(batch['vertices'], batch['faces'], optimizer_idx)
-            return out['disc_loss']
+            loss = functools.reduce(lambda l1, l2: l1 + l2,
+                                    [self.shared_step(v, f, optimizer_idx)['disc_loss']
+                                     for v, f in zip(batch['vertices'], batch['faces'])])
+            return loss
 
     def configure_optimizers(self):
         gen_optimizer = torch.optim.Adam(lr=self.learning_rate,

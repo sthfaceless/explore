@@ -28,8 +28,12 @@ class RandomIndexedListWrapper(torch.utils.data.IterableDataset):
         return self
 
     def __next__(self):
-        idx = random.randint(0, len(self.indexes) - 1)
-        return self.lst[self.indexes[idx]]
+        while True:
+            try:
+                idx = random.randint(0, len(self.indexes) - 1)
+                return self.lst[self.indexes[idx]]
+            except Exception as e:
+                print(f'Exception occured during loading dataset object {str(e)}')
 
 
 def merge_history(history, outs, key='train'):
