@@ -1,7 +1,13 @@
 from copy import deepcopy
 
-import torch
+import lovely_tensors as lt
+import matplotlib.pyplot as plt
+import seaborn as sns
 from PIL import Image
+from mpl_toolkits.mplot3d import art3d
+
+from modules.common.util import *
+
 
 class EMA(torch.nn.Module):
     def __init__(self, model, decay=0.9999, device=None):
@@ -43,3 +49,46 @@ class SimpleLogger:
     def log_images(self, images, prefix, epoch=0):
         for image_id, image in enumerate(images):
             self.log_image(image, f'{prefix}_{image_id}', epoch)
+
+    def log_tensor(self, tensor, name=''):
+        print(f'{name} --- {lt.lovely(tensor)}')
+
+    def log_plot(self, plt, name, epoch=0):
+        if self.clearml:
+            self.clearml.report_matplotlib_figure(title=name, series="valid", iteration=epoch, figure=plt)
+        else:
+            plt.savefig(f"{name}_{epoch}.png")
+        plt.close()
+
+    def log_distribution(self, values, name, epoch=0):
+        sns.kdeplot(values)
+        self.log_plot(plt, name, epoch)
+
+    def log_values(self, values, name, epoch=0):
+        sns.lineplot(values)
+        self.log_plot(plt, name, epoch)
+
+    def _log_scatter2d(self, x, y, name, color=None, epoch=0):
+        plt.scatter(x=x, y=y, c=None)
+        self.log_plot(plt, name, epoch)
+
+    def log_scatter2d(self, x, y, name, color=None, epoch=0):
+        run_async(self._log_scatter2d, x, y, name, color=color, epoch=epoch)
+
+    def _log_scatter3d(self, x, y, z, name, color=None, epoch=0):
+        ax = plt.axes(projection="3d")
+        ax.scatter3D(x, y, z, c=color)
+        self.log_plot(plt, name, epoch)
+
+    def log_scatter3d(self, x, y, z, name, color=None, epoch=0):
+        run_async(self._log_scatter3d, x, y, z, name, color=color, epoch=epoch)
+
+    def _log_mesh(self, vertices, faces, name, epoch=0):
+        pc = art3d.Poly3DCollection(vertices[faces],
+                                    facecolors=np.ones((len(faces), 3), dtype=np.float32) * 0.75, edgecolor="gray")
+        ax = plt.axes(projection="3d")
+        ax.add_collection(pc)
+        self.log_plot(plt, name, epoch)
+
+    def log_mesh(self, vertices, faces, name, epoch=0):
+        run_async(self._log_mesh, vertices, faces, name, epoch=epoch)

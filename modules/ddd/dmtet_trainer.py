@@ -2,7 +2,6 @@ import functools
 from random import shuffle
 
 import pytorch_lightning as pl
-import torch
 
 import kaolin
 from modules.common.trainer import SimpleLogger
@@ -13,7 +12,7 @@ from render_util import render_mesh
 class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
-                 learning_rate=1e-4,
+                 learning_rate=1e-4, debug_interval=-1,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000,
@@ -24,8 +23,12 @@ class PCD2Mesh(pl.LightningModule):
         super(PCD2Mesh, self).__init__()
         self.save_hyperparameters(ignore=['dataset', 'clearml', 'timelapse'])
 
+        self.debug = debug_interval > 0
+        self.debug_interval = debug_interval
+        self.debug_state = False
+
         self.timelapse = timelapse
-        self.simple_logger = SimpleLogger(clearml)
+        self.lg = SimpleLogger(clearml)
         self.dataset = dataset
         if dataset is not None:
             idxs = list(range(len(dataset)))
@@ -51,6 +54,7 @@ class PCD2Mesh(pl.LightningModule):
         self.sdf_clamp = sdf_clamp
         self.n_volume_division = n_volume_division
         self.n_surface_division = n_surface_division
+        self.encoder_grids = encoder_grids
 
         self.sdf_weight = sdf_weight
         self.delta_weight = delta_weight
@@ -85,6 +89,15 @@ class PCD2Mesh(pl.LightningModule):
         self.adversarial_training = False
         self.surface_subdivision = False
 
+        if self.debug:
+            print(self.lg.log_tensor(tet_vertexes), 'Tetrahedras grid vertices')
+            print(self.lg.log_tensor(tetrahedras), 'Tetrahedras grid faces')
+            self.lg.log_scatter3d(tn(tet_vertexes[:, 0]), tn(tet_vertexes[:, 1]), tn(tet_vertexes[:, 2]),
+                                  'tetrahedras_vertex')
+            _v, _f = tetrahedras2mesh(tet_vertexes, tetrahedras)
+            indexes = torch.randint(low=0, high=len(_f), size=(50000,)).type_as(_f).long()
+            self.lg.log_mesh(tn(_v.cpu()), tn(_f[indexes]), 'tetrahedras_grid')
+
     def get_mesh_sdf(self, points, vertices, faces):
         if len(faces) == 0 or len(points[0]) == 0:
             return torch.zeros(1, len(points)).type_as(points)
@@ -109,6 +122,8 @@ class PCD2Mesh(pl.LightningModule):
             self.adversarial_training = True
         if self.global_step >= self.steps_schedule[2]:
             self.surface_subdivision = True
+        if self.debug and self.global_step % self.debug_interval == 0:
+            self.debug_state = True
 
     def surf_batchify(self, out):
         tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf = out
@@ -129,6 +144,11 @@ class PCD2Mesh(pl.LightningModule):
         # NeRF like encoding
         pe_features = torch.cat([pcd_noised, get_positional_encoding(pcd_noised, self.pe_powers * 3)], dim=-1)
 
+        if self.debug_staet and exists(vertices, faces):
+            self.lg.log_tensor(pcd[0], 'Input point cloud')
+            self.lg.log_tensor(pcd_noised[0], 'Noised onput point cloud')
+            self.lg.log_tensor(pe_features[0], 'NeRF like input features')
+
         # create first positional encoding grids for SDF prediction and save it for SDF discriminator
         sdf_grids = self.sdf_points_encoder.voxelize(pcd_noised, pe_features)
         out['sdf_grids'] = sdf_grids
@@ -138,6 +158,18 @@ class PCD2Mesh(pl.LightningModule):
         pos_vertex_features = self.sdf_points_encoder.devoxelize(tet_vertexes, sdf_grids)
         tet_out = self.sdf_model.forward(pos_vertex_features)
         tet_sdf, tet_features = tet_out[:, :, 0], tet_out[:, :, 1:]
+
+        if self.debug_state:
+            for grid_idx, grid in enumerate(sdf_grids):
+                self.lg.log_tensor(grid, f'SDF volume feature grid {self.encoder_grids[grid_idx]}')
+            self.lg.log_tensor(tet_sdf, 'First predicted sdf')
+            self.lg.log_tensor(tet_features, 'First predicted features')
+            indexes = tet_sdf[0] < 0.05
+            self.lg.log_scatter3d(tn(tet_vertexes[0, indexes, 0]), tn(tet_vertexes[0, indexes, 1]),
+                                  tn(tet_vertexes[0, indexes, 2]), 'predicted_sdf',
+                                  color=tn((torch.ones(len(tet_sdf[0]), 3).type_as(tet_sdf)
+                                            * tet_sdf[0].unsqueeze(1) + 0.5).clamp(max=1.0, min=0.0)),
+                                  epoch=self.global_step)
 
         # if we're training only on SDF
         if not self.volume_refinement and exists(vertices, faces):
@@ -171,6 +203,20 @@ class PCD2Mesh(pl.LightningModule):
             else:
                 out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
 
+            if self.debug_state:
+                for grid_idx, grid in enumerate(grids):
+                    self.lg.log_tensor(grid, f'Refinement volume feature grid {self.encoder_grids[grid_idx]}')
+                self.lg.log_tensor(delta_v, 'First refimenent delta vertices')
+                self.lg.log_tensor(delta_s, 'First refimenent delta sdf')
+                self.lg.log_tensor(tet_features, 'First refimenent features')
+                self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
+                                      'first_refined_tetrahedras', epoch=self.global_step)
+                _, debug_faces = tetrahedras2mesh(tet_vertexes[0], tetrahedras)
+                if len(debug_faces) > 50000:
+                    indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                    debug_faces = debug_faces[indexes]
+                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'first_refined_tetrahedras_mesh', epoch=self.global_step)
+
             if n_volume_division is None:
                 n_volume_division = self.n_volume_division
             for div_id in range(n_volume_division):
@@ -187,6 +233,17 @@ class PCD2Mesh(pl.LightningModule):
                 if exists(vertices, faces):
                     out['sdf_loss'] += self.calculate_sdf_loss(extra_vertexes, extra_sdf, vertices, faces)
 
+            if self.debug_state:
+                self.lg.log_tensor(tet_vertexes, 'subdivided vertexes')
+                self.lg.log_tensor(tet_features, 'subdivided features')
+                self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
+                                      'subdivided_tetrahedras', epoch=self.global_step)
+                _, debug_faces = tetrahedras2mesh(tet_vertexes[0], tetrahedras)
+                if len(debug_faces) > 50000:
+                    indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                    debug_faces = debug_faces[indexes]
+                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'subdivided_tetrahedras_mesh', epoch=self.global_step)
+
             # additional volume refinement step
             pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
             delta_v, delta_s, tet_features = self.ref2(torch.cat([tet_vertexes[0], tet_sdf.unsqueeze(-1)[0],
@@ -197,6 +254,19 @@ class PCD2Mesh(pl.LightningModule):
             # update vertexes
             tet_vertexes = tet_vertexes + delta_v.unsqueeze(0)
             tet_sdf = tet_sdf + delta_s.unsqueeze(0)
+
+            if self.debug_state:
+                self.lg.log_tensor(delta_v, 'Second refimenent delta vertices')
+                self.lg.log_tensor(delta_s, 'Second refimenent delta sdf')
+                self.lg.log_tensor(tet_features, 'Second refimenent features')
+                self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
+                                      'subdivided_refined_tetrahedras', epoch=self.global_step)
+                _, debug_faces = tetrahedras2mesh(tet_vertexes[0], tetrahedras)
+                if len(debug_faces) > 50000:
+                    indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                    debug_faces = debug_faces[indexes]
+                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'subdivided_refined_tetrahedras_mesh',
+                                 epoch=self.global_step)
 
             # add all sdf loss on all remaining vertices
             if exists(vertices, faces):
@@ -214,6 +284,13 @@ class PCD2Mesh(pl.LightningModule):
             out['mesh_vertices'] = mesh_vertices
             out['mesh_faces'] = mesh_faces
 
+            if self.debug_state:
+                debug_faces = mesh_faces
+                if len(debug_faces) > 50000:
+                    indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                    debug_faces = debug_faces[indexes]
+                self.lg.log_mesh(mesh_vertices[0], debug_faces, 'first_predicted_mesh', epoch=self.global_step)
+
         # surface subdivision
         if n_surface_division is None:
             n_surface_division = self.n_surface_division
@@ -230,6 +307,15 @@ class PCD2Mesh(pl.LightningModule):
 
             out['mesh_vertices'] = mesh_vertices
             out['mesh_faces'] = mesh_faces
+
+            if self.debug_state:
+                self.lg.log_tensor(delta_v, 'Surface subdivision delta vertices')
+                self.lg.log_tensor(alphas, 'Surface subdivision alphas')
+                debug_faces = mesh_faces
+                if len(debug_faces) > 50000:
+                    indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                    debug_faces = debug_faces[indexes]
+                self.lg.log_mesh(mesh_vertices[0], debug_faces, 'subdivided_predicted_mesh', epoch=self.global_step)
 
         # calculate losses on predicted mesh
         if self.volume_refinement and exists(vertices, faces):
@@ -254,6 +340,10 @@ class PCD2Mesh(pl.LightningModule):
                 normal_loss = torch.mean(1 - torch.abs(
                     torch.matmul(pred_normals.unsqueeze(1), true_normals.unsqueeze(2)).view(-1)))
 
+                if self.debug_state:
+                    self.lg.log_tensor(pred_pcd, 'Predicted point cloud on mesh')
+                    self.lg.log_tensor(dist, 'Predicted - True pcd dists')
+                    self.lg.log_tensor(pred_normals, 'Predicted mesh normals')
             out['chamfer_loss'] = chamfer_loss
             out['loss'] += out['chamfer_loss'] * self.chamfer_weight
             out['normal_loss'] = normal_loss
@@ -297,13 +387,27 @@ class PCD2Mesh(pl.LightningModule):
                 grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
                 pos_features = self.sdf_points_encoder.devoxelize(grid_points, sdf_grids). \
                     view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
-                true_sdf_features.append(torch.cat([
-                    self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0]
-                    .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1), pos_features], dim=-1))
+                true_grid_sdf = self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0] \
+                    .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
+                true_sdf_features.append(torch.cat([true_grid_sdf, pos_features], dim=-1))
                 if len(mesh_faces) > 0:
-                    pred_sdf_features.append(torch.cat([
-                        self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0]
-                        .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1), pos_features], dim=-1))
+                    pred_grid_sdf = self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
+                        .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
+                    pred_sdf_features.append(torch.cat([pred_grid_sdf, pos_features], dim=-1))
+
+                if self.debug_state:
+                    self.lg.log_tensor(true_grid_sdf, 'True sdf grid at high curvature')
+                    tsp = grid_points.view(-1, 3)
+                    tsg = true_grid_sdf.view(-1, 1)
+                    self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'true_sdf_grid_{grid_idx}',
+                                          color=tn(torch.ones(len(tsp), 3).type_as(tsg)
+                                                   * tsg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
+                    if len(mesh_faces) > 0:
+                        self.lg.log_tensor(pred_grid_sdf, 'Predicted sdf grid at high curvature')
+                        psg = pred_grid_sdf.view(-1, 1)
+                        self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'pred_sdf_grid_{grid_idx}',
+                                              color=tn(torch.ones(len(tsp), 3).type_as(tsg)
+                                                       * psg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
 
             sdf_features = torch.stack(true_sdf_features, dim=0)
             if len(pred_sdf_features) > 0:
@@ -317,6 +421,9 @@ class PCD2Mesh(pl.LightningModule):
             else:
                 out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
 
+            if self.debug_state:
+                self.lg.log_tensor(curvatures, 'Calculated gaussian curvatures')
+
         for k, v in out.items():
             if isinstance(v, torch.Tensor) and v.numel() == 1:
                 self.log(f'{kind}_{k}', v, prog_bar=True, sync_dist=True, batch_size=1)
@@ -328,6 +435,12 @@ class PCD2Mesh(pl.LightningModule):
         batch = next(data_iter)
         pcd = [_pcd.to(self.device) for _pcd in batch['pcd']]
         pcd_noised = [torch.clamp(_pcd + torch.randn_like(_pcd) * self.noise, min=-1.0, max=1.0) for _pcd in pcd]
+
+        if self.debug:
+            for batch_idx in range(len(pcd_noised)):
+                points = pcd_noised[batch_idx]
+                self.lg.log_scatter3d(tn(points[:, 0]), tn(points[:, 1]), tn(points[:, 2]), f'pcd_noised_{batch_idx}',
+                                      epoch=self.global_step)
 
         self.timelapse.add_pointcloud_batch(category='input',
                                             pointcloud_list=[_pcd.cpu() for _pcd in pcd],
@@ -351,6 +464,10 @@ class PCD2Mesh(pl.LightningModule):
             vertices_list=[v.cpu() for v in mesh_vertices],
             faces_list=[f.cpu() for f in mesh_faces]
         )
+
+        if self.debug:
+            for batch_idx, (v, f) in enumerate(zip(mesh_vertices, mesh_faces)):
+                self.lg.log_mesh(tn(v), tn(f), f'rendered_mesh_{batch_idx}', epoch=self.global_step)
 
         rendered_images = [render_mesh(v, f, device=self.device) for v, f in zip(mesh_vertices, mesh_faces)
                            if len(f) > 0]

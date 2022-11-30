@@ -198,3 +198,34 @@ def calculate_gaussian_curvature(vertices, faces):
                       accumulate=True)
 
     return 2 * torch.pi - angles
+
+
+def read_obj(in_file):
+    vertices = []
+    faces = []
+
+    with open(in_file, 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            tokens = line.split(' ')
+            if tokens[0] == 'v':
+                vertices.append([float(tokens[1]), float(tokens[2]), float(tokens[3])])
+            elif tokens[0] == 'f':
+                ids = [int(v.split('/')[0]) for v in tokens[1:]]
+                triangles = [[ids[0], ids[i], ids[i + 1]] for i in range(1, len(ids) - 1)]
+                faces.extend(triangles)
+
+    vertices = torch.tensor(vertices, dtype=torch.float)
+    faces = torch.tensor(faces, dtype=torch.long)
+    return vertices, faces
+
+
+def tetrahedras2mesh(vertices, tetrahedras):
+    # we must create 4 triangles for each tetrahedron
+
+    faces_1 = torch.stack([tetrahedras[:, 0], tetrahedras[:, 1], tetrahedras[:, 2]], dim=-1)
+    faces_2 = torch.stack([tetrahedras[:, 0], tetrahedras[:, 1], tetrahedras[:, 3]], dim=-1)
+    faces_3 = torch.stack([tetrahedras[:, 1], tetrahedras[:, 2], tetrahedras[:, 3]], dim=-1)
+    faces_4 = torch.stack([tetrahedras[:, 2], tetrahedras[:, 0], tetrahedras[:, 3]], dim=-1)
+    faces = torch.cat([faces_1, faces_2, faces_3, faces_4], dim=0)
+    return vertices, faces

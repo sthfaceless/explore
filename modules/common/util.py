@@ -1,5 +1,6 @@
 import json
 import random
+import threading
 
 import numpy as np
 import torch
@@ -144,3 +145,12 @@ def exists(*args):
     for arg in args:
         exist = exist and arg is not None
     return exist
+
+
+def run_async(fun, *args, **kwargs):
+    thread = threading.Thread(target=fun, args=args, kwargs=kwargs)
+    thread.start()
+
+
+def tn(tensor):
+    return tensor.detach().cpu().numpy()
