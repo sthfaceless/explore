@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 import kaolin
 from modules.common.trainer import SimpleLogger
 from modules.ddd.model import *
-from render_util import render_mesh
+from modules.ddd.render_util import render_mesh
 
 
 class PCD2Mesh(pl.LightningModule):
@@ -90,8 +90,8 @@ class PCD2Mesh(pl.LightningModule):
         self.surface_subdivision = False
 
         if self.debug:
-            print(self.lg.log_tensor(tet_vertexes), 'Tetrahedras grid vertices')
-            print(self.lg.log_tensor(tetrahedras), 'Tetrahedras grid faces')
+            print(self.lg.log_tensor(tet_vertexes, 'Tetrahedras grid vertices'))
+            print(self.lg.log_tensor(tetrahedras, 'Tetrahedras grid faces'))
             self.lg.log_scatter3d(tn(tet_vertexes[:, 0]), tn(tet_vertexes[:, 1]), tn(tet_vertexes[:, 2]),
                                   'tetrahedras_vertex')
             _v, _f = tetrahedras2mesh(tet_vertexes, tetrahedras)
@@ -124,6 +124,8 @@ class PCD2Mesh(pl.LightningModule):
             self.surface_subdivision = True
         if self.debug and self.global_step % self.debug_interval == 0:
             self.debug_state = True
+        else:
+            self.debug_state = False
 
     def surf_batchify(self, out):
         tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf = out
@@ -144,7 +146,7 @@ class PCD2Mesh(pl.LightningModule):
         # NeRF like encoding
         pe_features = torch.cat([pcd_noised, get_positional_encoding(pcd_noised, self.pe_powers * 3)], dim=-1)
 
-        if self.debug_staet and exists(vertices, faces):
+        if self.debug_state and exists(vertices, faces):
             self.lg.log_tensor(pcd[0], 'Input point cloud')
             self.lg.log_tensor(pcd_noised[0], 'Noised onput point cloud')
             self.lg.log_tensor(pe_features[0], 'NeRF like input features')
@@ -164,11 +166,11 @@ class PCD2Mesh(pl.LightningModule):
                 self.lg.log_tensor(grid, f'SDF volume feature grid {self.encoder_grids[grid_idx]}')
             self.lg.log_tensor(tet_sdf, 'First predicted sdf')
             self.lg.log_tensor(tet_features, 'First predicted features')
-            indexes = tet_sdf[0] < 0.05
+            indexes = torch.abs(tet_sdf[0]) < 0.05
             self.lg.log_scatter3d(tn(tet_vertexes[0, indexes, 0]), tn(tet_vertexes[0, indexes, 1]),
                                   tn(tet_vertexes[0, indexes, 2]), 'predicted_sdf',
                                   color=tn((torch.ones(len(tet_sdf[0]), 3).type_as(tet_sdf)
-                                            * tet_sdf[0].unsqueeze(1) + 0.5).clamp(max=1.0, min=0.0)),
+                                            * tet_sdf[0].unsqueeze(1) + 0.5).clamp(max=1.0, min=0.0)[indexes]),
                                   epoch=self.global_step)
 
         # if we're training only on SDF
@@ -215,7 +217,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(debug_faces) > 50000:
                     indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                     debug_faces = debug_faces[indexes]
-                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'first_refined_tetrahedras_mesh', epoch=self.global_step)
+                self.lg.log_mesh(tn(tet_vertexes[0]), tn(debug_faces), 'first_refined_tetrahedras_mesh', epoch=self.global_step)
 
             if n_volume_division is None:
                 n_volume_division = self.n_volume_division
@@ -242,7 +244,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(debug_faces) > 50000:
                     indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                     debug_faces = debug_faces[indexes]
-                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'subdivided_tetrahedras_mesh', epoch=self.global_step)
+                self.lg.log_mesh(tn(tet_vertexes[0]), tn(debug_faces), 'subdivided_tetrahedras_mesh', epoch=self.global_step)
 
             # additional volume refinement step
             pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
@@ -265,7 +267,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(debug_faces) > 50000:
                     indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                     debug_faces = debug_faces[indexes]
-                self.lg.log_mesh(tet_vertexes[0], debug_faces, 'subdivided_refined_tetrahedras_mesh',
+                self.lg.log_mesh(tn(tet_vertexes[0]), tn(debug_faces), 'subdivided_refined_tetrahedras_mesh',
                                  epoch=self.global_step)
 
             # add all sdf loss on all remaining vertices
@@ -289,7 +291,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(debug_faces) > 50000:
                     indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                     debug_faces = debug_faces[indexes]
-                self.lg.log_mesh(mesh_vertices[0], debug_faces, 'first_predicted_mesh', epoch=self.global_step)
+                self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'first_predicted_mesh', epoch=self.global_step)
 
         # surface subdivision
         if n_surface_division is None:
@@ -315,7 +317,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(debug_faces) > 50000:
                     indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                     debug_faces = debug_faces[indexes]
-                self.lg.log_mesh(mesh_vertices[0], debug_faces, 'subdivided_predicted_mesh', epoch=self.global_step)
+                self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'subdivided_predicted_mesh', epoch=self.global_step)
 
         # calculate losses on predicted mesh
         if self.volume_refinement and exists(vertices, faces):
@@ -367,62 +369,63 @@ class PCD2Mesh(pl.LightningModule):
             # find high curvature points on mesh
             curvatures = calculate_gaussian_curvature(vertices, faces)
             indexes = torch.arange(len(curvatures)).type_as(curvatures).long()[curvatures >= self.curvature_threshold]
-            indexes = indexes[torch.randint(0, len(indexes), (self.curvature_samples,)).type_as(indexes).long()]
+            if len(indexes) > 0:
+                indexes = indexes[torch.randint(0, len(indexes), (self.curvature_samples,)).type_as(indexes).long()]
 
-            # create uniform grid nearby selected point
-            grid = torch.stack(torch.meshgrid(
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
-                torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices), ), dim=-1) * self.disc_sdf_scale
-            grids = (vertices[indexes] + torch.randn_like(vertices[indexes]) * self.disc_v_noise) \
-                        .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
+                # create uniform grid nearby selected point
+                grid = torch.stack(torch.meshgrid(
+                    torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
+                    torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
+                    torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices), ), dim=-1) * self.disc_sdf_scale
+                grids = (vertices[indexes] + torch.randn_like(vertices[indexes]) * self.disc_v_noise) \
+                            .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
 
-            # extract mesh output of generator
-            mesh_vertices, mesh_faces, sdf_grids = out['mesh_vertices'], out['mesh_faces'], out['sdf_grids']
-            pred_sdf_features, true_sdf_features = [], []
+                # extract mesh output of generator
+                mesh_vertices, mesh_faces, sdf_grids = out['mesh_vertices'], out['mesh_faces'], out['sdf_grids']
+                pred_sdf_features, true_sdf_features = [], []
 
-            # generate true sdf and positional features for each grid
-            for grid_idx in range(len(grids)):
-                # make each grid as n points as expected by models
-                grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
-                pos_features = self.sdf_points_encoder.devoxelize(grid_points, sdf_grids). \
-                    view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
-                true_grid_sdf = self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0] \
-                    .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                true_sdf_features.append(torch.cat([true_grid_sdf, pos_features], dim=-1))
-                if len(mesh_faces) > 0:
-                    pred_grid_sdf = self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
+                # generate true sdf and positional features for each grid
+                for grid_idx in range(len(grids)):
+                    # make each grid as n points as expected by models
+                    grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
+                    pos_features = self.sdf_points_encoder.devoxelize(grid_points, sdf_grids). \
+                        view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
+                    true_grid_sdf = self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0] \
                         .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                    pred_sdf_features.append(torch.cat([pred_grid_sdf, pos_features], dim=-1))
+                    true_sdf_features.append(torch.cat([true_grid_sdf, pos_features], dim=-1))
+                    if len(mesh_faces) > 0:
+                        pred_grid_sdf = self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
+                            .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
+                        pred_sdf_features.append(torch.cat([pred_grid_sdf, pos_features], dim=-1))
+
+                    if self.debug_state:
+                        self.lg.log_tensor(true_grid_sdf, 'True sdf grid at high curvature')
+                        tsp = grid_points.view(-1, 3)
+                        tsg = true_grid_sdf.view(-1, 1)
+                        self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'true_sdf_grid_{grid_idx}',
+                                              color=tn(torch.ones(len(tsp), 3).type_as(tsg)
+                                                       * tsg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
+                        if len(mesh_faces) > 0:
+                            self.lg.log_tensor(pred_grid_sdf, 'Predicted sdf grid at high curvature')
+                            psg = pred_grid_sdf.view(-1, 1)
+                            self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'pred_sdf_grid_{grid_idx}',
+                                                  color=tn(torch.ones(len(tsp), 3).type_as(tsg)
+                                                           * psg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
+
+                sdf_features = torch.stack(true_sdf_features, dim=0)
+                if len(pred_sdf_features) > 0:
+                    sdf_features = torch.cat([sdf_features, torch.stack(pred_sdf_features, dim=0)], dim=0)
+                disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
+                if len(pred_sdf_features) > 0:
+                    out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_sdf_features)]) ** 2)
+                    out['loss'] += out['adv_loss'] * self.disc_weight
+                    out['disc_loss'] = torch.mean(disc_preds[:len(pred_sdf_features)] ** 2) \
+                                       + torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
+                else:
+                    out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
 
                 if self.debug_state:
-                    self.lg.log_tensor(true_grid_sdf, 'True sdf grid at high curvature')
-                    tsp = grid_points.view(-1, 3)
-                    tsg = true_grid_sdf.view(-1, 1)
-                    self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'true_sdf_grid_{grid_idx}',
-                                          color=tn(torch.ones(len(tsp), 3).type_as(tsg)
-                                                   * tsg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
-                    if len(mesh_faces) > 0:
-                        self.lg.log_tensor(pred_grid_sdf, 'Predicted sdf grid at high curvature')
-                        psg = pred_grid_sdf.view(-1, 1)
-                        self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'pred_sdf_grid_{grid_idx}',
-                                              color=tn(torch.ones(len(tsp), 3).type_as(tsg)
-                                                       * psg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
-
-            sdf_features = torch.stack(true_sdf_features, dim=0)
-            if len(pred_sdf_features) > 0:
-                sdf_features = torch.cat([sdf_features, torch.stack(pred_sdf_features, dim=0)], dim=0)
-            disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
-            if len(pred_sdf_features) > 0:
-                out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_sdf_features)]) ** 2)
-                out['loss'] += out['adv_loss'] * self.disc_weight
-                out['disc_loss'] = torch.mean(disc_preds[:len(pred_sdf_features)] ** 2) \
-                                   + torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
-            else:
-                out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
-
-            if self.debug_state:
-                self.lg.log_tensor(curvatures, 'Calculated gaussian curvatures')
+                    self.lg.log_tensor(curvatures, 'Calculated gaussian curvatures')
 
         for k, v in out.items():
             if isinstance(v, torch.Tensor) and v.numel() == 1:
@@ -456,7 +459,10 @@ class PCD2Mesh(pl.LightningModule):
                 out = self.single_mesh_step(pcd_noised=_pcd_noised.unsqueeze(0))
                 if 'mesh_vertices' in out and 'mesh_faces' in out:
                     mesh_vertices.append(out['mesh_vertices'][0])
-                    mesh_vertices.append(out['mesh_faces'])
+                    mesh_faces.append(out['mesh_faces'])
+
+        if len(mesh_faces) == 0:
+            return
 
         self.timelapse.add_mesh_batch(
             iteration=self.global_step,
@@ -495,9 +501,12 @@ class PCD2Mesh(pl.LightningModule):
         if optimizer_idx == 1:
             if not self.adversarial_training:
                 return None
-            loss = functools.reduce(lambda l1, l2: l1 + l2,
-                                    [self.shared_step(v, f, optimizer_idx)['disc_loss']
-                                     for v, f in zip(batch['vertices'], batch['faces'])])
+            outs = [self.shared_step(v, f, optimizer_idx)['disc_loss']
+                                     for v, f in zip(batch['vertices'], batch['faces'])]
+            losses = [out['disc_loss'] for out in outs if 'disc_loss' in out]
+            if len(losses) == 0:
+                return None
+            loss = functools.reduce(lambda l1, l2: l1 + l2, losses)
             return loss
 
     def configure_optimizers(self):
