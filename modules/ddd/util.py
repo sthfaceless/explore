@@ -73,7 +73,7 @@ def filter_pcd_outliers(points, neighbour_rate=1e-3):
     return points
 
 
-def voxelize_points3d(points, features, grid_res):
+def voxelize_points3d(points, features, grid_res, mask=None):
     b, n_points, dim = features.shape
     points, features = points.view(b * n_points, 3), features.view(b * n_points, dim)
     # retrieve indexes inside grid
@@ -83,13 +83,22 @@ def voxelize_points3d(points, features, grid_res):
     # setup grid
     grid = torch.zeros(b, grid_res, grid_res, grid_res, dim).type_as(features)
     denom = torch.zeros(b, grid_res, grid_res, grid_res, dim).type_as(features)
+
+    if mask is not None:
+        mask = mask.view(b * n_points)
+        features = torch.where(mask.unsqueeze(-1), features, torch.zeros_like(features))
+        feature_ones = torch.where(mask.unsqueeze(-1), torch.ones_like(features), torch.zeros_like(features))
+    else:
+        feature_ones = torch.ones_like(features)
+
     grid.index_put_(indexes, features, accumulate=True)
-    denom.index_put_(indexes, torch.ones_like(features), accumulate=True)
+    denom.index_put_(indexes, feature_ones, accumulate=True)
     grid /= torch.clamp(torch.sqrt(denom), min=1.0)
+
     return grid
 
 
-def devoxelize_points3d(points, grid):
+def devoxelize_points3d(points, grid, mask=None):
     b, grid_res, _, _, dim = grid.shape
     b, n_points, _ = points.shape
     points = points.view(b * n_points, 3)
@@ -110,6 +119,8 @@ def devoxelize_points3d(points, grid):
                     + (grid[bb, x + 1, y + 1, z] * zd + grid[bb, x + 1, y + 1, z + 1] * (1 - zd)) * (1 - yd))
     features = first_plane * xd + second_plane * (1 - xd)
     features = features.view(b, n_points, dim)
+    if mask is not None:
+        features = torch.where(mask.unsqueeze(-1), features, torch.zeros_like(features))
     return features
 
 
@@ -229,3 +240,20 @@ def tetrahedras2mesh(vertices, tetrahedras):
     faces_4 = torch.stack([tetrahedras[:, 2], tetrahedras[:, 0], tetrahedras[:, 3]], dim=-1)
     faces = torch.cat([faces_1, faces_2, faces_3, faces_4], dim=0)
     return vertices, faces
+
+
+def encode_3d_features2sequence(points, features, grid_res, seq_len):
+    points = (points + 1.0) / 2
+    indexes = torch.floor(points * (grid_res - 1) + 0.5).long()
+    hashes = (indexes[:, :, 0] * 31 + indexes[:, :, 1] * 31 ** 2 + indexes[:, :, 2] * 31 ** 3) % seq_len
+
+    b, n_points, dim = features.shape
+    __features = torch.zeros(b, seq_len, dim).type_as(features)
+    __denom = torch.zeros(b, seq_len, dim).type_as(features)
+
+    batch_index = torch.arange(b).type_as(hashes).view(b, 1).repeat(1, n_points).view(-1)
+    __features.index_put((batch_index, hashes.view(-1)), features, accumulate=True)
+    __denom.index_put((batch_index, hashes.view(-1)), torch.ones_like(features), accumulate=True)
+    __features /= torch.clamp(__denom ** 0.5, min=1.0)
+
+    return __features

@@ -1,10 +1,12 @@
 import hashlib
 import os
 
-import numpy as np
 import pandas as pd
+from Bio.SVDSuperimposer import SVDSuperimposer
 from biopandas.pdb import PandasPdb
+
 from modules.common.util import *
+
 
 def get_hash(x):
     return hashlib.sha1(x.encode()).hexdigest()
@@ -104,7 +106,7 @@ def load_ddg_data(path, extra_pdb_root):
     return ddgdf
 
 
-def get_pdb_features(pdb_path, atoms_mapper, max_atoms, pe_features=16, protein_scale=100):
+def get_pdb_features(pdb_path, atoms_mapper, max_atoms, max_len, pe_features=16, protein_scale=100):
     atoms = PandasPdb().read_pdb(pdb_path).df['ATOM']
 
     # true points mask
@@ -115,6 +117,12 @@ def get_pdb_features(pdb_path, atoms_mapper, max_atoms, pe_features=16, protein_
     points = np.stack([atoms['x_coord'], atoms['y_coord'], atoms['z_coord']], axis=-1).astype(np.float32)
     points -= points[0][None, :]
     points /= 2 * protein_scale
+
+    # get coordinates of alpha atoms for superimposing
+    alpha_points = points[atoms['atom_name'].apply(lambda name: name in ('C'))]
+    # true alphas mask
+    alpha_mask = np.zeros(max_len, dtype=bool)
+    alpha_mask[np.arange(max_len) < len(alpha_points)] = True
 
     # atoms ids for embedding
     atom_ids = [atoms_mapper[atom] for atom in atoms['atom_name'].tolist()]
@@ -130,4 +138,17 @@ def get_pdb_features(pdb_path, atoms_mapper, max_atoms, pe_features=16, protein_
                               axis=0)
     features = np.concatenate([features, np.zeros((max_atoms - len(features), features.shape[-1]), dtype=np.float32)],
                               axis=0)
-    return points, features, atom_ids, mask
+    alpha_points = np.concatenate([alpha_points, np.zeros((max_len - len(alpha_points), 3), dtype=np.float32)], axis=0)
+    return points, features, atom_ids, mask, alpha_points, alpha_mask
+
+
+def get_protein_transform(x, y):
+    sup = SVDSuperimposer()
+    min_len = min(len(x), len(y))
+    sup.set(x[:min_len], y[:min_len])
+    sup.run()
+    rot, tran = sup.get_rotran()
+    return rot, tran
+
+
+

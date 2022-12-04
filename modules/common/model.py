@@ -58,11 +58,16 @@ class DownSample2d(torch.nn.Module):
 
 class Attention(torch.nn.Module):
 
-    def __init__(self, input_dim, embed_dim, num_heads, dropout=0., bias=False):
+    def __init__(self, input_dim, embed_dim, num_heads=8, head_dim=None, dropout=0., bias=False):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+        if head_dim is not None:
+            self.head_dim = head_dim
+            self.num_heads = embed_dim // head_dim
+        else:
+            self.num_heads = num_heads
+            self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
+
         self.norm = torch.nn.LayerNorm(embed_dim)
         self.to_q = torch.nn.Linear(input_dim, embed_dim, bias=bias)
         self.to_kv = torch.nn.Linear(input_dim, embed_dim * 2, bias=bias)
@@ -71,23 +76,28 @@ class Attention(torch.nn.Module):
             torch.nn.Dropout(dropout)
         )
 
-    def forward(self, q, v=None):
+    def forward(self, q, v=None, mask=None):
+        # normalize inputs
         q = self.norm(q)
         if v is None:
             v = q
         else:
             v = self.norm(v)
+
+        # map inputs
         q = self.to_q(q)
         k, v = self.to_kv(v).chunk(2, dim=-1)
 
-        b, n, _ = q.shape
-
         # b n (h d) -> b h n d
+        b, n, dim = q.shape
         q, k, v = map(lambda t: t.view(b, n, self.num_heads, self.head_dim).transpose(1, 2), [q, k, v])
 
         # b h n n
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        if mask is not None:
+            dots = torch.where(mask.view(b, 1, 1, n), dots, torch.ones_like(dots) * float('-inf'))
         attn = torch.nn.functional.softmax(dots, dim=-1)
+        # (b h n n) * (b h n d)
         out = torch.matmul(attn, v)
 
         # b h n d -> b n (h d)
@@ -347,6 +357,3 @@ class ResBlockConv1D(torch.nn.Module):
 
     def forward(self, x):
         return torch.nn.functional.gelu((self.block(x) + x) / 2 ** (1 / 2))
-
-
-

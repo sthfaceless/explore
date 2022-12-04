@@ -321,13 +321,12 @@ class PCD2Mesh(pl.LightningModule):
 
         # calculate losses on predicted mesh
         if self.volume_refinement and exists(vertices, faces):
-            if len(mesh_faces) == 0:
-                chamfer_loss = torch.tensor(0).type_as(vertices)
-                normal_loss = torch.tensor(0).type_as(vertices)
-            else:
+            if len(mesh_faces) > 0:
                 # calculate pcd chamfer loss
-                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples)
-                chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)
+                face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(mesh_vertices, mesh_faces), nan=1.0)
+                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples,
+                                                                    areas=face_areas)
+                chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
 
                 # calculate mesh normal loss with finding normal for each point in pcd
                 pred_normals = kaolin.ops.mesh.face_normals(
@@ -337,7 +336,7 @@ class PCD2Mesh(pl.LightningModule):
                 # finding normal of the closest points
                 dist, point_ids = kaolin.metrics.pointcloud.sided_distance(pred_pcd, pcd)
                 true_normals = kaolin.ops.mesh.face_normals(
-                    kaolin.ops.mesh.index_vertices_by_faces(mesh_vertices, mesh_faces), unit=True)[0]
+                    kaolin.ops.mesh.index_vertices_by_faces(vertices, faces), unit=True)[0]
                 true_normals = true_normals[true_faces_ids[0][point_ids[0]]]
                 normal_loss = torch.mean(1 - torch.abs(
                     torch.matmul(pred_normals.unsqueeze(1), true_normals.unsqueeze(2)).view(-1)))
@@ -346,10 +345,10 @@ class PCD2Mesh(pl.LightningModule):
                     self.lg.log_tensor(pred_pcd, 'Predicted point cloud on mesh')
                     self.lg.log_tensor(dist, 'Predicted - True pcd dists')
                     self.lg.log_tensor(pred_normals, 'Predicted mesh normals')
-            out['chamfer_loss'] = chamfer_loss
-            out['loss'] += out['chamfer_loss'] * self.chamfer_weight
-            out['normal_loss'] = normal_loss
-            out['loss'] += out['normal_loss'] * self.normal_weight
+                out['chamfer_loss'] = chamfer_loss
+                out['loss'] += out['chamfer_loss'] * self.chamfer_weight
+                out['normal_loss'] = normal_loss
+                out['loss'] += out['normal_loss'] * self.normal_weight
 
         return out
 

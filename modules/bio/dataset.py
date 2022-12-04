@@ -1,14 +1,9 @@
-import os
-import random
-
-import torch
-
 from modules.bio.util import *
 
 
 class ProteinMutations(torch.utils.data.IterableDataset):
 
-    def __init__(self, df, atoms_mapper=None, pdb_root='pdb', max_atoms=3500, pe_features=16):
+    def __init__(self, df, atoms_mapper=None, pdb_root='pdb', max_atoms=3500, seq_len=400, pe_features=16):
         super(ProteinMutations, self).__init__()
 
         if atoms_mapper is None:
@@ -20,6 +15,7 @@ class ProteinMutations(torch.utils.data.IterableDataset):
         self.df = df
         self.pdb_root = pdb_root
         self.max_atoms = max_atoms
+        self.seq_len = seq_len
         self.pe_features = pe_features
 
         if len(atoms_mapper) == 0:
@@ -36,19 +32,36 @@ class ProteinMutations(torch.utils.data.IterableDataset):
     def __next__(self):
         idx = random.randint(0, len(self.df) - 1)
         row = self.df.iloc[idx]
-        wt_points, wt_features, wt_atom_ids, wt_mask = get_pdb_features(
-            os.path.join(self.pdb_root, row['pdb_path']), self.atoms_mapper, self.max_atoms, self.pe_features)
-        mut_points, mut_features, mut_atom_ids, mut_mask = get_pdb_features(
-            os.path.join(self.pdb_root, row['mut_path']), self.atoms_mapper, self.max_atoms, self.pe_features)
+        wt_points, wt_features, wt_atom_ids, wt_mask, wt_alpha_points, wt_alpha_mask = get_pdb_features(
+            os.path.join(self.pdb_root, row['pdb_path']), self.atoms_mapper, self.max_atoms, self.seq_len,
+            self.pe_features)
+        mut_points, mut_features, mut_atom_ids, mut_mask, mut_alpha_points, mut_alpha_mask = get_pdb_features(
+            os.path.join(self.pdb_root, row['mut_path']), self.atoms_mapper, self.max_atoms, self.seq_len,
+            self.pe_features)
+        # rotate mutation protein
+        rotation, transform = get_protein_transform(wt_alpha_points[wt_alpha_mask], mut_alpha_points[mut_alpha_mask])
+        mut_points[mut_mask] = mut_points[mut_mask] @ rotation + transform
+
+        # normalize both proteins
+        points = np.concatenate([wt_points[wt_mask], mut_points[mut_mask]], axis=0)
+        center = (points.max(axis=0) + points.min(axis=0)) / 2
+        max_l = (np.abs(points).max(axis=0)).max(axis=-1)
+        wt_points[wt_mask] = (wt_points[wt_mask] - center) / max_l
+        mut_points[mut_mask] = (mut_points[mut_mask] - center) / max_l
+
         return {
             'wt_points': wt_points,
+            'wt_mask': wt_mask,
+            'wt_alpha_points': wt_alpha_points,
+            'wt_alpha_mask': wt_alpha_mask,
             'wt_features': wt_features,
             'wt_atom_ids': wt_atom_ids,
-            'wt_mask': wt_mask,
             'mut_points': mut_points,
+            'mut_mask': mut_mask,
             'mut_features': mut_features,
             'mut_atom_ids': mut_atom_ids,
-            'mut_mask': mut_mask,
+            'mut_alpha_points': mut_alpha_points,
+            'mut_alpha_mask': mut_alpha_mask,
             'dT': row['dT'].astype(np.float32),
             'pH': row['pH'].astype(np.float32)
         }
