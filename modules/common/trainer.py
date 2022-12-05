@@ -37,8 +37,9 @@ class EMA(torch.nn.Module):
 
 class SimpleLogger:
 
-    def __init__(self, clearml=None):
+    def __init__(self, clearml=None, run_async=False):
         self.clearml = clearml
+        self.run_async = run_async
 
     def log_image(self, image, name, epoch=0):
         if self.clearml:
@@ -73,22 +74,36 @@ class SimpleLogger:
         self.log_plot(plt, name, epoch)
 
     def log_scatter2d(self, x, y, name, color=None, epoch=0):
-        run_async(self._log_scatter2d, x, y, name, color=color, epoch=epoch)
-
+        if self.run_async:
+            run_async(self._log_scatter2d, x, y, name, color=color, epoch=epoch)
+        else:
+            self._log_scatter2d(x, y, name, color=color, epoch=epoch)
     def _log_scatter3d(self, x, y, z, name, color=None, epoch=0):
         ax = plt.axes(projection="3d")
+        ax.set_xlim3d(-1, 1)
+        ax.set_ylim3d(-1, 1)
+        ax.set_zlim3d(-1, 1)
         ax.scatter3D(x, y, z, c=color)
         self.log_plot(plt, name, epoch)
 
     def log_scatter3d(self, x, y, z, name, color=None, epoch=0):
-        run_async(self._log_scatter3d, x, y, z, name, color=color, epoch=epoch)
+        if self.run_async:
+            run_async(self._log_scatter3d, x, y, z, name, color=color, epoch=epoch)
+        else:
+            self._log_scatter3d(x, y, z, name, color=color, epoch=epoch)
 
     def _log_mesh(self, vertices, faces, name, epoch=0):
         pc = art3d.Poly3DCollection(vertices[faces],
                                     facecolors=np.ones((len(faces), 3), dtype=np.float32) * 0.75, edgecolor="gray")
         ax = plt.axes(projection="3d")
+        ax.set_xlim3d(-1, 1)
+        ax.set_ylim3d(-1, 1)
+        ax.set_zlim3d(-1, 1)
         ax.add_collection(pc)
         self.log_plot(plt, name, epoch)
 
     def log_mesh(self, vertices, faces, name, epoch=0):
-        run_async(self._log_mesh, vertices, faces, name, epoch=epoch)
+        if self.run_async:
+            run_async(self._log_mesh, vertices, faces, name, epoch=epoch)
+        else:
+            self._log_mesh(vertices, faces, name, epoch=epoch)

@@ -98,11 +98,13 @@ class PCD2Mesh(pl.LightningModule):
             indexes = torch.randint(low=0, high=len(_f), size=(50000,)).type_as(_f).long()
             self.lg.log_mesh(tn(_v.cpu()), tn(_f[indexes]), 'tetrahedras_grid')
 
-    def get_mesh_sdf(self, points, vertices, faces):
+    @torch.no_grad()
+    def get_mesh_sdf(self, points, vertices, faces, pcd=None, num_samples=5000):
         if len(faces) == 0 or len(points[0]) == 0:
             return torch.zeros(1, len(points)).type_as(points)
-        face_vertices = kaolin.ops.mesh.index_vertices_by_faces(vertices, faces)
-        dists, _, _ = kaolin.metrics.trianglemesh.point_to_mesh_distance(points, face_vertices)
+        if pcd is None:
+            pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces, num_samples=num_samples)
+        dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
         signs = kaolin.ops.mesh.check_sign(vertices, faces, points)
         sdf = dists * (signs.type_as(dists) - 0.5) * 2 * (-1)  # inside is -1
         return sdf
@@ -110,7 +112,8 @@ class PCD2Mesh(pl.LightningModule):
     def calculate_sdf_loss(self, tet_vertexes, tet_sdf, vertices, faces):
         if len(tet_vertexes[0]) == 0:
             return torch.tensor(0).type_as(tet_sdf)
-        true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+        # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+        true_sdf = calculate_sdf(tet_vertexes, vertices, faces)
         true_sdf = torch.clamp(true_sdf, min=-self.sdf_clamp, max=self.sdf_clamp)
         loss = torch.mean((tet_sdf - true_sdf) ** 2)
         return loss
@@ -175,7 +178,8 @@ class PCD2Mesh(pl.LightningModule):
 
         # if we're training only on SDF
         if not self.volume_refinement and exists(vertices, faces):
-            true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+            # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
+            true_sdf = calculate_sdf(tet_vertexes, vertices, faces)
             out['sdf_loss'] = torch.mean((true_sdf - tet_sdf) ** 2)
             out['loss'] = out['sdf_loss']
 
@@ -389,11 +393,11 @@ class PCD2Mesh(pl.LightningModule):
                     grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
                     pos_features = self.sdf_points_encoder.devoxelize(grid_points, sdf_grids). \
                         view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
-                    true_grid_sdf = self.get_mesh_sdf(grid_points, vertices.unsqueeze(0), faces)[0] \
+                    true_grid_sdf = calculate_sdf(grid_points, vertices.unsqueeze(0), faces)[0] \
                         .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
                     true_sdf_features.append(torch.cat([true_grid_sdf, pos_features], dim=-1))
                     if len(mesh_faces) > 0:
-                        pred_grid_sdf = self.get_mesh_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
+                        pred_grid_sdf = calculate_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
                             .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
                         pred_sdf_features.append(torch.cat([pred_grid_sdf, pos_features], dim=-1))
 

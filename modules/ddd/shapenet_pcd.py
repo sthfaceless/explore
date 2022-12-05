@@ -2,7 +2,7 @@ import torch
 
 import kaolin
 from modules.ddd.util import normalize_points
-
+from modules.common.util import *
 
 def preprocessing_transform(inputs):
     mesh = inputs['mesh']
@@ -120,8 +120,10 @@ class ShapenetPointClouds(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         item = self.pc_ds[idx]
+        vertices = item['vertices'][0]
+        faces = item['faces']
         return {
             'pcd': item['coords'],
-            'vertices': item['vertices'][0],
-            'faces': item['faces']
+            'vertices': vertices,
+            'faces': faces
         }

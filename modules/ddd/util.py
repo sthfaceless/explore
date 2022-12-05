@@ -1,5 +1,8 @@
-import torch
 from sklearn.neighbors import KDTree
+from modules.common.util import *
+import mesh_to_sdf
+from sklearn.neighbors import KDTree
+import trimesh
 
 
 def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
@@ -211,23 +214,39 @@ def calculate_gaussian_curvature(vertices, faces):
     return 2 * torch.pi - angles
 
 
-def read_obj(in_file):
+def read_obj(in_file, with_normals=False):
     vertices = []
     faces = []
-
+    normals = []
+    face_normals = []
     with open(in_file, 'r') as f:
         lines = f.readlines()
         for line in lines:
             tokens = line.split(' ')
             if tokens[0] == 'v':
                 vertices.append([float(tokens[1]), float(tokens[2]), float(tokens[3])])
+            elif with_normals and tokens[0] == 'vn':
+                normals.append([float(tokens[1]), float(tokens[2]), float(tokens[3])])
             elif tokens[0] == 'f':
-                ids = [int(v.split('/')[0]) for v in tokens[1:]]
-                triangles = [[ids[0], ids[i], ids[i + 1]] for i in range(1, len(ids) - 1)]
+                items = [v.split('/') for v in tokens[1:] if len(v.replace(' ', '')) > 0]
+                if len(items) < 3:
+                    continue
+                vertex_ids = [int(v[0]) for v in items]
+                triangles = [[vertex_ids[0], vertex_ids[i], vertex_ids[i + 1]] for i in range(1, len(vertex_ids) - 1)]
                 faces.extend(triangles)
+                if with_normals:
+                    normal_ids = [int(v[2]) for v in items if len(v) > 2]
+                    tri_normals = [[normal_ids[0], normal_ids[i], normal_ids[i + 1]] for i in
+                                   range(1, len(normal_ids) - 1)]
+                    face_normals.extend(tri_normals)
 
     vertices = torch.tensor(vertices, dtype=torch.float)
-    faces = torch.tensor(faces, dtype=torch.long)
+    faces = torch.tensor(faces, dtype=torch.long) - 1
+    if with_normals:
+        normals = torch.tensor(normals, dtype=torch.float)
+        face_normals = torch.tensor(face_normals, dtype=torch.long) - 1
+        mean_normals = (normals[face_normals[:, 0]] + normals[face_normals[:, 1]] + normals[face_normals[:, 2]]) / 3
+        return vertices, faces, mean_normals
     return vertices, faces
 
 
@@ -257,3 +276,13 @@ def encode_3d_features2sequence(points, features, grid_res, seq_len):
     __features /= torch.clamp(__denom ** 0.5, min=1.0)
 
     return __features
+
+
+def calculate_sdf(points, vertices, faces):
+    mesh = trimesh.Trimesh(vertices=tn(vertices[0]), faces=tn(faces))
+    sdf = mesh_to_sdf.mesh_to_sdf(mesh, tn(points[0]),
+                                  surface_point_method='scan', sign_method='depth',
+                                  bounding_radius=None, scan_count=10, scan_resolution=128,
+                                  sample_point_count=100000, normal_sample_count=15)
+    sdf = torch.tensor(sdf).type_as(vertices).view(1, -1)
+    return sdf
