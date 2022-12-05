@@ -500,8 +500,7 @@ class PCD2Mesh(pl.LightningModule):
         if optimizer_idx == 1:
             if not self.adversarial_training:
                 return None
-            outs = [self.shared_step(v, f, optimizer_idx)['disc_loss']
-                                     for v, f in zip(batch['vertices'], batch['faces'])]
+            outs = [self.shared_step(v, f, optimizer_idx) for v, f in zip(batch['vertices'], batch['faces'])]
             losses = [out['disc_loss'] for out in outs if 'disc_loss' in out]
             if len(losses) == 0:
                 return None

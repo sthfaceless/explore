@@ -101,7 +101,7 @@ if __name__ == "__main__":
     trainer = Trainer(max_steps=args.steps[-1] * args.acc_grads, val_check_interval=args.steps[-1] // args.validations,
                       limit_val_batches=10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=True),
+                      # strategy=DDPStrategy(find_unused_parameters=True),
                       accumulate_grad_batches=args.acc_grads,
                       accelerator='gpu', devices=1, callbacks=[checkpoint_callback])
     trainer.fit(model)

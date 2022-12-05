@@ -1,5 +1,6 @@
 from builtins import ModuleNotFoundError
 
+import torch.nn
 import torch_geometric
 
 from modules.common.model import *
@@ -19,28 +20,36 @@ class PointVoxelCNN(torch.nn.Module):
         self.dim = dim
         self.grid_res = grid_res
 
+        if input_dim != dim:
+            self.input_conv = torch.nn.Conv3d(in_channels=input_dim, out_channels=dim, kernel_size=kernel_size,
+                                              padding=kernel_size // 2)
+
         self.do_points_map = do_points_map
         if do_points_map:
-            self.point_layer = torch.nn.Linear(input_dim, dim)
+            self.point_layer = torch.nn.Module()
+            if input_dim != dim:
+                self.point_layer.input = torch.nn.Conv1d(in_channels=input_dim, out_channels=dim, kernel_size=1)
+            self.point_layer.norm1 = norm(dim, num_groups)
+            self.point_layer.conv1 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
+            self.point_layer.norm2 = norm(dim, num_groups)
+            self.point_layer.conv2 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
 
-        self.norm1 = norm(input_dim, num_groups)
-        self.conv1 = torch.nn.Conv3d(in_channels=input_dim, out_channels=dim, kernel_size=kernel_size,
+        self.norm1 = norm(dim, num_groups)
+        self.conv1 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
                                      padding=kernel_size // 2)
         self.norm2 = norm(dim, num_groups)
         self.conv2 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
                                      padding=kernel_size // 2)
-        if input_dim != dim:
-            self.skip_conv = torch.nn.Conv3d(in_channels=input_dim, out_channels=dim, kernel_size=kernel_size,
-                                             padding=kernel_size // 2)
 
     def voxelize(self, points, features):
         # map grid
         input_grid = voxelize_points3d(points, features, self.grid_res).movedim(-1, 1)
+        if self.input_dim != self.dim:
+            input_grid = self.input_conv(input_grid)
         grid = self.conv1(nonlinear(self.norm1(input_grid)))
         grid = self.conv2(nonlinear(self.norm2(grid)))
-        skip = input_grid if self.input_dim == self.dim else self.skip_conv(input_grid)
-        out_grid = (grid + skip).movedim(1, -1) / 2 ** 0.5
-        return out_grid
+        out_grid = (grid + input_grid) / 2 ** 0.5
+        return out_grid.movedim(1, -1)
 
     def devoxelize(self, points, grid):
         return devoxelize_points3d(points, grid)
@@ -48,8 +57,13 @@ class PointVoxelCNN(torch.nn.Module):
     def map_points(self, features):
         if not self.do_points_map:
             raise ModuleNotFoundError('Initialized model without points mapping')
-        h = self.point_layer(features)
-        return h
+        features = features.movedim(-1, 1)
+        if self.input_dim != self.dim:
+            features = self.point_layer.input(features)
+        h = self.point_layer.conv1(nonlinear(self.point_layer.norm1(features)))
+        h = self.point_layer.conv2(nonlinear(self.point_layer.norm2(h)))
+        out = (h + features) / 2 ** 0.5
+        return out.movedim(1, -1)
 
     def forward(self, points, features):
         # points (b, 3)
@@ -170,16 +184,19 @@ class MeshConv(torch.nn.Module):
 
 class SimpleMLP(torch.nn.Module):
 
-    def __init__(self, input_dim, out_dim, hidden_dims=(256, 128, 64)):
+    def __init__(self, input_dim, out_dim, hidden_dims=(256, 128, 64), num_groups=32):
         super(SimpleMLP, self).__init__()
-        self.input_layer = torch.nn.Linear(input_dim, hidden_dims[0])
-        self.layers = torch.nn.ModuleList([torch.nn.Linear(dim, nxt_dim) for dim, nxt_dim in
-                                           zip(hidden_dims[:-1], hidden_dims[1:])])
-        self.out_layer = torch.nn.Linear(hidden_dims[-1], out_dim)
+        self.input_layer = torch.nn.Conv1d(in_channels=input_dim, out_channels=hidden_dims[0], kernel_size=1)
+        self.norms = torch.nn.ModuleList(
+            [norm(dim, num_groups) for dim, nxt_dim in zip(hidden_dims[:-1], hidden_dims[1:])])
+        self.layers = torch.nn.ModuleList([torch.nn.Conv1d(in_channels=dim, out_channels=nxt_dim, kernel_size=1)
+                                           for dim, nxt_dim in zip(hidden_dims[:-1], hidden_dims[1:])])
+        self.out_norm = norm(hidden_dims[-1], num_groups)
+        self.out_layer = torch.nn.Conv1d(in_channels=hidden_dims[-1], out_channels=out_dim, kernel_size=1)
 
     def forward(self, x):
-        h = self.input_layer(x)
-        for layer in self.layers:
-            h = layer(nonlinear(h))
-        out = self.out_layer(nonlinear(h))
-        return out
+        h = self.input_layer(x.movedim(-1, 1))
+        for gnorm, layer in zip(self.norms, self.layers):
+            h = layer(nonlinear(gnorm(h)))
+        out = self.out_layer(nonlinear(self.out_norm(h)))
+        return out.movedim(1, -1)
