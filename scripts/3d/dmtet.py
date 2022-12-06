@@ -4,7 +4,6 @@ from argparse import ArgumentParser
 import clearml
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
-from pytorch_lightning.strategies import DDPStrategy
 
 import kaolin
 from modules.ddd.dmtet_trainer import PCD2Mesh
@@ -35,13 +34,19 @@ def get_parser():
     parser.add_argument("--img_size", default=128, type=int, help="Image size to train and render")
 
     # Model settings
-    parser.add_argument("--encoder_dims", default=[64, 128, 256], nargs='+', type=int, help="Hidden dims for volume encoder")
-    parser.add_argument("--encoder_grids", default=[32, 16, 8], nargs='+', type=int, help="Grid size for volume encoder")
+    parser.add_argument("--encoder_dims", default=[64, 128, 256], nargs='+', type=int,
+                        help="Hidden dims for volume encoder")
+    parser.add_argument("--encoder_grids", default=[32, 16, 8], nargs='+', type=int,
+                        help="Grid size for volume encoder")
     parser.add_argument("--sdf_dims", default=[256, 256, 128, 64], nargs='+', type=int, help="Hidden dims for SDF mlp")
-    parser.add_argument("--disc_dims", default=[32, 64, 128, 256], nargs='+', type=int, help="SDF discriminator hidden dims")
-    parser.add_argument("--gcn_dims", default=[256, 128], nargs='+', type=int, help="Graph Convolutional refinement conv dims")
-    parser.add_argument("--gcn_hidden", default=[128, 64], nargs='+', type=int, help="Graph Convolutional refinement linear dims")
+    parser.add_argument("--disc_dims", default=[32, 64, 128, 256], nargs='+', type=int,
+                        help="SDF discriminator hidden dims")
+    parser.add_argument("--gcn_dims", default=[256, 128], nargs='+', type=int,
+                        help="Graph Convolutional refinement conv dims")
+    parser.add_argument("--gcn_hidden", default=[128, 64], nargs='+', type=int,
+                        help="Graph Convolutional refinement linear dims")
     parser.add_argument("--grid", default=64, type=int, help="tetrahedra grid resolution")
+    parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
 
     parser.add_argument("--disc_weight", default=10, type=float, help="Weight for discriminator loss")
     parser.add_argument("--chamfer_weight", default=500, type=float, help="Weight for chamfer distance")
@@ -50,7 +55,8 @@ def get_parser():
     parser.add_argument("--sdf_weight", default=0.4, type=float, help="Weight for sdf prediction reg")
 
     parser.add_argument("--sdf_clamp", default=0.03, type=float, help="Max absolute true sdf value")
-    parser.add_argument("--curvature_threshold", default=3.1415926/16, type=float, help="Vertices gaussian curvature threshold")
+    parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
+                        help="Vertices gaussian curvature threshold")
     parser.add_argument("--disc_sdf_scale", default=0.1, type=float, help="SDF discriminator grid size")
     parser.add_argument("--curvature_samples", default=10, type=int, help="SDF discriminator vertex samples")
     parser.add_argument("--disc_sdf_grid", default=16, type=int, help="SDF discriminator grid resolution")
@@ -88,16 +94,19 @@ if __name__ == "__main__":
     dataset = ShapenetPointClouds(shapenet_root=args.dataset, n_points=args.n_points, categories=args.cats,
                                   noise=args.noise, cache_dir=args.cache_dir, cache_scenes=args.cache_size)
     timelapse = kaolin.visualize.Timelapse(args.logs_path)
-    model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate, grid_resolution=args.grid,
-                     steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims, encoder_grids=args.encoder_grids,
-                     sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims, gcn_hidden=args.gcn_hidden,
+    model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
+                     grid_resolution=args.grid,
+                     steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
+                     encoder_grids=args.encoder_grids,
+                     sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
+                     gcn_hidden=args.gcn_hidden,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,
                      chamfer_samples=args.n_points, sdf_clamp=args.sdf_clamp, disc_sdf_scale=args.disc_sdf_scale,
                      disc_sdf_grid=args.disc_sdf_grid, curvature_samples=args.curvature_samples,
                      curvature_threshold=args.curvature_threshold, disc_v_noise=args.disc_v_noise,
-                     noise=args.noise, batch_size=args.batch_size)
+                     encoder_out=args.encoder_out, noise=args.noise, batch_size=args.batch_size)
     trainer = Trainer(max_steps=args.steps[-1] * args.acc_grads, val_check_interval=args.steps[-1] // args.validations,
                       limit_val_batches=10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,

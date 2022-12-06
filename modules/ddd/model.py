@@ -24,6 +24,13 @@ class PointVoxelCNN(torch.nn.Module):
             self.input_conv = torch.nn.Conv3d(in_channels=input_dim, out_channels=dim, kernel_size=kernel_size,
                                               padding=kernel_size // 2)
 
+        self.norm1 = norm(dim, num_groups)
+        self.conv1 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
+                                     padding=kernel_size // 2)
+        self.norm2 = norm(dim, num_groups)
+        self.conv2 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
+                                     padding=kernel_size // 2)
+
         self.do_points_map = do_points_map
         if do_points_map:
             self.point_layer = torch.nn.Module()
@@ -33,13 +40,6 @@ class PointVoxelCNN(torch.nn.Module):
             self.point_layer.conv1 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
             self.point_layer.norm2 = norm(dim, num_groups)
             self.point_layer.conv2 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
-
-        self.norm1 = norm(dim, num_groups)
-        self.conv1 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
-                                     padding=kernel_size // 2)
-        self.norm2 = norm(dim, num_groups)
-        self.conv2 = torch.nn.Conv3d(in_channels=dim, out_channels=dim, kernel_size=kernel_size,
-                                     padding=kernel_size // 2)
 
     def voxelize(self, points, features):
         # map grid
@@ -73,21 +73,50 @@ class PointVoxelCNN(torch.nn.Module):
 
 class MultiPointVoxelCNN(torch.nn.Module):
 
-    def __init__(self, input_dim, dims=(64, 128, 256), grids=(32, 16, 8), do_points_map=True,
+    def __init__(self, input_dim, dim, dims=(64, 128, 256), grids=(32, 16, 8), do_points_map=True,
                  kernel_size=3, num_groups=32):
         super(MultiPointVoxelCNN, self).__init__()
+        self.input_dim = input_dim
+        self.dim = dim
         self.models = torch.nn.ModuleList(
             [PointVoxelCNN(input_dim=input_dim, dim=dim, grid_res=res, do_points_map=do_points_map,
                            kernel_size=kernel_size, num_groups=num_groups) for dim, res in zip(dims, grids)])
+
+        self.do_points_map = do_points_map
+        if do_points_map:
+            self.point_layer = torch.nn.Module()
+            if input_dim != dim:
+                self.point_layer.input = torch.nn.Conv1d(in_channels=input_dim, out_channels=dim, kernel_size=1)
+            self.point_layer.norm1 = norm(dim, num_groups)
+            self.point_layer.conv1 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
+            self.point_layer.norm2 = norm(dim, num_groups)
+            self.point_layer.conv2 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
+
+        self.out_layer = torch.nn.Conv1d(sum(dims), dim, kernel_size=1)
 
     def voxelize(self, points, features):
         return [model.voxelize(points, features) for model in self.models]
 
     def devoxelize(self, points, grids):
-        return torch.cat([model.devoxelize(points, grid) for model, grid in zip(self.models, grids)], dim=-1)
+        h = torch.cat([model.devoxelize(points, grid) for model, grid in zip(self.models, grids)], dim=-1)
+        out = self.out_layer(h.movedim(-1, 1)).movedim(1, -1)
+        return out
+
+    def map_points(self, features):
+        if not self.do_points_map:
+            raise ModuleNotFoundError('Initialized model without points mapping')
+        features = features.movedim(-1, 1)
+        if self.input_dim != self.dim:
+            features = self.point_layer.input(features)
+        h = self.point_layer.conv1(nonlinear(self.point_layer.norm1(features)))
+        h = self.point_layer.conv2(nonlinear(self.point_layer.norm2(h)))
+        out = (h + features) / 2 ** 0.5
+        return out
 
     def forward(self, points, features):
-        return torch.cat([module(points, features) for module in self.models], dim=-1)
+        grids = self.voxelize(points, features)
+        volume_features = self.devoxelize(points, grids)
+        return self.map_points(features) + volume_features
 
 
 class SDFDiscriminator(torch.nn.Module):

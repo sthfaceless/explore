@@ -1,8 +1,8 @@
-from sklearn.neighbors import KDTree
-from modules.common.util import *
 import mesh_to_sdf
-from sklearn.neighbors import KDTree
 import trimesh
+from sklearn.neighbors import KDTree
+
+from modules.common.util import *
 
 
 def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
@@ -55,11 +55,14 @@ def get_vertex_id(x, y, z, grid_res):
 def normalize_points(points):
     if len(points.shape) == 2:
         center = (points.max(0)[0] + points.min(0)[0]) / 2
+        points -= center
         max_l = (torch.abs(points).max(0)[0]).max()
+        points /= max_l
     else:
         center = (points.max(dim=1)[0] + points.min(dim=1)[0]) / 2
+        points -= center
         max_l = (torch.abs(points).max(dim=1)[0]).max(dim=-1)[0]
-    points = ((points - center) / max_l)
+        points /= max_l
     return points
 
 
@@ -278,11 +281,14 @@ def encode_3d_features2sequence(points, features, grid_res, seq_len):
     return __features
 
 
-def calculate_sdf(points, vertices, faces):
+def calculate_sdf(points, vertices, faces, scan_count=10, scan_resolution=128, true_sdf=None):
+    if true_sdf is not None:
+        sdf = devoxelize_points3d(points, true_sdf.unsqueeze(-1).unsqueeze(0)).view(1, -1)
+        return sdf
     mesh = trimesh.Trimesh(vertices=tn(vertices[0]), faces=tn(faces))
     sdf = mesh_to_sdf.mesh_to_sdf(mesh, tn(points[0]),
                                   surface_point_method='scan', sign_method='depth',
-                                  bounding_radius=None, scan_count=10, scan_resolution=128,
+                                  bounding_radius=None, scan_count=scan_count, scan_resolution=scan_resolution,
                                   sample_point_count=100000, normal_sample_count=15)
     sdf = torch.tensor(sdf).type_as(vertices).view(1, -1)
     return sdf

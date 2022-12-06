@@ -1,8 +1,10 @@
+import os
+
 import torch
 
 import kaolin
-from modules.ddd.util import normalize_points
-from modules.common.util import *
+from modules.ddd.util import *
+
 
 def preprocessing_transform(inputs):
     mesh = inputs['mesh']
@@ -92,38 +94,54 @@ class SamplePointsTransform(object):
 
 class ShapenetPointClouds(torch.utils.data.Dataset):
 
-    def __init__(self, shapenet_root, n_points=100000, cache_dir=None, categories=['plane'], noise=1e-2,
-                 cache_scenes=512):
+    def __init__(self, shapenet_root, n_points=100000, cache_dir=None, categories=['plane'], classes=['02691156'],
+                 noise=1e-2, cache_scenes=512):
         super(ShapenetPointClouds, self).__init__()
+        self.shapenet_root = shapenet_root
+        self.classes = [cls for cls in os.listdir(shapenet_root) if cls in classes]
+        self.items = []
+        for cls in self.classes:
+            paths = [os.path.join(shapenet_root, cls, item, 'models', 'model_normalized.obj')
+                               for item in os.listdir(os.path.join(shapenet_root, cls))]
+            self.items.extend([path for path in paths if os.path.exists(path)])
+        assert len(self.items) > 0, 'Loaded empty list of objects from shapenet'
         # Make ShapeNet dataset with preprocessing transform
-        self.ds = kaolin.io.shapenet.ShapeNetV2(root=shapenet_root,
-                                                categories=categories,
-                                                train=False,
-                                                split=0.0,
-                                                with_materials=True,
-                                                output_dict=True,
-                                                transform=preprocessing_transform)
-
-        # Cache the result of the preprocessing transform
-        # and apply the sampling at runtime
-        self.pc_ds = kaolin.io.dataset.CachedDataset(self.ds,
-                                                     cache_dir=cache_dir,
-                                                     save_on_disk=cache_dir is not None,
-                                                     num_workers=torch.cuda.device_count() * 2,
-                                                     transform=SamplePointsTransform(n_points),
-                                                     cache_at_runtime=cache_scenes,
-                                                     force_overwrite=True)
+        # self.ds = kaolin.io.shapenet.ShapeNetV2(root=shapenet_root,
+        #                                         categories=categories,
+        #                                         train=False,
+        #                                         split=0.0,
+        #                                         with_materials=True,
+        #                                         output_dict=True,
+        #                                         transform=preprocessing_transform)
+        #
+        # # Cache the result of the preprocessing transform
+        # # and apply the sampling at runtime
+        # self.pc_ds = kaolin.io.dataset.CachedDataset(self.ds,
+        #                                              cache_dir=cache_dir,
+        #                                              save_on_disk=cache_dir is not None,
+        #                                              num_workers=torch.cuda.device_count() * 2,
+        #                                              transform=SamplePointsTransform(n_points),
+        #                                              cache_at_runtime=cache_scenes,
+        #                                              force_overwrite=True)
         self.noise = noise
 
     def __len__(self):
-        return len(self.pc_ds)
+        # return len(self.pc_ds)
+        return len(self.items)
 
     def __getitem__(self, idx):
-        item = self.pc_ds[idx]
-        vertices = item['vertices'][0]
-        faces = item['faces']
+        # item = self.pc_ds[idx]
+        # vertices = item['vertices'][0]
+        # faces = item['faces']
+
+        mesh_path = self.items[idx]
+        vertices, faces = read_obj(mesh_path)
+        vertices = normalize_points(vertices) * 0.95
+
+        # sdf_grid = torch.load(os.path.join(os.path.dirname(mesh_path), 'sdf'))
+
         return {
-            'pcd': item['coords'],
             'vertices': vertices,
-            'faces': faces
+            'faces': faces,
+            'sdf': None
         }
