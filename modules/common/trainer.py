@@ -52,7 +52,10 @@ class SimpleLogger:
             self.log_image(image, f'{prefix}_{image_id}', epoch)
 
     def log_tensor(self, tensor, name=''):
-        print(f'{name} --- {lt.lovely(tensor)}')
+        if tensor.numel() > 0:
+            print(f'{name} --- {lt.lovely(tensor)}')
+        else:
+            print(f'{name} --- empty tensor of shape {tensor.shape}')
 
     def log_plot(self, plt, name, epoch=0):
         if self.clearml:

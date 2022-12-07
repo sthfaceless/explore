@@ -35,15 +35,20 @@ if __name__ == "__main__":
     assert len(items) > 0, 'Loaded empty list of objects from shapenet'
 
     grid_resolution = args.res
+    x, y, z = torch.meshgrid(torch.arange(grid_resolution), torch.arange(grid_resolution),
+                             torch.arange(grid_resolution))
+    x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
+    points = normalize_points(torch.stack([x, y, z], dim=-1))
+
     for mesh_path in tqdm(items, desc='Processed mesh files'):
-        vertices, faces = read_obj(mesh_path)
-        vertices = normalize_points(vertices) * 0.95
-        x, y, z = torch.meshgrid(torch.arange(grid_resolution), torch.arange(grid_resolution),
-                                 torch.arange(grid_resolution))
-        x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
-        points = normalize_points(torch.cat([x, y, z], dim=-1))
-        sdf = calculate_sdf(points.unsqueeze(0), vertices.unsqueeze(0), faces, scan_count=args.scans,
-                            scan_resolution=args.scan_res)[0]
-        sdf_grid = sdf.view(grid_resolution, grid_resolution, grid_resolution)
-        out_path = os.path.join(os.path.dirname(mesh_path), 'sdf')
-        torch.save(sdf, out_path)
+        try:
+            vertices, faces = read_obj(mesh_path)
+            vertices = normalize_points(vertices) * 0.95
+            sdf = calculate_sdf(points.unsqueeze(0).type_as(vertices), vertices.unsqueeze(0), faces, scan_count=args.scans,
+                                scan_resolution=args.scan_res)[0]
+            sdf_grid = sdf.view(grid_resolution, grid_resolution, grid_resolution)
+            out_path = os.path.join(os.path.dirname(mesh_path), 'sdf')
+            torch.save(sdf, out_path)
+        except Exception as e:
+            print(f'Exception occured during processed mesh file {str(e)}')
+

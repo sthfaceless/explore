@@ -108,7 +108,7 @@ if __name__ == "__main__":
                      curvature_threshold=args.curvature_threshold, disc_v_noise=args.disc_v_noise,
                      encoder_out=args.encoder_out, noise=args.noise, batch_size=args.batch_size)
     trainer = Trainer(max_steps=args.steps[-1] * args.acc_grads, val_check_interval=args.steps[-1] // args.validations,
-                      limit_val_batches=10,
+                      limit_val_batches=10, precision=16,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                       # strategy=DDPStrategy(find_unused_parameters=True),
                       accumulate_grad_batches=args.acc_grads,
