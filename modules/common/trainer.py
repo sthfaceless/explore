@@ -51,7 +51,7 @@ class SimpleLogger:
         for image_id, image in enumerate(images):
             self.log_image(image, f'{prefix}_{image_id}', epoch)
 
-    def log_tensor(self, tensor, name='', depth=1):
+    def log_tensor(self, tensor, name='', depth=0):
         if tensor.numel() > 0:
             print(f'{name} --- {lt.lovely(tensor, depth=depth)}')
         else:

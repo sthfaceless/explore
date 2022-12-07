@@ -138,7 +138,7 @@ def get_surface_tetrahedras(vertexes, tets, sdf, features):
 
     tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
     tet_vertexes_msk[surface_tets.view(len(surface_tets) * 4).unique()] = True
-    tet_vertexes_ids = torch.arange(len(vertexes)).type_as(tet_vertexes_msk).long()[tet_vertexes_msk]
+    tet_vertexes_ids = torch.arange(len(vertexes)).type_as(surface_tets).long()[tet_vertexes_msk]
 
     # we need to recalculate tetrahedras ids
     indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1

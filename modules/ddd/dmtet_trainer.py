@@ -12,7 +12,7 @@ from modules.ddd.render_util import render_mesh
 class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
-                 learning_rate=1e-4, debug_interval=-1,
+                 learning_rate=1e-4, debug_interval=100,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
@@ -53,7 +53,8 @@ class PCD2Mesh(pl.LightningModule):
         self.pos_features = encoder_out + self.input_dim
         self.noise = noise
         self.sdf_clamp = sdf_clamp
-        self.n_volume_division = n_volume_division
+        self.n_volume_division = 0
+        self.true_volume_division = n_volume_division
         self.n_surface_division = n_surface_division
         self.encoder_grids = encoder_grids
 
@@ -91,7 +92,7 @@ class PCD2Mesh(pl.LightningModule):
         self.surface_subdivision = False
 
         if self.debug:
-            print(self.lg.log_tensor(tet_vertexes, 'Tetrahedras grid vertices'))
+            print(self.lg.log_tensor(tet_vertexes.transpose(0, 1), 'Tetrahedras grid vertices', depth=1))
             print(self.lg.log_tensor(tetrahedras, 'Tetrahedras grid faces'))
             self.lg.log_scatter3d(tn(tet_vertexes[:, 0]), tn(tet_vertexes[:, 1]), tn(tet_vertexes[:, 2]),
                                   'tetrahedras_vertex')
@@ -120,8 +121,9 @@ class PCD2Mesh(pl.LightningModule):
         return loss
 
     def on_train_batch_start(self, batch, batch_idx):
+        self.volume_refinement = True
         if self.global_step >= self.steps_schedule[0]:
-            self.volume_refinement = True
+            self.n_volume_division = self.true_volume_division
         if self.global_step >= self.steps_schedule[1]:
             self.adversarial_training = True
         if self.global_step >= self.steps_schedule[2]:
@@ -211,7 +213,8 @@ class PCD2Mesh(pl.LightningModule):
             if self.debug_state:
                 for grid_idx, grid in enumerate(grids):
                     self.lg.log_tensor(grid, f'Refinement volume feature grid {self.encoder_grids[grid_idx]}')
-                self.lg.log_tensor(delta_v, 'First refimenent delta vertices')
+                self.lg.log_tensor(tet_vertexes.transpose(1, 2), 'First refined vertexes', depth=1)
+                self.lg.log_tensor(delta_v.transpose(0, 1), 'First refimenent delta vertices', depth=1)
                 self.lg.log_tensor(delta_s, 'First refimenent delta sdf')
                 self.lg.log_tensor(tet_features, 'First refimenent features')
                 self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
@@ -266,7 +269,8 @@ class PCD2Mesh(pl.LightningModule):
             tet_sdf = tet_sdf + delta_s.unsqueeze(0)
 
             if self.debug_state:
-                self.lg.log_tensor(delta_v, 'Second refimenent delta vertices')
+                self.lg.log_tensor(tet_vertexes.transpose(1, 2), 'Second refined vertexes', depth=1)
+                self.lg.log_tensor(delta_v.transpose(0, 1), 'Second refimenent delta vertices', depth=1)
                 self.lg.log_tensor(delta_s, 'Second refimenent delta sdf')
                 self.lg.log_tensor(tet_features, 'Second refimenent features')
                 self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
@@ -317,9 +321,8 @@ class PCD2Mesh(pl.LightningModule):
                 # learnable surface subdivision predicts changed vertices and alpha smoothing factor
                 delta_v, alphas = self.surface_ref(pos_features[0], mesh_faces)
                 mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
-                if len(mesh_faces) > 0:
-                    mesh_vertices, mesh_faces = kaolin.ops.mesh.subdivide_trianglemesh(
-                        mesh_vertices, mesh_faces, iterations=n_surface_division, alpha=alphas.unsqueeze(0))
+                mesh_vertices, mesh_faces = kaolin.ops.mesh.subdivide_trianglemesh(
+                    mesh_vertices, mesh_faces, iterations=n_surface_division, alpha=alphas.unsqueeze(0))
 
                 out['mesh_vertices'] = mesh_vertices
                 out['mesh_faces'] = mesh_faces
@@ -499,10 +502,11 @@ class PCD2Mesh(pl.LightningModule):
                            if len(f) > 0]
         if len(rendered_images) > 0:
             images = np.stack(rendered_images, axis=0)
-            b, views, h, w = images.shape
-            images = images.reshape((b, 2, views // 2, h, w)).moveaxis(1, 3).reshape((b, 2 * h, views // 2 * w))
+            b, views, h, w, _ = images.shape
+            images = np.moveaxis(images.reshape((b, 2, views // 2, h, w, 3)), 1, 3).reshape(
+                (b, 2 * h, views // 2 * w, 3))
             images = [images[idx] for idx in range(len(images))]
-            self.simple_logger.log_images(images, 'rendered_mesh', self.global_step)
+            self.lg.log_images(images, 'rendered_mesh', self.global_step)
 
     def validation_step(self, batch, batch_idx):
         loss = functools.reduce(lambda l1, l2: l1 + l2,
