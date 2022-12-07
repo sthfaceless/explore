@@ -48,7 +48,7 @@ def render_mesh(verts, faces, img_size=256, n_views=8, device=torch.device('cpu'
             device=device,
             cameras=cameras,
             lights=lights,
-            blend_params=BlendParams(background_color=(0.99, 0.99, 0.99))
+            blend_params=BlendParams(background_color=(0.0, 0.0, 0.0))
         )
     )
 
