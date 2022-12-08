@@ -43,6 +43,8 @@ class Diffusion(pl.LightningModule):
                              torch.sqrt(self.alphas) * (1 - self.head_alphas_pred) / (1 - self.head_alphas))
         self.register_buffer('p_posterior_eps_coef', self.betas / torch.sqrt(1 - self.head_alphas))
 
+        self.var_weight = torch.nn.Parameter(torch.zeros((diffusion_steps,), dtype=torch.float32), requires_grad=True)
+
     def get_sample_steps(self, steps=None):
         if steps is None:
             steps = self.sample_steps
@@ -91,27 +93,30 @@ class Diffusion(pl.LightningModule):
         t = t.view(b, *shape)
         return x * torch.sqrt(self.head_alphas[t]) + noise * torch.sqrt(1 - self.head_alphas[t])
 
-    def q_posterior_mean_variance(self, x0, xt, t, var_weight=None):
+    def q_posterior_mean_variance(self, x0, xt, t, learned_var=False):
         b, shape = len(x0), [1 for _ in x0.shape[1:]]
         t = t.view(b, *shape)
         mean = x0 * self.q_posterior_x0_coef[t] + xt * self.q_posterior_xt_coef[t]
-        if var_weight is None:
-            var_weight = torch.zeros_like(mean)
+        if learned_var:
+            var_weight = self.var_weight[t]
+        else:
+            var_weight = torch.zeros_like(self.var_weight[t])
         logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
         return mean, logvar
 
-    def p_posterior_mean_variance(self, x_noised, t, eps, var_weight, simplified=False, clip_denoised=None):
+    def p_posterior_mean_variance(self, x_noised, t, eps, simplified=False, clip_denoised=None):
         b, shape = len(x_noised), [1 for _ in x_noised.shape[1:]]
         t = t.view(b, *shape)
         if simplified:
             mean = (x_noised - eps * self.p_posterior_eps_coef[t]) / self.sqrt_alphas[t]
-            logvar = self.log_betas[t] * var_weight + self.log_betas_tilde_aligned[t] * (1 - var_weight)
+            logvar = self.log_betas[t] * self.var_weight[t] \
+                     + self.log_betas_tilde_aligned[t] * (1 - self.var_weight[t])
         else:
             x0 = self.predict_x0(x_noised, t, eps, clip_denoised=clip_denoised)
-            mean, logvar = self.q_posterior_mean_variance(x0, x_noised, t, var_weight)
+            mean, logvar = self.q_posterior_mean_variance(x0, x_noised, t, learned_var=True)
         return mean, logvar
 
-    def p_sample_stride(self, xt, prev_t, curr_t, clip_denoised=None, simplified=False, **kwargs):
+    def p_sample_stride(self, xt, prev_t, curr_t, clip_denoised=None, simplified=False, eps=None, **kwargs):
 
         # reshape for x shape
         b, shape = len(curr_t), [1 for _ in xt.shape[1:]]
@@ -122,7 +127,8 @@ class Diffusion(pl.LightningModule):
         z[curr_t.expand(z.shape) == 0] = 0
 
         # predict epsilon and variance (b 2*c h w)
-        eps, var_weight = self.forward(xt, curr_t.view(-1), **kwargs)
+        if eps is None:
+            eps = self.forward(xt, curr_t.view(-1), **kwargs)
 
         # recalculate beta schedule with stride
         head_alphas = self.head_alphas[curr_t]
@@ -149,28 +155,29 @@ class Diffusion(pl.LightningModule):
         betas_aligned = torch.clamp(1 - head_alphas_aligned / prev_head_alphas_aligned, min=1e-8, max=0.999)
         betas_tilde = torch.clamp((1 - prev_head_alphas_aligned) / (1 - head_alphas_aligned) * betas_aligned,
                                   min=1e-8, max=0.999)
-        logvar = torch.log(betas) * var_weight + torch.log(betas_tilde) * (1 - var_weight)
+        logvar = torch.log(betas) * self.var_weight[curr_t] + torch.log(betas_tilde) * (1 - self.var_weight[curr_t])
 
         x = mean + torch.exp(logvar / 2) * z
         return x
 
-    def p_sample(self, xt, t, clip_denoised=None, **kwargs):
+    def p_sample(self, xt, t, eps=None, clip_denoised=None, **kwargs):
         z = torch.randn_like(xt)
         z[t == 0] = 0
         b, shape = len(t), [1 for _ in xt.shape[1:]]
         t = t.view(b, *shape)
-        eps, var_weight = self.forward(xt, t.view(-1), **kwargs)
+        if eps is None:
+            eps = self.forward(xt, t.view(-1), **kwargs)
 
-        mean, logvar = self.p_posterior_mean_variance(xt, t, eps, var_weight, clip_denoised=clip_denoised)
+        mean, logvar = self.p_posterior_mean_variance(xt, t, eps, clip_denoised=clip_denoised)
         x = mean + torch.exp(logvar / 2) * z
         return x
 
-    def get_losses(self, x, x_noised, t, noise, eps, var_weight):
+    def get_losses(self, x, x_noised, t, noise, eps):
 
         mse_loss = torch.nn.functional.mse_loss(noise, eps)
 
         true_mean, true_logvar = self.q_posterior_mean_variance(x, x_noised, t)
-        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, var_weight, clip_denoised=False)
+        pred_mean, pred_logvar = self.p_posterior_mean_variance(x_noised, t, eps, clip_denoised=False)
 
         b, shape = len(t), [1 for _ in x.shape[1:]]
         t = t.view(b, *shape)

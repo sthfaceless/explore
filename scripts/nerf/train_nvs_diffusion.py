@@ -16,7 +16,7 @@ def get_parser():
     parser.add_argument("--dataset", default="", help="Path to shapenet class")
 
     # Training settings
-    parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for decoder and nerf")
+    parser.add_argument("--base_lr", default=1e-6, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Minimal learning rate ratio")
     parser.add_argument("--epochs", default=50, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Epochs in training")
@@ -37,6 +37,7 @@ def get_parser():
     parser.add_argument("--sample_steps", default=256, type=int, help="Steps for sampling")
     parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
+    parser.add_argument("--clf_weight", default=3.0, type=float, help="Classifier free guidance weight sampling")
     parser.add_argument("--focal", default=1.5, type=float, help="Focal for rendering and dataset")
 
     # Meta settings
@@ -66,11 +67,12 @@ if __name__ == "__main__":
 
     dataset = PairViews(class_path=args.dataset, images_per_scene=args.images_batch, w=args.img_size, h=args.img_size,
                         cache_size=args.cache_size)
+    learning_rate = min(args.base_lr * args.batch_size * args.acc_grads, 1e-4)
     model = NVSDiffusion(clearml=logger, shape=(3, args.img_size, args.img_size), dataset=dataset,
                          attention_dim=args.attention_dim, xunet_hiddens=args.hidden_dims, dropout=args.dropout,
                          classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
                          diffusion_steps=args.diffusion_steps, log_samples=args.samples_epoch, focal=args.focal,
-                         log_length=args.samples_length, learning_rate=args.learning_rate,
+                         log_length=args.samples_length, learning_rate=learning_rate, clf_weight=args.clf_weight,
                          sample_steps=args.sample_steps, steps=args.steps, epochs=args.epochs)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 1000,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,

@@ -468,7 +468,7 @@ class XUnetBlock(torch.nn.Module):
         self.block = block
         self.need_attn = need_attn and cond == 'xunet'
         if self.need_attn:
-            self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads, cross=True)
+            self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
 
     def forward(self, x, emb):
         h = self.block(x, emb)
@@ -498,7 +498,7 @@ class XUNetDenoiser(torch.nn.Module):
         # Time embeddings
         self.emb_features = embed_features
         self.time_layers = torch.nn.ModuleList([
-            torch.nn.Linear(embed_features, embed_features),
+            torch.nn.Linear(embed_features // 4, embed_features),
             torch.nn.Linear(embed_features, embed_features),
         ])
         # Positional embeddings
@@ -571,7 +571,7 @@ class XUNetDenoiser(torch.nn.Module):
 
         # Out latent prediction
         self.out_norm = norm(hidden_dims[0], num_groups=num_groups)
-        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features * 2, kernel_size=kernel_size,
+        self.out_mapper = torch.nn.Conv2d(hidden_dims[0], features, kernel_size=kernel_size,
                                           padding=kernel_size // 2)
 
     def forward(self, x, time, x_cond, time_cond, ray_o, ray_d, ray_o_cond, ray_d_cond):
@@ -584,9 +584,9 @@ class XUNetDenoiser(torch.nn.Module):
         # Encode time embeddings
         if self.cond == 'xunet':
             time = torch.cat([time, time_cond], dim=0)
-            h_time = get_timestep_encoding(time, self.emb_features, self.steps)
+            h_time = get_timestep_encoding(time, self.emb_features // 4, self.steps)
         elif self.cond == 'concat':
-            h_time = get_timestep_encoding(time, self.emb_features, self.steps)
+            h_time = get_timestep_encoding(time, self.emb_features // 4, self.steps)
         else:
             raise NotImplementedError(f'Unknown conditional type for time {self.cond}')
         h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time)))
@@ -642,7 +642,5 @@ class XUNetDenoiser(torch.nn.Module):
         # take only x
         if self.cond == 'xunet':
             out = torch.chunk(out, 2, dim=0)[0]
-        eps, weight = torch.chunk(out, 2, dim=1)
-        weight = (torch.tanh(weight) + 1) / 2
 
-        return eps, weight
+        return out

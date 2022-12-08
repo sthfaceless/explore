@@ -6,7 +6,8 @@ from modules.common.util import *
 
 
 def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
-                         scale_x=2.0, scale_y=2.0, scale_z=2.0):
+                         scale_x=2.0, scale_y=2.0, scale_z=2.0, less=True):
+    # define vertexes positions
     coords = torch.linspace(start=0, end=1, steps=grid_resolution)
     x, y, z = torch.meshgrid(torch.arange(grid_resolution), torch.arange(grid_resolution),
                              torch.arange(grid_resolution))
@@ -15,16 +16,7 @@ def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0
     vertexes = torch.stack([(coords[x] - offset_x) * scale_x,
                             (coords[y] - offset_y) * scale_y,
                             (coords[z] - offset_z) * scale_z], dim=-1)
-
-    # six tetrahedras vertexes divides unit cube
-    ###
-    # 0 4 1 3
-    # 1 4 5 3
-    # 4 7 5 3
-    # 4 6 7 3
-    # 2 6 4 3
-    # 0 2 4 3
-    ###
+    # define vertexes for each cube
     x, y, z = torch.meshgrid(torch.arange(grid_resolution - 1), torch.arange(grid_resolution - 1),
                              torch.arange(grid_resolution - 1))
     x, y, z = x.reshape(-1), y.reshape(-1), z.reshape(-1)
@@ -36,14 +28,41 @@ def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0
     v5 = get_vertex_id(x + 1, y + 1, z, grid_res=grid_resolution)
     v6 = get_vertex_id(x + 1, y, z + 1, grid_res=grid_resolution)
     v7 = get_vertex_id(x + 1, y + 1, z + 1, grid_res=grid_resolution)
-    tetrahedras = torch.cat([
-        torch.stack([v0, v4, v1, v3], dim=-1),
-        torch.stack([v1, v4, v5, v3], dim=-1),
-        torch.stack([v4, v7, v5, v3], dim=-1),
-        torch.stack([v4, v6, v7, v3], dim=-1),
-        torch.stack([v2, v6, v4, v3], dim=-1),
-        torch.stack([v0, v2, v4, v3], dim=-1)
-    ], dim=0)
+
+    if not less:
+        # six tetrahedras subdivision
+        ###
+        # 0 4 1 3
+        # 1 4 5 3
+        # 4 7 5 3
+        # 4 6 7 3
+        # 2 6 4 3
+        # 0 2 4 3
+        ###
+        tetrahedras = torch.cat([
+            torch.stack([v0, v4, v1, v3], dim=-1),
+            torch.stack([v1, v4, v5, v3], dim=-1),
+            torch.stack([v4, v7, v5, v3], dim=-1),
+            torch.stack([v4, v6, v7, v3], dim=-1),
+            torch.stack([v2, v6, v4, v3], dim=-1),
+            torch.stack([v0, v2, v4, v3], dim=-1)
+        ], dim=0)
+    else:
+        # five tetrahedras subdivision
+        ###
+        # 0 4 1 2
+        # 1 7 3 2
+        # 4 2 6 7
+        # 4 5 1 7
+        # 4 1 3 7
+        ###
+        tetrahedras = torch.cat([
+            torch.stack([v0, v4, v1, v2], dim=-1),
+            torch.stack([v1, v7, v3, v2], dim=-1),
+            torch.stack([v4, v2, v6, v7], dim=-1),
+            torch.stack([v4, v5, v1, v7], dim=-1),
+            torch.stack([v4, v1, v3, v7], dim=-1),
+        ], dim=0)
 
     return vertexes, tetrahedras
 

@@ -3,17 +3,17 @@ import os.path
 from random import shuffle
 from time import time
 
-import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import torch.cuda
 
 from modules.common.trainer import *
+from modules.common.trainer import SimpleLogger
 from modules.dd.model import *
 from modules.gen.trainer import Diffusion
 from modules.nerf.dataset import *
 from modules.nerf.model import *
 from modules.nerf.util import *
-from modules.common.trainer import SimpleLogger
+
 
 class NerfTrainer:
 
@@ -566,9 +566,9 @@ class LatentDiffusion(Diffusion):
         t = torch.randint(low=0, high=self.diffusion_steps - 1, size=[len(batch)]).type_as(batch).long()
 
         latent_noised = self.q_sample(batch, t, noise)
-        eps, var_weight = self.forward(latent_noised, t)
+        eps = self.forward(latent_noised, t)
 
-        return self.get_losses(batch, latent_noised, t, noise, eps, var_weight)
+        return self.get_losses(batch, latent_noised, t, noise, eps)
 
     def on_validation_epoch_end(self):
         with torch.no_grad():
@@ -727,8 +727,8 @@ class MultiVAETrainer(pl.LightningModule):
 
 class NVSDiffusion(Diffusion):
 
-    def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.1, classifier_free=0.1,
-                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, diffusion_steps=256,
+    def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.1, classifier_free=0.1, clf_weight=3.0,
+                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, diffusion_steps=4000,
                  sample_steps=128, kl_weight=1e-3, num_heads=None, steps=100, epochs=10000, beta_schedule='cos',
                  embed_features=512, pos_enc=32, cond='xunet',
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_length=16, focal=1.5, use_ema=True):
@@ -745,6 +745,7 @@ class NVSDiffusion(Diffusion):
         self.in_features, self.h, self.w = shape
         self.focal = focal
         self.classifier_free = classifier_free
+        self.classifier_weight = clf_weight
 
         self.use_ema = use_ema
         if use_ema:
@@ -756,7 +757,8 @@ class NVSDiffusion(Diffusion):
 
     def sample(self, n_seq, cond, ray_o, ray_d, dist=1.0):
         n_samples = len(cond)
-        ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        # ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        ray_d = ray_d.movedim(-1, 1)
         cond_sequence, ray_o_sequence, ray_d_sequence = [cond], [ray_o], [ray_d]
         for item_id in range(n_seq):
             x = torch.randn((n_samples, *self.shape)).type_as(cond)
@@ -765,14 +767,28 @@ class NVSDiffusion(Diffusion):
             ray_o, ray_d = get_images_rays(h=self.h, w=self.w,
                                            focal=torch.ones(n_samples).type_as(cond) * self.focal, poses=poses)
             # b h w 3 -> b 3 h w
-            ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+            # ray_d = (ray_d / torch.norm(ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+            ray_d = ray_d.movedim(-1, 1)
             sample_steps = self.get_sample_steps()
             for t_curr, t_prev in zip(sample_steps[:-1], sample_steps[1:]):
                 idx = randint(0, len(cond_sequence) - 1)
                 ones = torch.ones(n_samples).type_as(x).long()
-                x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
-                                         x_cond=cond_sequence[idx], time_cond=ones * t_curr,
-                                         ray_o_cond=ray_o_sequence[idx], ray_d_cond=ray_d_sequence[idx], train=False)
+
+                # employ noise correcting with clf free guidance
+                eps_true = self.forward(x, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
+                                        x_cond=cond_sequence[idx], time_cond=torch.zeros_like(t_curr),
+                                        ray_o_cond=ray_o_sequence[idx], ray_d_cond=ray_d_sequence[idx],
+                                        train=False)
+                eps_unc = self.forward(x, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
+                                       x_cond=self.q_sample(cond_sequence[idx],
+                                                            torch.ones((len(x),)).type_as(t_curr)
+                                                            * (self.diffusion_steps - 1),
+                                                            torch.randn_like(x)),
+                                       time_cond=torch.ones_like(t_curr) * (self.diffusion_steps - 1),
+                                       ray_o_cond=torch.zeros_like(ray_o_sequence[idx]),
+                                       ray_d_cond=torch.zeros_like(ray_d_sequence[idx]), train=False)
+                eps = (1 + self.classifier_weight) * eps_true - self.classifier_weight * eps_unc
+                x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, eps=eps)
             cond_sequence.append(x)
             ray_o_sequence.append(ray_o)
             ray_d_sequence.append(ray_d)
@@ -793,18 +809,24 @@ class NVSDiffusion(Diffusion):
         x_noised = self.q_sample(x, t, noise)
         # extract conditional view with classifier free guidance
         clf_free_msk = torch.rand(len(x)).type_as(x) > self.classifier_free
-        x_cond = torch.where(clf_free_msk[:, None, None, None], batch['cond'],
-                             self.q_sample(batch['cond'], torch.ones((len(x),)).type_as(t) * (self.diffusion_steps - 1),
-                                           torch.randn_like(x)))
         # extract positional information
         origin_ray_o, origin_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['view_poses'])
         cond_ray_o, cond_ray_d = get_images_rays(self.h, self.w, batch['focal'], batch['cond_poses'])
         # normalize direction vectors and move dims (b h w 3 -> b 3 h w)
-        origin_ray_d = (origin_ray_d / torch.norm(origin_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
-        cond_ray_d = (cond_ray_d / torch.norm(cond_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
-        eps, var_weight = self.forward(x_noised, t, ray_o=origin_ray_o, ray_d=origin_ray_d, x_cond=x_cond, time_cond=t,
-                                       ray_o_cond=cond_ray_o, ray_d_cond=cond_ray_d)
-        return self.get_losses(x, x_noised, t, noise, eps, var_weight)
+        # origin_ray_d = (origin_ray_d / torch.norm(origin_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        # cond_ray_d = (cond_ray_d / torch.norm(cond_ray_d, dim=-1, keepdim=True)).movedim(-1, 1)
+        origin_ray_d, cond_ray_d = origin_ray_d.movedim(-1, 1), cond_ray_d.movedim(-1, 1)
+        eps = self.forward(x_noised, t, ray_o=origin_ray_o, ray_d=origin_ray_d,
+                           x_cond=torch.where(clf_free_msk[:, None, None, None], batch['cond'],
+                                              self.q_sample(batch['cond'], torch.ones((len(x),)).type_as(t)
+                                                            * (self.diffusion_steps - 1), torch.randn_like(x))),
+                           time_cond=torch.where(clf_free_msk, torch.zeros_like(t),
+                                                 torch.ones_like(t) * (self.diffusion_steps - 1)),
+                           ray_o_cond=torch.where(clf_free_msk[:, None], cond_ray_o,
+                                                  torch.zeros_like(cond_ray_o)),
+                           ray_d_cond=torch.where(clf_free_msk[:, None, None, None], cond_ray_d,
+                                                  torch.zeros_like(cond_ray_d)))
+        return self.get_losses(x, x_noised, t, noise, eps)
 
     def on_validation_epoch_end(self):
         data_iter = iter(self.trainer.val_dataloaders[0])
