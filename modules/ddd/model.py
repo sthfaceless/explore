@@ -92,6 +92,7 @@ class MultiPointVoxelCNN(torch.nn.Module):
             self.point_layer.norm2 = norm(dim, num_groups)
             self.point_layer.conv2 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
 
+        self.out_norm = norm(sum(dims), num_groups=num_groups * len(dims))
         self.out_layer = torch.nn.Conv1d(sum(dims), dim, kernel_size=1)
 
     def voxelize(self, points, features):
@@ -99,7 +100,7 @@ class MultiPointVoxelCNN(torch.nn.Module):
 
     def devoxelize(self, points, grids):
         h = torch.cat([model.devoxelize(points, grid) for model, grid in zip(self.models, grids)], dim=-1)
-        out = self.out_layer(h.movedim(-1, 1)).movedim(1, -1)
+        out = self.out_layer(nonlinear(self.out_norm(h.movedim(-1, 1)))).movedim(1, -1)
         return out
 
     def map_points(self, features):
@@ -149,31 +150,37 @@ class TetConv(torch.nn.Module):
         super(TetConv, self).__init__()
         self.gcn1 = torch.nn.Module()
         self.gcn1.input = torch.nn.Linear(input_dim, gcn_dims[0])
+        self.gcn1.norm1 = torch.nn.BatchNorm1d(gcn_dims[0])
         self.gcn1.first = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
+        self.gcn1.norm2 = torch.nn.BatchNorm1d(gcn_dims[0])
         self.gcn1.second = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
         self.gcn2 = torch.nn.Module()
         self.gcn2.input = torch.nn.Linear(gcn_dims[0], gcn_dims[1])
+        self.gcn2.norm1 = torch.nn.BatchNorm1d(gcn_dims[1])
         self.gcn2.first = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
+        self.gcn2.norm2 = torch.nn.BatchNorm1d(gcn_dims[1])
         self.gcn2.second = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
         self.gcn_out = torch.nn.Linear(gcn_dims[1], mlp_dims[0])
+        self.norm1 = torch.nn.BatchNorm1d(mlp_dims[0])
         self.layer1 = torch.nn.Linear(mlp_dims[0], mlp_dims[1])
+        self.norm2 = torch.nn.BatchNorm1d(mlp_dims[1])
         self.layer2 = torch.nn.Linear(mlp_dims[1], out_dim)
 
     def forward(self, x_vert, tets):
         edges = get_tetrahedras_edges(tets)
         x_vert = self.gcn1.input(x_vert)
-        h_vert = self.gcn1.first(nonlinear(x_vert), edges)
-        h_vert = self.gcn1.second(nonlinear(h_vert), edges)
+        h_vert = self.gcn1.first(nonlinear(self.gcn1.norm1(x_vert)), edges)
+        h_vert = self.gcn1.second(nonlinear(self.gcn1.norm2(h_vert)), edges)
         x_vert = (x_vert + h_vert) / 2 ** 0.5
 
         x_vert = self.gcn2.input(nonlinear(x_vert))
-        h_vert = self.gcn2.first(nonlinear(x_vert), edges)
-        h_vert = self.gcn2.second(nonlinear(h_vert), edges)
+        h_vert = self.gcn2.first(nonlinear(self.gcn2.norm1(x_vert)), edges)
+        h_vert = self.gcn2.second(nonlinear(self.gcn2.norm2(h_vert)), edges)
         x_vert = (x_vert + h_vert) / 2 ** 0.5
         h_vert = self.gcn_out(x_vert)
 
-        h_vert = self.layer1(nonlinear(h_vert))
-        h_vert = self.layer2(nonlinear(h_vert))
+        h_vert = self.layer1(nonlinear(self.norm1(h_vert)))
+        h_vert = self.layer2(nonlinear(self.norm2(h_vert)))
         return h_vert[:, :3], h_vert[:, 3], h_vert[:, 4:]
 
 
@@ -183,31 +190,37 @@ class MeshConv(torch.nn.Module):
         super(MeshConv, self).__init__()
         self.gcn1 = torch.nn.Module()
         self.gcn1.input = torch.nn.Linear(input_dim, gcn_dims[0])
+        self.gcn1.norm1 = torch.nn.BatchNorm1d(gcn_dims[0])
         self.gcn1.first = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
+        self.gcn1.norm2 = torch.nn.BatchNorm1d(gcn_dims[0])
         self.gcn1.second = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
         self.gcn2 = torch.nn.Module()
         self.gcn2.input = torch.nn.Linear(gcn_dims[0], gcn_dims[1])
+        self.gcn2.norm1 = torch.nn.BatchNorm1d(gcn_dims[1])
         self.gcn2.first = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
+        self.gcn2.norm2 = torch.nn.BatchNorm1d(gcn_dims[1])
         self.gcn2.second = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
         self.gcn_out = torch.nn.Linear(gcn_dims[1], mlp_dims[0])
+        self.norm1 = torch.nn.BatchNorm1d(mlp_dims[0])
         self.layer1 = torch.nn.Linear(mlp_dims[0], mlp_dims[1])
+        self.norm2 = torch.nn.BatchNorm1d(mlp_dims[1])
         self.layer2 = torch.nn.Linear(mlp_dims[1], out_dim)
 
     def forward(self, x_vert, faces):
         edges = get_mesh_edges(faces)
         x_vert = self.gcn1.input(x_vert)
-        h_vert = self.gcn1.first(nonlinear(x_vert), edges)
-        h_vert = self.gcn1.second(nonlinear(h_vert), edges)
+        h_vert = self.gcn1.first(nonlinear(self.gcn1.norm1(x_vert)), edges)
+        h_vert = self.gcn1.second(nonlinear(self.gcn1.norm2(h_vert)), edges)
         x_vert = (x_vert + h_vert) / 2 ** 0.5
 
         x_vert = self.gcn2.input(nonlinear(x_vert))
-        h_vert = self.gcn2.first(nonlinear(x_vert), edges)
-        h_vert = self.gcn2.second(nonlinear(h_vert), edges)
+        h_vert = self.gcn2.first(nonlinear(self.gcn2.norm1(x_vert)), edges)
+        h_vert = self.gcn2.second(nonlinear(self.gcn2.norm2(h_vert)), edges)
         x_vert = (x_vert + h_vert) / 2 ** 0.5
         h_vert = self.gcn_out(x_vert)
 
-        h_vert = self.layer1(nonlinear(h_vert))
-        h_vert = self.layer2(nonlinear(h_vert))
+        h_vert = self.layer1(nonlinear(self.norm1(h_vert)))
+        h_vert = self.layer2(nonlinear(self.norm2(h_vert)))
         return h_vert[:, :3], h_vert[:, 3]
 
 
