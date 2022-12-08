@@ -776,7 +776,7 @@ class NVSDiffusion(Diffusion):
 
                 # employ noise correcting with clf free guidance
                 eps_true = self.forward(x, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
-                                        x_cond=cond_sequence[idx], time_cond=torch.zeros_like(t_curr),
+                                        x_cond=cond_sequence[idx], time_cond=ones * 0,
                                         ray_o_cond=ray_o_sequence[idx], ray_d_cond=ray_d_sequence[idx],
                                         train=False)
                 eps_unc = self.forward(x, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
