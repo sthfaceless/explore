@@ -784,7 +784,7 @@ class NVSDiffusion(Diffusion):
                                                             torch.ones((len(x),)).type_as(t_curr)
                                                             * (self.diffusion_steps - 1),
                                                             torch.randn_like(x)),
-                                       time_cond=torch.ones_like(t_curr) * (self.diffusion_steps - 1),
+                                       time_cond=ones * (self.diffusion_steps - 1),
                                        ray_o_cond=torch.zeros_like(ray_o_sequence[idx]),
                                        ray_d_cond=torch.zeros_like(ray_d_sequence[idx]), train=False)
                 eps = (1 + self.classifier_weight) * eps_true - self.classifier_weight * eps_unc
@@ -834,8 +834,8 @@ class NVSDiffusion(Diffusion):
         while len(galleries) < self.log_samples:
             batch = next(data_iter)
             n_items = min(len(batch['focal']), self.log_samples - len(galleries))
-            cond = batch['cond'][:n_items].to(self.device)
-            poses = batch['cond_poses'][:n_items].to(self.device)
+            cond = batch['top_view'][:n_items].to(self.device)
+            poses = batch['top_poses'][:n_items].to(self.device)
             focal = batch['focal'][:n_items].to(self.device)
             ray_o, ray_d = get_images_rays(self.h, self.w, focal, poses)
             with torch.no_grad():

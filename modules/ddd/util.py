@@ -132,7 +132,7 @@ def devoxelize_points3d(points, grid, mask=None):
     xval, yval, zval = torch.tensor_split(grid_points, 3, dim=-1)
     xval, yval, zval = xval.squeeze(-1), yval.squeeze(-1), zval.squeeze(-1)
     # retrieve indexes of voxel in grid
-    x, y, z = torch.tensor_split(torch.clamp(torch.floor(grid_points), max=grid_res - 2).long(), 3, dim=-1)
+    x, y, z = torch.tensor_split(torch.clamp(torch.floor(grid_points), min=0, max=grid_res - 2).long(), 3, dim=-1)
     x, y, z = x.squeeze(-1), y.squeeze(-1), z.squeeze(-1)
     bb = torch.arange(b).type_as(x).view(b, 1).repeat(1, n_points).view(b * n_points)
     # apply trilinear interpolation for each point
