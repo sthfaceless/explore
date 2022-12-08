@@ -780,9 +780,7 @@ class NVSDiffusion(Diffusion):
                                         ray_o_cond=ray_o_sequence[idx], ray_d_cond=ray_d_sequence[idx],
                                         train=False)
                 eps_unc = self.forward(x, ones * t_curr, ray_o=ray_o, ray_d=ray_d,
-                                       x_cond=self.q_sample(cond_sequence[idx],
-                                                            torch.ones((len(x),)).type_as(t_curr)
-                                                            * (self.diffusion_steps - 1),
+                                       x_cond=self.q_sample(cond_sequence[idx], ones * (self.diffusion_steps - 1),
                                                             torch.randn_like(x)),
                                        time_cond=ones * (self.diffusion_steps - 1),
                                        ray_o_cond=torch.zeros_like(ray_o_sequence[idx]),
