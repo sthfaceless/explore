@@ -6,7 +6,7 @@ from modules.ddd.util import *
 
 class PointRegression(torch.nn.Module):
 
-    def __init__(self, input_dim, hidden_dim=256, n_blocks=2, out_dims=(512, 256, 64), seq_len=400,
+    def __init__(self, input_dim, hidden_dim=256, n_blocks=8, out_dims=(512, 256, 128), seq_len=400,
                  num_heads=8, dropout=0.0, agg_dim=4):
         super(PointRegression, self).__init__()
         self.seq_len = seq_len
@@ -49,7 +49,7 @@ class PointRegression(torch.nn.Module):
         # transformer encoder blocks
         for block in self.blocks:
             h = block.norm1(block.attn(h, mask=mask) + h)
-            h = block.norm2(block.ff2(block.dropout2(nonlinear(block.ff1(nonlinear(h))))) + h)
+            h = block.norm2(block.ff2(block.dropout(nonlinear(block.ff1(nonlinear(h))))) + h)
 
         # out regression head
         h = nonlinear(self.out_layer(h).view(b, self.seq_len * self.agg_dim))
