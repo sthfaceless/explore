@@ -272,6 +272,18 @@ def read_obj(in_file, with_normals=False):
     return vertices, faces
 
 
+def save_obj(path, vertices, faces):
+    vertices, faces = tn(vertices).tolist(), tn(faces).tolist()
+    lines = []
+    for v in vertices:
+        lines.append(f'v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}')
+    for f in faces:
+        lines.append(f'f {f[0]} {f[1]} {f[2]}')
+
+    with open(path, 'w') as file:
+        file.write('\n'.join(lines))
+
+
 def tetrahedras2mesh(vertices, tetrahedras):
     # we must create 4 triangles for each tetrahedron
 

@@ -2,13 +2,15 @@ import pytorch_lightning as pl
 import torch.nn
 
 from modules.bio.model import *
+from modules.ddd.model import *
 
 
 class ProteinMutationTrainer(pl.LightningModule):
 
     def __init__(self, train_dataset=None, val_dataset=None, encoder_dims=(32, 64, 128), encoder_grids=(32, 16, 8),
-                 learning_rate=1e-4, min_lr_rate=0.5, epochs=30, steps=1000, batch_size=32,
-                 unique_atoms=36, atoms_embedding_dim=128, generated_features=48, seq_len=400, regression_blocks=8):
+                 encoder_dim=128, learning_rate=1e-4, min_lr_rate=0.5, epochs=30, steps=1000, batch_size=32,
+                 unique_atoms=36, atoms_embedding_dim=128, generated_features=48, seq_len=400, regression_blocks=8,
+                 pe_powers=16):
         super(ProteinMutationTrainer, self).__init__()
 
         self.save_hyperparameters(ignore=['train_dataset', 'val_dataset'])
@@ -20,12 +22,14 @@ class ProteinMutationTrainer(pl.LightningModule):
         self.epochs = epochs
         self.steps = steps
         self.batch_size = batch_size
+        self.pe_powers = pe_powers
 
         self.atom_embeds = torch.nn.Embedding(num_embeddings=unique_atoms + 1, embedding_dim=atoms_embedding_dim,
                                               padding_idx=unique_atoms)
         self.point_encoder = MultiPointVoxelCNN(input_dim=generated_features * 2 + atoms_embedding_dim * 2,
+                                                dim=encoder_dim,
                                                 dims=encoder_dims, grids=encoder_grids, do_points_map=True)
-        self.point_regression = PointRegression(input_dim=3 * sum(encoder_dims), seq_len=seq_len,
+        self.point_regression = PointRegression(input_dim=3 * (encoder_dim + pe_powers * 3), seq_len=seq_len,
                                                 n_blocks=regression_blocks)
 
     def forward(self, batch):
@@ -33,16 +37,22 @@ class ProteinMutationTrainer(pl.LightningModule):
         wt_atoms, mut_atoms = self.atom_embeds(batch['wt_atom_ids'].long()), \
                               self.atom_embeds(batch['mut_atom_ids'].long())
         # construct features with atom embeddings and nerf like positional encodings
-        # WILD-TYPE encoding
+        # WILD-TYPE
         wt_features = torch.cat([batch['wt_features'], batch['wt_features'] - batch['mut_features'], wt_atoms,
                                  wt_atoms - mut_atoms], dim=-1)
         wt_grids = self.point_encoder.voxelize(batch['wt_points'], wt_features, mask=batch['wt_mask'])
         wt_features = self.point_encoder.devoxelize(batch['wt_alpha_points'], wt_grids, mask=batch['wt_alpha_mask'])
+        wt_pos_features = get_positional_encoding(batch['wt_alpha_points'], self.pe_powers * 3)
+        wt_pos_features = torch.where(batch['wt_alpha_mask'], wt_pos_features, torch.zeros_like(wt_pos_features))
+        wt_features = torch.cat([wt_features, wt_pos_features], dim=-1)
         # MUTANT encoding
         mut_features = torch.cat([batch['mut_features'], batch['mut_features'] - batch['wt_features'], mut_atoms,
                                   mut_atoms - wt_atoms], dim=-1)
         mut_grids = self.point_encoder.voxelize(batch['mut_points'], mut_features, mask=batch['mut_mask'])
         mut_features = self.point_encoder.devoxelize(batch['mut_alpha_points'], mut_grids, mask=batch['mut_alpha_mask'])
+        mut_pos_features = get_positional_encoding(batch['mut_alpha_points'], self.pe_powers * 3)
+        mut_pos_features = torch.where(batch['mut_alpha_mask'], mut_pos_features, torch.zeros_like(mut_pos_features))
+        mut_features = torch.cat([mut_features, mut_pos_features], dim=-1)
         # Features concat
         features = torch.cat([wt_features, mut_features, mut_features - wt_features], dim=-1)
         # do regression on volume features with masking

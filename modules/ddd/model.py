@@ -41,9 +41,9 @@ class PointVoxelCNN(torch.nn.Module):
             self.point_layer.norm2 = norm(dim, num_groups)
             self.point_layer.conv2 = torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1)
 
-    def voxelize(self, points, features):
+    def voxelize(self, points, features, mask=None):
         # map grid
-        input_grid = voxelize_points3d(points, features, self.grid_res).movedim(-1, 1)
+        input_grid = voxelize_points3d(points, features, self.grid_res, mask=mask).movedim(-1, 1)
         if self.input_dim != self.dim:
             input_grid = self.input_conv(input_grid)
         grid = self.conv1(nonlinear(self.norm1(input_grid)))
@@ -51,10 +51,10 @@ class PointVoxelCNN(torch.nn.Module):
         out_grid = (grid + input_grid) / 2 ** 0.5
         return out_grid.movedim(1, -1)
 
-    def devoxelize(self, points, grid):
-        return devoxelize_points3d(points, grid)
+    def devoxelize(self, points, grid, mask=None):
+        return devoxelize_points3d(points, grid, mask=mask)
 
-    def map_points(self, features):
+    def map_points(self, features, mask=None):
         if not self.do_points_map:
             raise ModuleNotFoundError('Initialized model without points mapping')
         features = features.movedim(-1, 1)
@@ -63,12 +63,16 @@ class PointVoxelCNN(torch.nn.Module):
         h = self.point_layer.conv1(nonlinear(self.point_layer.norm1(features)))
         h = self.point_layer.conv2(nonlinear(self.point_layer.norm2(h)))
         out = (h + features) / 2 ** 0.5
+        if mask is not None:
+            out = out * mask.int().unsqueeze(-1)  # zero outing all extra features
         return out.movedim(1, -1)
 
-    def forward(self, points, features):
+    def forward(self, points, features, grid=None, mask=None):
         # points (b, 3)
         # features (b, input_dim)
-        return (self.map_points(features) + self.devoxelize(points, self.voxelize(points, features))) / 2 ** 0.5
+        if grid is None:
+            grid = self.voxelize(points, features, mask=mask)
+        return (self.map_points(features, mask=mask) + self.devoxelize(points, grid, mask=mask)) / 2 ** 0.5
 
 
 class MultiPointVoxelCNN(torch.nn.Module):
@@ -95,11 +99,11 @@ class MultiPointVoxelCNN(torch.nn.Module):
         self.out_norm = norm(sum(dims), num_groups=num_groups * len(dims))
         self.out_layer = torch.nn.Conv1d(sum(dims), dim, kernel_size=1)
 
-    def voxelize(self, points, features):
-        return [model.voxelize(points, features) for model in self.models]
+    def voxelize(self, points, features, mask=None):
+        return [model.voxelize(points, features, mask=mask) for model in self.models]
 
-    def devoxelize(self, points, grids):
-        h = torch.cat([model.devoxelize(points, grid) for model, grid in zip(self.models, grids)], dim=-1)
+    def devoxelize(self, points, grids, mask=None):
+        h = torch.cat([model.devoxelize(points, grid, mask=mask) for model, grid in zip(self.models, grids)], dim=-1)
         out = self.out_layer(nonlinear(self.out_norm(h.movedim(-1, 1)))).movedim(1, -1)
         return out
 
@@ -114,9 +118,10 @@ class MultiPointVoxelCNN(torch.nn.Module):
         out = (h + features) / 2 ** 0.5
         return out
 
-    def forward(self, points, features):
-        grids = self.voxelize(points, features)
-        volume_features = self.devoxelize(points, grids)
+    def forward(self, points, features, grids=None, mask=None):
+        if grids is None:
+            grids = self.voxelize(points, features, mask=mask)
+        volume_features = self.devoxelize(points, grids, mask=mask)
         return self.map_points(features) + volume_features
 
 

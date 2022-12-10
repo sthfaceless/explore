@@ -2,6 +2,7 @@ import functools
 from random import shuffle
 
 import pytorch_lightning as pl
+import torch
 
 import kaolin
 from modules.common.trainer import SimpleLogger
@@ -121,8 +122,8 @@ class PCD2Mesh(pl.LightningModule):
         return loss
 
     def on_train_batch_start(self, batch, batch_idx):
-        self.volume_refinement = True
         if self.global_step >= self.steps_schedule[0]:
+            self.volume_refinement = True
             self.n_volume_division = self.true_volume_division
         if self.global_step >= self.steps_schedule[1]:
             self.adversarial_training = True
@@ -142,12 +143,17 @@ class PCD2Mesh(pl.LightningModule):
                          n_surface_division=None):
         # create output dict
         out = {}
-        # sample pcd for train
         if exists(vertices, faces):
             # make vertices batched as all models and losses are expecting batched input
             vertices = vertices.unsqueeze(0)
+            # sample pcd for train
             pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples)
-            pcd_noised = torch.clamp(pcd + torch.randn_like(pcd) * self.noise, min=-1.0, max=1.0)
+            # pretrain sphere
+            if not self.volume_refinement:
+                pcd_noised = 2 * (torch.rand_like(pcd) - 0.5)
+                pcd_noised /= torch.norm(pcd_noised, dim=-1, keepdim=True) * 2
+            else:
+                pcd_noised = torch.clamp(pcd + torch.randn_like(pcd) * self.noise, min=-1.0, max=1.0)
 
         # NeRF like encoding
         pe_features = torch.cat([pcd_noised, get_positional_encoding(pcd_noised, self.pe_powers * 3)], dim=-1)
@@ -184,7 +190,8 @@ class PCD2Mesh(pl.LightningModule):
         # if we're training only on SDF
         if not self.volume_refinement and exists(vertices, faces):
             # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
-            true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
+            # true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
+            true_sdf = torch.norm(tet_vertexes, dim=-1) - 0.5
             out['sdf_loss'] = torch.mean((true_sdf - tet_sdf) ** 2)
             out['loss'] = out['sdf_loss']
 
