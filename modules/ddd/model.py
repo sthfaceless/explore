@@ -230,7 +230,7 @@ class GCNConv(torch.nn.Module):
         if self.with_norm:
             h_vert = self.norm2(h_vert)
         h_vert = self.layer2(nonlinear(h_vert))
-        return h_vert[:, :3], h_vert[:, 3]
+        return h_vert
 
 
 class SimpleMLP(torch.nn.Module):

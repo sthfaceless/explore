@@ -205,9 +205,9 @@ class PCD2Mesh(pl.LightningModule):
             pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
             pos_features = torch.cat([tet_vertexes, get_positional_encoding(tet_vertexes, self.pe_powers * 3),
                                       pos_features], dim=-1)
-            delta_v, delta_s, tet_features = self.ref1(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0],
-                                                                  pos_features[0]], dim=-1),
-                                                       get_tetrahedras_edges(tetrahedras))
+            ref1_out = self.ref1(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0], pos_features[0]], dim=-1),
+                                 get_tetrahedras_edges(tetrahedras))
+            delta_v, delta_s, tet_features = ref1_out[:, :3], ref1_out[:, 3], ref1_out[:, 4:]
             tet_features = tet_features.unsqueeze(0)
 
             # update vertexes
@@ -275,9 +275,9 @@ class PCD2Mesh(pl.LightningModule):
                 pos_features = self.ref_points_encoder.devoxelize(tet_vertexes, grids)
                 pos_features = torch.cat([tet_vertexes, get_positional_encoding(tet_vertexes, self.pe_powers * 3),
                                           pos_features], dim=-1)
-                delta_v, delta_s, tet_features = self.ref2(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0],
-                                                                      pos_features[0]], dim=-1),
+                ref2_out = self.ref2(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0], pos_features[0]], dim=-1),
                                                            get_tetrahedras_edges(tetrahedras))
+                delta_v, delta_s, tet_features = ref2_out[:, :3], ref2_out[:, 3], ref2_out[:, 4:]
                 tet_features = tet_features.unsqueeze(0)
 
                 # update vertexes
@@ -289,7 +289,8 @@ class PCD2Mesh(pl.LightningModule):
                     self.lg.log_tensor(delta_v.transpose(0, 1), 'Second refimenent delta vertices', depth=1)
                     self.lg.log_tensor(delta_s, 'Second refimenent delta sdf')
                     self.lg.log_tensor(tet_features, 'Second refimenent features')
-                    self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
+                    self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]),
+                                          tn(tet_vertexes[0, :, 2]),
                                           'subdivided_refined_tetrahedras', epoch=self.global_step)
                     debug_tet_vertexes, debug_tetrahedras, _, _, _, _ = self.surf_batchify(
                         get_surface_tetrahedras(tet_vertexes[0], tetrahedras, tet_sdf[0], tet_features[0]))
@@ -298,7 +299,8 @@ class PCD2Mesh(pl.LightningModule):
                         if len(debug_faces) > 50000:
                             indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                             debug_faces = debug_faces[indexes]
-                        self.lg.log_mesh(tn(debug_tet_vertexes[0]), tn(debug_faces), 'subdivided_refined_tetrahedras_mesh',
+                        self.lg.log_mesh(tn(debug_tet_vertexes[0]), tn(debug_faces),
+                                         'subdivided_refined_tetrahedras_mesh',
                                          epoch=self.global_step)
 
             # add sdf regularization to all vertices
@@ -324,7 +326,8 @@ class PCD2Mesh(pl.LightningModule):
                     if len(debug_faces) > 50000:
                         indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
                         debug_faces = debug_faces[indexes]
-                    self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'first_predicted_mesh', epoch=self.global_step)
+                    self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'first_predicted_mesh',
+                                     epoch=self.global_step)
 
             # surface subdivision
             if n_surface_division is None:
@@ -337,7 +340,8 @@ class PCD2Mesh(pl.LightningModule):
                                               pos_features], dim=-1)
 
                     # learnable surface subdivision predicts changed vertices and alpha smoothing factor
-                    delta_v, alphas = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
+                    surface_ref_out = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
+                    delta_v, alphas = surface_ref_out[:, :3], surface_ref_out[:, 3]
                     mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
 
                     # add regularization on vertex delta
@@ -356,7 +360,8 @@ class PCD2Mesh(pl.LightningModule):
                         if mesh_faces.numel() > 0:
                             debug_faces = mesh_faces
                             if len(debug_faces) > 50000:
-                                indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(debug_faces)
+                                indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(
+                                    debug_faces)
                                 debug_faces = debug_faces[indexes]
                             self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'subdivided_predicted_mesh',
                                              epoch=self.global_step)
