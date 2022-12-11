@@ -45,6 +45,9 @@ if __name__ == "__main__":
     grid_res = args.res
     for mesh_path in tqdm(items, desc='Processed mesh files'):
         try:
+            out_path = mesh_path + args.suffix
+            if os.path.exists(out_path):
+                continue
             vertices, faces = read_obj(mesh_path)
             vertices, faces = vertices.to(device), faces.to(device)
             _vertices = (normalize_points(vertices) + 1) / 2
@@ -57,7 +60,6 @@ if __name__ == "__main__":
             _vertices, _faces = (_vertices[0] / (grid_res) - 0.5) * 2, _faces[0]
             for _ in range(args.smooths):
                 _vertices = kaolin.metrics.trianglemesh.uniform_laplacian_smoothing(_vertices.unsqueeze(0), _faces)[0]
-            out_path = mesh_path + args.suffix
             save_obj(out_path, _vertices, _faces)
         except Exception as e:
             print(f'Exception occured during processed mesh file {str(e)}')
