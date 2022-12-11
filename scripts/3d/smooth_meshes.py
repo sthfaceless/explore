@@ -35,10 +35,18 @@ if __name__ == "__main__":
 
     assert len(items) > 0, 'Loaded empty list of objects from shapenet'
 
+    # determine device
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+
     grid_res = args.res
     for mesh_path in tqdm(items, desc='Processed mesh files'):
         try:
             vertices, faces = read_obj(mesh_path)
+            vertices, faces = vertices.to(device), faces.to(device)
             _vertices = (normalize_points(vertices) + 1) / 2
             # convert triangle mesh to voxels
             voxels = kaolin.ops.conversions.trianglemeshes_to_voxelgrids(_vertices.unsqueeze(0), faces, grid_res)
