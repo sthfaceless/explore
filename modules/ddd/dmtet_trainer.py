@@ -47,6 +47,7 @@ class PCD2Mesh(pl.LightningModule):
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
+        self.true_grid_res = grid_resolution * 2
 
         self.pe_powers = pe_powers
         self.input_dim = pe_powers * 3 + 3
@@ -72,15 +73,17 @@ class PCD2Mesh(pl.LightningModule):
         self.disc_v_noise = disc_v_noise
 
         self.sdf_points_encoder = MultiPointVoxelCNN(input_dim=self.input_dim, dim=encoder_out, dims=encoder_dims,
-                                                     grids=encoder_grids, do_points_map=False, with_norm=with_norm)
-        self.sdf_model = SimpleMLP(input_dim=self.pos_features, out_dim=1 + sdf_dims[-1], hidden_dims=sdf_dims,
-                                   with_norm=with_norm)
+                                                     grids=encoder_grids, do_points_map=False, with_norm=True,
+                                                     skip=False, n_layers=3)
+        self.sdf_model = SimpleMLP(input_dim=self.pos_features, out_dim=1, hidden_dims=sdf_dims,
+                                   with_norm=True)
 
         self.ref_points_encoder = MultiPointVoxelCNN(input_dim=self.input_dim, dim=encoder_out, dims=encoder_dims,
-                                                     grids=encoder_grids, do_points_map=False, with_norm=with_norm)
-        self.ref1 = GCNConv(input_dim=1 + sdf_dims[-1] + self.pos_features, out_dim=3 + 1 + sdf_dims[-1],
+                                                     grids=encoder_grids, do_points_map=False, with_norm=True,
+                                                     skip=False, n_layers=3)
+        self.ref1 = GCNConv(input_dim=1 + self.pos_features, out_dim=3 + 1,
                             gcn_dims=gcn_dims, mlp_dims=gcn_hidden, with_norm=with_norm)
-        self.ref2 = GCNConv(input_dim=1 + sdf_dims[-1] + self.pos_features, out_dim=3 + 1 + sdf_dims[-1],
+        self.ref2 = GCNConv(input_dim=1 + self.pos_features, out_dim=3 + 1,
                             gcn_dims=gcn_dims, mlp_dims=gcn_hidden, with_norm=with_norm)
         self.surface_ref = GCNConv(input_dim=self.pos_features, out_dim=4, gcn_dims=gcn_dims,
                                    mlp_dims=gcn_hidden, with_norm=with_norm)
@@ -149,12 +152,12 @@ class PCD2Mesh(pl.LightningModule):
             # sample pcd for train
             pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples)
             # pretrain sphere
-            if not self.volume_refinement:
-                pcd_noised = 2 * (torch.rand_like(pcd) - 0.5)
-                # pcd_noised = pcd_noised / torch.norm(pcd_noised, dim=-1, keepdim=True) * 0.5
-                # pcd_noised += torch.randn_like(pcd_noised) * self.noise
-            else:
-                pcd_noised = pcd + torch.randn_like(pcd) * self.noise
+            # if not self.volume_refinement:
+            #     pcd_noised = 2 * (torch.rand_like(pcd) - 0.5)
+            #     pcd_noised = pcd_noised / torch.norm(pcd_noised, dim=-1, keepdim=True) * 0.5
+            #     pcd_noised += torch.randn_like(pcd_noised) * self.noise
+            # else:
+            pcd_noised = pcd + torch.randn_like(pcd) * self.noise
             pcd_noised = torch.clamp(pcd_noised, min=-1.0, max=1.0)
 
         # NeRF like encoding
@@ -192,8 +195,8 @@ class PCD2Mesh(pl.LightningModule):
         # if we're training only on SDF
         if not self.volume_refinement and exists(vertices, faces):
             # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
-            # true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
-            true_sdf = torch.norm(tet_vertexes, dim=-1) - 0.5
+            true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
+            # true_sdf = torch.norm(tet_vertexes, dim=-1) - 0.5
             out['sdf_loss'] = torch.mean((true_sdf - tet_sdf) ** 2)
             out['loss'] = out['sdf_loss']
 
@@ -207,7 +210,8 @@ class PCD2Mesh(pl.LightningModule):
                                       pos_features], dim=-1)
             ref1_out = self.ref1(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0], pos_features[0]], dim=-1),
                                  get_tetrahedras_edges(tetrahedras))
-            delta_v, delta_s, tet_features = ref1_out[:, :3], ref1_out[:, 3], ref1_out[:, 4:]
+            delta_v, delta_s, tet_features = torch.tanh(ref1_out[:, :3]) / self.true_grid_res, \
+                                             torch.tanh(ref1_out[:, 3]), ref1_out[:, 4:]
             tet_features = tet_features.unsqueeze(0)
 
             # update vertexes
@@ -276,8 +280,10 @@ class PCD2Mesh(pl.LightningModule):
                 pos_features = torch.cat([tet_vertexes, get_positional_encoding(tet_vertexes, self.pe_powers * 3),
                                           pos_features], dim=-1)
                 ref2_out = self.ref2(torch.cat([tet_sdf.unsqueeze(-1)[0], tet_features[0], pos_features[0]], dim=-1),
-                                                           get_tetrahedras_edges(tetrahedras))
-                delta_v, delta_s, tet_features = ref2_out[:, :3], ref2_out[:, 3], ref2_out[:, 4:]
+                                     get_tetrahedras_edges(tetrahedras))
+                delta_v, delta_s, tet_features = torch.tanh(ref2_out[:, :3]) /\
+                                                 (self.true_grid_res * self.n_volume_division), \
+                                                 torch.tanh(ref2_out[:, 3]), ref2_out[:, 4:]
                 tet_features = tet_features.unsqueeze(0)
 
                 # update vertexes
@@ -317,6 +323,8 @@ class PCD2Mesh(pl.LightningModule):
             # apply marching tetrahedra on surface tetrahedras to extract mesh
             mesh_vertices, mesh_faces = kaolin.ops.conversions.marching_tetrahedra(tet_vertexes, tetrahedras, tet_sdf)
             mesh_vertices, mesh_faces = mesh_vertices[0].unsqueeze(0), mesh_faces[0]
+            if mesh_vertices.numel() > 0 and mesh_faces.numel() > 0:
+                mesh_vertices = kaolin.metrics.trianglemesh.uniform_laplacian_smoothing(mesh_vertices, mesh_faces)
             out['mesh_vertices'] = mesh_vertices
             out['mesh_faces'] = mesh_faces
 
@@ -341,7 +349,8 @@ class PCD2Mesh(pl.LightningModule):
 
                     # learnable surface subdivision predicts changed vertices and alpha smoothing factor
                     surface_ref_out = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
-                    delta_v, alphas = surface_ref_out[:, :3], surface_ref_out[:, 3]
+                    delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res), \
+                                      torch.sigmoid(surface_ref_out[:, 3])
                     mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
 
                     # add regularization on vertex delta
@@ -387,8 +396,7 @@ class PCD2Mesh(pl.LightningModule):
                     true_normals = kaolin.ops.mesh.face_normals(
                         kaolin.ops.mesh.index_vertices_by_faces(vertices, faces), unit=True)[0]
                     true_normals = true_normals[true_faces_ids[0, point_ids[0]]]
-                    normal_loss = torch.mean(1 - torch.abs(
-                        torch.matmul(pred_normals.unsqueeze(1), true_normals.unsqueeze(2)).view(-1)))
+                    normal_loss = torch.mean(1 - torch.abs(torch.sum(pred_normals * true_normals, dim=-1)))
 
                     if self.debug_state:
                         self.lg.log_tensor(pred_pcd, 'Predicted point cloud on mesh')
