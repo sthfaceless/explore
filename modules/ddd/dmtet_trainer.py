@@ -385,8 +385,6 @@ class PCD2Mesh(pl.LightningModule):
             # apply marching tetrahedra on surface tetrahedras to extract mesh
             mesh_vertices, mesh_faces = kaolin.ops.conversions.marching_tetrahedra(tet_vertexes, tetrahedras, tet_sdf)
             mesh_vertices, mesh_faces = mesh_vertices[0].unsqueeze(0), mesh_faces[0]
-            if mesh_faces.numel() > 0:
-                mesh_vertices = laplace_smoothing(mesh_vertices[0], get_mesh_edges(mesh_faces)).unsqueeze(0)
             out['mesh_vertices'] = mesh_vertices
             out['mesh_faces'] = mesh_faces
 
@@ -406,6 +404,9 @@ class PCD2Mesh(pl.LightningModule):
                 n_surface_division = self.n_surface_division
             if self.surface_subdivision:
                 if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+
+                    mesh_vertices = laplace_smoothing(mesh_vertices[0], get_mesh_edges(mesh_faces)).unsqueeze(0)
+
                     # positional features for mesh vertices
                     pos_features = self.ref_points_encoder.devoxelize(mesh_vertices, grids)
                     pos_features = torch.cat([mesh_vertices, get_positional_encoding(mesh_vertices, self.pe_powers * 3),

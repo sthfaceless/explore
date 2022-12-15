@@ -386,11 +386,11 @@ def smoothness_loss(vertices, faces):
     v2, v3 = vertices[edges[:, 0, 2]], vertices[edges[:, 1, 2]]
 
     first_normal = torch.cross(v1 - v0, v2 - v0, dim=1)
-    first_normal /= (first_normal.norm(dim=1, keepdim=True) + 1e-7)
+    first_normal = first_normal / (first_normal.norm(dim=1, keepdim=True) + 1e-7)
 
     # change sign as we want to keep same orientation
     second_normal = - torch.cross(v1 - v0, v3 - v0, dim=1)
-    second_normal /= (second_normal.norm(dim=1, keepdim=True) + 1e-7)
+    second_normal = second_normal / (second_normal.norm(dim=1, keepdim=True) + 1e-7)
 
     cos = torch.sum(first_normal * second_normal, dim=-1)
     loss = torch.mean((1 - cos) ** 2)
