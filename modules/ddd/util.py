@@ -168,44 +168,63 @@ def get_surface_tetrahedras(vertexes, tets, sdf, features):
            sdf[~tet_vertexes_msk]
 
 
-def get_tetrahedras_edges(tets):
+def get_tetrahedras_edges(tets, unique=False):
     n = torch.max(tets) + 1 if len(tets) > 0 else torch.ones(1).type_as(tets)
-    codes = torch.cat([
-        tets[:, 0] * n + tets[:, 1],
-        tets[:, 1] * n + tets[:, 0],
+    v0, v1, v2, v3 = tets[:, 0], tets[:, 1], tets[:, 2], tets[:, 3]
+    if unique:
+        codes = torch.cat([
+            torch.minimum(v0, v1) * n + torch.maximum(v0, v1),
+            torch.minimum(v0, v2) * n + torch.maximum(v0, v2),
+            torch.minimum(v0, v3) * n + torch.maximum(v0, v3),
+            torch.minimum(v1, v2) * n + torch.maximum(v1, v2),
+            torch.minimum(v1, v3) * n + torch.maximum(v1, v3),
+            torch.minimum(v2, v3) * n + torch.maximum(v2, v3)
+        ], dim=0).unique()
+    else:
+        codes = torch.cat([
+            v0 * n + v1,
+            v1 * n + v0,
 
-        tets[:, 1] * n + tets[:, 2],
-        tets[:, 2] * n + tets[:, 1],
+            v0 * n + v2,
+            v2 * n + v0,
 
-        tets[:, 2] * n + tets[:, 0],
-        tets[:, 0] * n + tets[:, 2],
+            v0 * n + v3,
+            v3 * n + v0,
 
-        tets[:, 0] * n + tets[:, 3],
-        tets[:, 3] * n + tets[:, 0],
+            v1 * n + v2,
+            v2 * n + v1,
 
-        tets[:, 1] * n + tets[:, 3],
-        tets[:, 3] * n + tets[:, 1],
+            v1 * n + v3,
+            v3 * n + v1,
 
-        tets[:, 2] * n + tets[:, 3],
-        tets[:, 3] * n + tets[:, 2]
-    ], dim=0).unique()
+            v2 * n + v3,
+            v3 * n + v2
+        ], dim=0).unique()
 
     edges = torch.stack([codes.div(n, rounding_mode='trunc'), codes % n], dim=0)
     return edges
 
 
-def get_mesh_edges(faces):
+def get_mesh_edges(faces, unique=False):
     n = torch.max(faces) + 1 if len(faces) > 0 else torch.ones(1).type_as(faces)
-    codes = torch.cat([
-        faces[:, 0] * n + faces[:, 1],
-        faces[:, 1] * n + faces[:, 0],
+    v0, v1, v2 = faces[:, 0], faces[:, 1], faces[:, 2]
+    if unique:
+        codes = torch.cat([
+            torch.minimum(v0, v1) * n + torch.maximum(v0, v1),
+            torch.minimum(v1, v2) * n + torch.maximum(v1, v2),
+            torch.minimum(v0, v2) * n + torch.maximum(v0, v2),
+        ], dim=0).unique()
+    else:
+        codes = torch.cat([
+            v0 * n + v1,
+            v1 * n + v0,
 
-        faces[:, 1] * n + faces[:, 2],
-        faces[:, 2] * n + faces[:, 1],
+            v1 * n + v2,
+            v2 * n + v1,
 
-        faces[:, 2] * n + faces[:, 0],
-        faces[:, 0] * n + faces[:, 2]
-    ], dim=0).unique()
+            v2 * n + v0,
+            v0 * n + v2
+        ], dim=0).unique()
 
     edges = torch.stack([codes.div(n, rounding_mode='trunc'), codes % n], dim=0)
     return edges
@@ -394,4 +413,13 @@ def smoothness_loss(vertices, faces):
 
     cos = torch.sum(first_normal * second_normal, dim=-1)
     loss = torch.mean((1 - cos) ** 2)
+    return loss
+
+
+def sdf_reg(sdf, edges):
+    v0, v1 = edges[0], edges[1]
+    loss = -torch.mean(torch.where(sdf[v0] > 0, torch.log(torch.sigmoid(sdf[v1]) + 1e-7),
+                                   torch.log(1 - torch.sigmoid(sdf[v1]) + 1e-7))
+                       + torch.where(sdf[v1] > 0, torch.log(torch.sigmoid(sdf[v0]) + 1e-7),
+                                     torch.log(1 - torch.sigmoid(sdf[v0]) + 1e-7)))
     return loss
