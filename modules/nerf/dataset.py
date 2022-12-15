@@ -2,6 +2,7 @@ import glob
 from random import sample, choices, randint
 
 import cv2
+import torch
 
 from modules.nerf.util import *
 
@@ -344,6 +345,9 @@ class PairViews(torch.utils.data.IterableDataset):
             poses[:, :, -1] -= mid_point.reshape(1, 3)
             self.mean_distance = np.mean(np.linalg.norm(poses[:, :, -1], axis=-1))
             poses[:, :, -1] *= 1.0 / self.mean_distance
+            # randomly multiply on rotation to be invariant on rotation
+            random_rotation = tn(get_random_poses(torch.ones((1,), dtype=torch.float32))[0, :, :3])
+            poses[:, :, :3] = random_rotation[None, :, :] @ poses[:, :, :3]
             self.poses.append(poses)
 
     def get_mean_distance(self):

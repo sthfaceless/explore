@@ -1,4 +1,5 @@
 import mesh_to_sdf
+import torch
 import trimesh
 from sklearn.neighbors import KDTree
 
@@ -305,8 +306,8 @@ def encode_3d_features2sequence(points, features, grid_res, seq_len):
     __denom = torch.zeros(b, seq_len, dim).type_as(features)
 
     batch_index = torch.arange(b).type_as(hashes).view(b, 1).repeat(1, n_points).view(-1)
-    __features.index_put((batch_index, hashes.view(-1)), features, accumulate=True)
-    __denom.index_put((batch_index, hashes.view(-1)), torch.ones_like(features), accumulate=True)
+    __features.index_put_((batch_index, hashes.view(-1)), features, accumulate=True)
+    __denom.index_put_((batch_index, hashes.view(-1)), torch.ones_like(features), accumulate=True)
     __features /= torch.clamp(__denom ** 0.5, min=1.0)
 
     return __features
@@ -323,3 +324,73 @@ def calculate_sdf(points, vertices, faces, scan_count=10, scan_resolution=128, t
                                   sample_point_count=100000, normal_sample_count=15)
     sdf = torch.tensor(sdf).type_as(vertices).view(1, -1)
     return sdf
+
+
+def face_normals(vertices, faces):
+    v0 = vertices[0, faces[:, 1]] - vertices[0, faces[:, 0]]
+    v1 = vertices[0, faces[:, 2]] - vertices[0, faces[:, 0]]
+    face_normals = torch.cross(v0, v1, dim=1)
+
+    face_normals_length = face_normals.norm(dim=1, keepdim=True)
+    face_normals = face_normals / (face_normals_length + 1e-7)
+
+    return face_normals
+
+
+def laplace_smoothing(vertices, edges):
+    values = torch.zeros_like(vertices)
+    norms = torch.zeros_like(vertices)
+
+    v0, v1 = edges[0], edges[1]
+    neighbour_vertices = vertices[v1]
+    values.index_put_(v0, neighbour_vertices)
+    norms.index_put_(v0, torch.ones_like(neighbour_vertices))
+    values /= torch.clamp(norms, min=1.0)
+    return values
+
+
+def delta_laplace_loss_tetrahedras(delta_vertexes, tetrahedras):
+    edges = get_tetrahedras_edges(tetrahedras)
+    values = laplace_smoothing(delta_vertexes, edges)
+    loss = torch.mean(torch.sum((delta_vertexes - values) ** 2, dim=1), dim=0)
+    return loss
+
+
+def delta_laplace_loss_mesh(delta_vertices, faces):
+    edges = get_mesh_edges(faces)
+    values = laplace_smoothing(delta_vertices, edges)
+    loss = torch.mean(torch.sum((delta_vertices - values) ** 2, dim=1), dim=0)
+    return loss
+
+
+def get_mesh_edges_with_extra_vertex(faces):
+    n = torch.max(faces) + 1 if len(faces) > 0 else torch.ones(1).type_as(faces)
+    v0, v1, v2 = faces[:, 0], faces[:, 1], faces[:, 2]
+    codes = torch.cat([
+        torch.minimum(v0, v1) * n * n + torch.maximum(v0, v1) * n + v2,
+        torch.minimum(v1, v2) * n * n + torch.maximum(v1, v2) * n + v1,
+        torch.minimum(v0, v2) * n * n + torch.maximum(v0, v2) * n + v0,
+    ], dim=0).unique(sorted=True)
+
+    edges = torch.stack([codes.div(n * n, rounding_mode='trunc'),
+                         (codes % (n * n)).div(n, rounding_mode='trunc'), codes % n], dim=0)
+    return edges
+
+
+def smoothness_loss(vertices, faces):
+    edges = get_mesh_edges_with_extra_vertex(faces)
+    edges = edges.view(-1, 2, 3)  # two consequent edges it's same edge from different faces
+
+    v0, v1 = vertices[edges[:, 0, 0]], vertices[edges[:, 0, 1]]
+    v2, v3 = vertices[edges[:, 0, 2]], vertices[edges[:, 1, 2]]
+
+    first_normal = torch.cross(v1 - v0, v2 - v0, dim=1)
+    first_normal /= (first_normal.norm(dim=1, keepdim=True) + 1e-7)
+
+    # change sign as we want to keep same orientation
+    second_normal = - torch.cross(v1 - v0, v3 - v0, dim=1)
+    second_normal /= (second_normal.norm(dim=1, keepdim=True) + 1e-7)
+
+    cos = torch.sum(first_normal * second_normal, dim=-1)
+    loss = torch.mean((1 - cos) ** 2)
+    return loss

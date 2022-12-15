@@ -13,8 +13,8 @@ def nonlinear(x):
 
 class PointVoxelCNN(torch.nn.Module):
 
-    def __init__(self, input_dim, dim, grid_res=32, kernel_size=3, num_groups=32, do_points_map=True, with_norm=True,
-                 skip=False, n_layers=2):
+    def __init__(self, input_dim, dim, dim_points=None, grid_res=32, kernel_size=3, num_groups=32, do_points_map=True,
+                 with_norm=True, skip=False, n_layers=2, out_dim=None):
         super(PointVoxelCNN, self).__init__()
 
         self.input_dim = input_dim
@@ -33,14 +33,27 @@ class PointVoxelCNN(torch.nn.Module):
             self.norms = torch.nn.ModuleList([norm(dim, num_groups) for layer_id in range(n_layers)])
 
         self.do_points_map = do_points_map
+        if dim_points is None:
+            dim_points = dim
+        self.dim_points = dim_points
         if do_points_map:
             self.point_layer = torch.nn.Module()
-            if input_dim != dim:
-                self.point_layer.input = torch.nn.Conv1d(in_channels=input_dim, out_channels=dim, kernel_size=1)
+            if input_dim != dim_points:
+                self.point_layer.input = torch.nn.Conv1d(in_channels=input_dim, out_channels=dim_points, kernel_size=1)
             self.point_layer.convs = torch.nn.ModuleList([
-                torch.nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=1) for layer_id in range(n_layers)])
+                torch.nn.Conv1d(in_channels=dim_points, out_channels=dim_points, kernel_size=1)
+                for layer_id in range(n_layers)])
             if with_norm:
-                self.point_layer.norms = torch.nn.ModuleList([norm(dim, num_groups) for layer_id in range(n_layers)])
+                self.point_layer.norms = torch.nn.ModuleList(
+                    [norm(dim_points, num_groups) for layer_id in range(n_layers)])
+            if dim != dim_points:
+                self.point_layer.out = torch.nn.Conv1d(in_channels=dim_points, out_channels=dim, kernel_size=1)
+
+        self.out_dim = out_dim
+        if out_dim is not None:
+            if with_norm:
+                self.out_norm = norm(dim, num_groups)
+            self.out_layer = torch.nn.Conv1d(dim, out_dim, kernel_size=1)
 
     def voxelize(self, points, features, mask=None):
         # map grid
@@ -53,8 +66,9 @@ class PointVoxelCNN(torch.nn.Module):
             if self.with_norm:
                 grid = self.norms[layer_id](grid)
             grid = conv(nonlinear(grid))
-        if self.skip:
-            grid = (grid + input_grid) / 2 ** 0.5
+            if (layer_id + 1) % 2 == 0 and self.skip:
+                grid = (grid + input_grid) / 2 ** 0.5
+                input_grid = grid
         return grid.movedim(1, -1)
 
     def devoxelize(self, points, grid, mask=None):
@@ -72,8 +86,11 @@ class PointVoxelCNN(torch.nn.Module):
             if self.with_norm:
                 h = self.point_layer.norms[layer_id](h)
             h = conv(nonlinear(h))
-        if self.skip:
-            h = (h + features) / 2 ** 0.5
+            if (layer_id + 1) % 2 == 0 and self.skip:
+                h = (h + features) / 2 ** 0.5
+                features = h
+        if self.dim != self.dim_points:
+            h = self.point_layer.out(h)
         if mask is not None:
             h = h * mask.int().unsqueeze(-1)  # zero outing all extra features
         return h.movedim(1, -1)
@@ -83,7 +100,14 @@ class PointVoxelCNN(torch.nn.Module):
         # features (b, input_dim)
         if grid is None:
             grid = self.voxelize(points, features, mask=mask)
-        return self.map_points(features, mask=mask) + self.devoxelize(points, grid, mask=mask)
+        out = self.map_points(features, mask=mask) + self.devoxelize(points, grid, mask=mask)
+        if self.out_dim is not None:
+            out = out.movedim(-1, 1)
+            if self.with_norm:
+                out = self.out_norm(out)
+            out = self.out_layer(nonlinear(out))
+            out = out.movedim(1, -1)
+        return out
 
 
 class MultiPointVoxelCNN(torch.nn.Module):
@@ -136,8 +160,9 @@ class MultiPointVoxelCNN(torch.nn.Module):
             if self.with_norm:
                 h = self.point_layer.norms[layer_id](h)
             h = conv(nonlinear(h))
-        if self.skip:
-            h = (h + features) / 2 ** 0.5
+            if (layer_id + 1) % 2 == 0 and self.skip:
+                h = (h + features) / 2 ** 0.5
+                features = h
         return h.movedim(1, -1)
 
     def forward(self, points, features, grids=None, mask=None):
