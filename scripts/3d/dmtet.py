@@ -28,6 +28,7 @@ def get_parser():
                         help="sdf train --- surface train --- adversarial train --- subdivision train")
     parser.add_argument("--batch_size", default=8, type=int, help="Batch size in training")
     parser.add_argument("--validations", default=100, type=int, help="Total numbers of validations during training")
+    parser.add_argument("--debug_interval", default=-1, type=int, help="Interval of steps to debug model")
     parser.add_argument("--acc_grads", default=8, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
     parser.add_argument("--samples_epoch", default=5, type=int, help="Samples of generator in one epoch")
@@ -45,14 +46,19 @@ def get_parser():
                         help="Graph Convolutional refinement conv dims")
     parser.add_argument("--gcn_hidden", default=[128, 64], nargs='+', type=int,
                         help="Graph Convolutional refinement linear dims")
-    parser.add_argument("--grid", default=64, type=int, help="tetrahedra grid resolution")
+    parser.add_argument("--grid", default=64, type=int, help="tetrahedras grid resolution")
     parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
+    parser.add_argument("--ref", default='gcn', help="What kind of network to use for refinement [gcn, conv, linear]")
+    parser.add_argument("--disc", action='store_true')
 
     parser.add_argument("--disc_weight", default=10, type=float, help="Weight for discriminator loss")
     parser.add_argument("--chamfer_weight", default=500, type=float, help="Weight for chamfer distance")
     parser.add_argument("--normal_weight", default=1e-6, type=float, help="Weight for faces normal reg")
-    parser.add_argument("--delta_weight", default=1, type=float, help="Weight for veretexes delta change reg")
+    parser.add_argument("--delta_weight", default=1, type=float, help="Weight for vertexes delta change reg")
+    parser.add_argument("--delta_scale", default=1/2, type=float, help="What value of grid resolution it could move")
     parser.add_argument("--sdf_weight", default=0.4, type=float, help="Weight for sdf prediction reg")
+    parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving"
+                                                                       " tetrahedras")
 
     parser.add_argument("--sdf_clamp", default=0.03, type=float, help="Max absolute true sdf value")
     parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
@@ -70,7 +76,7 @@ def get_parser():
     parser.add_argument("--out_model_name", default="dmtet", help="Name of output model path")
     parser.add_argument("--task_name", default="DMTet training", help="ClearML task name")
     parser.add_argument("--clearml", action='store_true')
-    parser.set_defaults(clearml=False)
+    parser.set_defaults(clearml=False, disc=False)
     return parser
 
 
@@ -95,11 +101,11 @@ if __name__ == "__main__":
                                   noise=args.noise, cache_dir=args.cache_dir, cache_scenes=args.cache_size)
     timelapse = kaolin.visualize.Timelapse(args.logs_path)
     model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
-                     grid_resolution=args.grid,
+                     grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
-                     encoder_grids=args.encoder_grids,
+                     encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
-                     gcn_hidden=args.gcn_hidden,
+                     gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,

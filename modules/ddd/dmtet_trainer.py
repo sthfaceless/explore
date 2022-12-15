@@ -14,7 +14,7 @@ class PCD2Mesh(pl.LightningModule):
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
                  learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
-                 encoder_out=256, with_norm=False,
+                 encoder_out=256, with_norm=False, delta_scale=1/2.0,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
@@ -47,7 +47,7 @@ class PCD2Mesh(pl.LightningModule):
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
-        self.true_grid_res = grid_resolution * 2
+        self.true_grid_res = grid_resolution / delta_scale
 
         self.pe_powers = pe_powers
         self.input_dim = pe_powers * 3 + 3
