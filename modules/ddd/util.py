@@ -343,8 +343,8 @@ def laplace_smoothing(vertices, edges):
 
     v0, v1 = edges[0], edges[1]
     neighbour_vertices = vertices[v1]
-    values.index_put_(v0, neighbour_vertices)
-    norms.index_put_(v0, torch.ones_like(neighbour_vertices))
+    values.index_put_((v0,), neighbour_vertices)
+    norms.index_put_((v0,), torch.ones_like(neighbour_vertices))
     values /= torch.clamp(norms, min=1.0)
     return values
 
