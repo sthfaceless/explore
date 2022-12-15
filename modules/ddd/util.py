@@ -378,7 +378,7 @@ def get_mesh_edges_with_extra_vertex(faces):
 
 def smoothness_loss(vertices, faces):
     edges = get_mesh_edges_with_extra_vertex(faces).transpose(0, 1)
-    indexes = torch.arange(len(edges) - 1).type_as(edges)[edges[:-1, :2] == edges[1:, :2]]
+    indexes = torch.arange(len(edges) - 1).type_as(edges)[torch.all(torch.eq(edges[:-1, :2], edges[1:, :2]), dim=1)]
     indexes = torch.stack([indexes, indexes + 1], dim=1).view(-1)
     edges = edges[indexes].view(-1, 2, 3)  # two consequent edges it's same edge from different faces
 
