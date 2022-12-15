@@ -259,13 +259,13 @@ class PCD2Mesh(pl.LightningModule):
             if len(delta_v) > 0:
                 out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
                 out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
-                tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-                out['amips_loss'] = kaolin.metrics.tetmesh.amips(
-                    tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+                # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
+                # out['amips_loss'] = kaolin.metrics.tetmesh.amips(
+                #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
             else:
                 out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
                 out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
-                out['amips_loss'] = torch.tensor(0).type_as(delta_v)
+                # out['amips_loss'] = torch.tensor(0).type_as(delta_v)
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
@@ -349,9 +349,9 @@ class PCD2Mesh(pl.LightningModule):
                 if len(delta_v) > 0:
                     out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
                     out['delta_laplace'] += delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
-                    tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-                    out['amips_loss'] += kaolin.metrics.tetmesh.amips(
-                        tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+                    # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
+                    # out['amips_loss'] += kaolin.metrics.tetmesh.amips(
+                    #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
 
                 # add sdf regularization to all vertices
                 if exists(vertices, faces):
@@ -453,7 +453,7 @@ class PCD2Mesh(pl.LightningModule):
             if exists(vertices, faces):
                 out['loss'] += out['delta_vertex'] * self.delta_weight
                 out['loss'] += out['delta_laplace'] * self.lap_reg
-                out['loss'] += out['amips_loss'] * self.amips_weight
+                # out['loss'] += out['amips_loss'] * self.amips_weight
 
             # calculate losses on predicted mesh
             if exists(vertices, faces):
