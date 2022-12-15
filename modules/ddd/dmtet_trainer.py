@@ -242,9 +242,9 @@ class PCD2Mesh(pl.LightningModule):
             if self.ref == 'gcn':
                 ref1_out = self.ref1(ref1_features[0], get_tetrahedras_edges(tetrahedras))
             elif self.ref == 'conv':
-                ref1_out = self.ref1(tet_vertexes, ref1_features)
+                ref1_out = self.ref1(tet_vertexes, ref1_features)[0]
             elif self.ref == 'linear':
-                ref1_out = self.ref1(ref1_features)
+                ref1_out = self.ref1(ref1_features)[0]
             else:
                 raise NotImplementedError
             delta_v, delta_s, tet_features = torch.tanh(ref1_out[:, :3]) / self.true_grid_res, \
@@ -331,9 +331,9 @@ class PCD2Mesh(pl.LightningModule):
                 if self.ref == 'gcn':
                     ref2_out = self.ref2(ref2_features[0], get_tetrahedras_edges(tetrahedras))
                 elif self.ref == 'conv':
-                    ref2_out = self.ref2(tet_vertexes, ref2_features)
+                    ref2_out = self.ref2(tet_vertexes, ref2_features)[0]
                 elif self.ref == 'linear':
-                    ref2_out = self.ref2(ref2_features)
+                    ref2_out = self.ref2(ref2_features)[0]
                 else:
                     raise NotImplementedError
                 delta_v, delta_s, tet_features = torch.tanh(ref2_out[:, :3]) / \
@@ -415,9 +415,9 @@ class PCD2Mesh(pl.LightningModule):
                     if self.ref == 'gcn':
                         surface_ref_out = self.ref2(pos_features[0], get_mesh_edges(mesh_faces))
                     elif self.ref == 'conv':
-                        surface_ref_out = self.ref2(mesh_vertices, pos_features)
+                        surface_ref_out = self.ref2(mesh_vertices, pos_features)[0]
                     elif self.ref == 'linear':
-                        surface_ref_out = self.ref2(pos_features)
+                        surface_ref_out = self.ref2(pos_features)[0]
                     else:
                         raise NotImplementedError
                     delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res), \
