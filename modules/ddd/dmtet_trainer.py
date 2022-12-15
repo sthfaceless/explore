@@ -353,14 +353,6 @@ class PCD2Mesh(pl.LightningModule):
                     # out['amips_loss'] += kaolin.metrics.tetmesh.amips(
                     #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
 
-                # add sdf regularization to all vertices
-                if exists(vertices, faces):
-                    total_vertexes = torch.cat([tet_vertexes] + not_subdivided_vertexes, dim=1)
-                    total_sdf = torch.cat([tet_sdf] + not_subdivided_sdf, dim=1)
-                    out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces,
-                                                              true_sdf=true_sdf)
-                    out['loss'] = out['sdf_loss'] * self.sdf_weight
-
                 ####################### DEBUG CODE #######################
                 if self.debug_state:
                     self.lg.log_tensor(tet_vertexes.transpose(1, 2), 'Second refined vertexes', depth=1)
@@ -398,6 +390,14 @@ class PCD2Mesh(pl.LightningModule):
                     self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'first_predicted_mesh',
                                      epoch=self.global_step)
             ############################################################
+
+            # add sdf regularization to all vertices
+            if exists(vertices, faces):
+                total_vertexes = torch.cat([tet_vertexes] + not_subdivided_vertexes, dim=1)
+                total_sdf = torch.cat([tet_sdf] + not_subdivided_sdf, dim=1)
+                out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces,
+                                                          true_sdf=true_sdf)
+                out['loss'] = out['sdf_loss'] * self.sdf_weight
 
             # surface subdivision
             if n_surface_division is None:
