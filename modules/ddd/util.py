@@ -1,5 +1,4 @@
 import mesh_to_sdf
-import torch
 import trimesh
 from sklearn.neighbors import KDTree
 
@@ -378,8 +377,10 @@ def get_mesh_edges_with_extra_vertex(faces):
 
 
 def smoothness_loss(vertices, faces):
-    edges = get_mesh_edges_with_extra_vertex(faces)
-    edges = edges.view(-1, 2, 3)  # two consequent edges it's same edge from different faces
+    edges = get_mesh_edges_with_extra_vertex(faces).transpose(0, 1)
+    indexes = torch.arange(len(edges) - 1).type_as(edges)[edges[:-1, :2] == edges[1:, :2]]
+    indexes = torch.stack([indexes, indexes + 1], dim=1).view(-1)
+    edges = edges[indexes].view(-1, 2, 3)  # two consequent edges it's same edge from different faces
 
     v0, v1 = vertices[edges[:, 0, 0]], vertices[edges[:, 0, 1]]
     v2, v3 = vertices[edges[:, 0, 2]], vertices[edges[:, 1, 2]]
