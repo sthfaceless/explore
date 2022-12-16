@@ -154,6 +154,7 @@ def get_surface_tetrahedras(vertexes, tets, sdf, features):
     tet_sdf = vertex_outside[tets.reshape(len(tets) * 4)].reshape(len(tets), 4).byte()
     tet_sum = torch.sum(tet_sdf, dim=-1)
     surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
+    non_surface_tets = tets[(tet_sum == 0) | (tet_sum == 4)]
 
     tet_vertexes_msk = torch.zeros(len(vertexes)).type_as(vertexes).bool()
     tet_vertexes_msk[surface_tets.view(len(surface_tets) * 4).unique()] = True
@@ -163,8 +164,11 @@ def get_surface_tetrahedras(vertexes, tets, sdf, features):
     indicators = torch.cumsum(tet_vertexes_msk.long(), dim=0) - 1
     surface_tets = indicators[surface_tets.view(len(surface_tets) * 4)].view(len(surface_tets), 4)
 
+    indicators = torch.cumsum((~tet_vertexes_msk).long(), dim=0) - 1
+    non_surface_tets = indicators[non_surface_tets.view(len(non_surface_tets) * 4)].view(len(non_surface_tets), 4)
+
     return vertexes[tet_vertexes_ids], surface_tets, sdf[tet_vertexes_ids], \
-           features[tet_vertexes_ids], vertexes[~tet_vertexes_msk], \
+           features[tet_vertexes_ids], vertexes[~tet_vertexes_msk], non_surface_tets, \
            sdf[~tet_vertexes_msk]
 
 
@@ -411,15 +415,46 @@ def smoothness_loss(vertices, faces):
     second_normal = - torch.cross(v1 - v0, v3 - v0, dim=1)
     second_normal = second_normal / (second_normal.norm(dim=1, keepdim=True) + 1e-7)
 
-    cos = torch.sum(first_normal * second_normal, dim=-1)
+    cos = torch.abs(torch.sum(first_normal * second_normal, dim=-1))
     loss = torch.mean((1 - cos) ** 2)
     return loss
 
 
-def sdf_reg(sdf, edges):
+def sdf_sign_reg(sdf, edges):
+    if sdf.numel() == 0 or edges.numel() == 0:
+        return torch.tensor(0).type_as(sdf)
     v0, v1 = edges[0], edges[1]
     loss = -torch.mean(torch.where(sdf[v0] > 0, torch.log(torch.sigmoid(sdf[v1]) + 1e-7),
                                    torch.log(1 - torch.sigmoid(sdf[v1]) + 1e-7))
                        + torch.where(sdf[v1] > 0, torch.log(torch.sigmoid(sdf[v0]) + 1e-7),
                                      torch.log(1 - torch.sigmoid(sdf[v0]) + 1e-7)))
     return loss
+
+
+def sdf_value_reg(sdf, edges, resolution):
+    if sdf.numel() == 0 or edges.numel() == 0:
+        return torch.tensor(0).type_as(sdf)
+    v0, v1 = edges[0], edges[1]
+    # sdf values must differ not bigger than resolution
+    loss = torch.mean((torch.abs(sdf[v0] - sdf[v1]) - 1 / (2 * resolution)).clamp(min=0.0))
+    return loss
+
+
+def continuous_mesh_reg(vertices, faces, vertexes, tets):
+    tet_ids = torch.arange(len(tets)).type_as(tets)
+    n = torch.max(tets) + 1 if len(tets) > 0 else torch.ones(1).type_as(tets)
+    m = torch.max(tet_ids) + 1 if len(tet_ids) > 0 else torch.ones(1).type_as(tets)
+
+    tets = torch.sort(tets, dim=1)[0]
+    v0, v1, v2, v3 = tets[:, 0], tets[:, 1], tets[:, 2], tets[:, 3]
+    tet_faces = torch.cat([
+        v0 * n * n * m + v1 * n * m + v2 * m + tet_ids,
+        v0 * n * n * m + v1 * n * m + v3 * m + tet_ids,
+        v1 * n * n * m + v2 * n * m + v3 * m + tet_ids,
+        v0 * n * n * m + v2 * n * m + v3 * m + tet_ids,
+    ], dim=0).unique(sorted=True)
+
+    pair_mask = (tet_faces[:-1].div(m, rounding_mode='trunc')) == (tet_faces[1:].div(m, rounding_mode='trunc'))
+    indexes = torch.arange(len(tet_faces) - 1).type_as(tet_faces)[pair_mask]
+    indexes = torch.stack([indexes, indexes + 1], dim=1).view(-1)
+    tet_faces = tet_faces[indexes].view(-1, 2) % m

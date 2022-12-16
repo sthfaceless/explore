@@ -48,6 +48,7 @@ def get_parser():
                         help="Graph Convolutional refinement linear dims")
     parser.add_argument("--grid", default=64, type=int, help="tetrahedras grid resolution")
     parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
+    parser.add_argument("--res_features", default=64, type=int, help="Num of features that will traverse over layers")
     parser.add_argument("--ref", default='gcn', help="What kind of network to use for refinement [gcn, conv, linear]")
     parser.add_argument("--disc", action='store_true')
 
@@ -55,10 +56,13 @@ def get_parser():
     parser.add_argument("--chamfer_weight", default=500, type=float, help="Weight for chamfer distance")
     parser.add_argument("--normal_weight", default=1e-6, type=float, help="Weight for faces normal reg")
     parser.add_argument("--delta_weight", default=1, type=float, help="Weight for vertexes delta change reg")
-    parser.add_argument("--delta_scale", default=1/2, type=float, help="What value of grid resolution it could move")
+    parser.add_argument("--delta_scale", default=1 / 2, type=float, help="What value of grid resolution it could move")
     parser.add_argument("--sdf_weight", default=0.4, type=float, help="Weight for sdf prediction reg")
-    parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving"
-                                                                       " tetrahedras")
+    parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
+    parser.add_argument("--sdf_value_reg", default=0.01, type=float, help="Regularization for delta sdf values")
+    parser.add_argument("--sdf_sign_reg", default=1e-4, type=float, help="Regularization for close tetrahedras sdf sign")
+    parser.add_argument("--continuous_reg", default=0.01, type=float,
+                        help="Ensure that close tetrahedras has same similar faces")
 
     parser.add_argument("--sdf_clamp", default=0.03, type=float, help="Max absolute true sdf value")
     parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
@@ -102,6 +106,7 @@ if __name__ == "__main__":
     timelapse = kaolin.visualize.Timelapse(args.logs_path)
     model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
                      grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
+                     sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,

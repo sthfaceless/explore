@@ -14,9 +14,10 @@ class PCD2Mesh(pl.LightningModule):
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
                  learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
-                 encoder_out=256, with_norm=False, delta_scale=1/2.0,
+                 encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
-                 n_volume_division=1, n_surface_division=1, chamfer_samples=5000,
+                 n_volume_division=1, n_surface_division=1, chamfer_samples=5000, sdf_sign_reg=1e-4, sdf_value_reg=1e-2,
+                 continuous_reg=1e-2,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
                  curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
                  disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1.0, lap_reg=0.5, amips_weight=1e-5,
@@ -47,6 +48,7 @@ class PCD2Mesh(pl.LightningModule):
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
+        self.grid_res = grid_resolution
         self.true_grid_res = grid_resolution / delta_scale
 
         self.pe_powers = pe_powers
@@ -58,6 +60,7 @@ class PCD2Mesh(pl.LightningModule):
         self.true_volume_division = n_volume_division
         self.n_surface_division = n_surface_division
         self.encoder_grids = encoder_grids
+        self.res_features = res_features
 
         self.sdf_weight = sdf_weight
         self.delta_weight = delta_weight
@@ -66,6 +69,9 @@ class PCD2Mesh(pl.LightningModule):
         self.chamfer_samples = chamfer_samples
         self.normal_weight = normal_weight
         self.lap_reg = lap_reg
+        self.sdf_value_reg = sdf_value_reg
+        self.sdf_sign_reg = sdf_sign_reg
+        self.continuous_reg = continuous_reg
         self.amips_weight = amips_weight
 
         self.curvature_threshold = curvature_threshold
@@ -77,7 +83,7 @@ class PCD2Mesh(pl.LightningModule):
         self.sdf_points_encoder = MultiPointVoxelCNN(input_dim=self.input_dim, dim=encoder_out, dims=encoder_dims,
                                                      grids=encoder_grids, do_points_map=False, with_norm=True,
                                                      skip=False, n_layers=3)
-        self.sdf_model = SimpleMLP(input_dim=self.pos_features, out_dim=1, hidden_dims=sdf_dims,
+        self.sdf_model = SimpleMLP(input_dim=self.pos_features, out_dim=1 + res_features, hidden_dims=sdf_dims,
                                    with_norm=True)
 
         self.ref_points_encoder = MultiPointVoxelCNN(input_dim=self.input_dim, dim=encoder_out, dims=encoder_dims,
@@ -85,27 +91,27 @@ class PCD2Mesh(pl.LightningModule):
                                                      skip=False, n_layers=3)
         self.ref = ref
         if ref == 'gcn':
-            self.ref1 = GCNConv(input_dim=1 + self.pos_features, out_dim=3 + 1,
+            self.ref1 = GCNConv(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
                                 gcn_dims=gcn_dims, mlp_dims=gcn_hidden, with_norm=with_norm)
-            self.ref2 = GCNConv(input_dim=1 + self.pos_features, out_dim=3 + 1,
+            self.ref2 = GCNConv(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
                                 gcn_dims=gcn_dims, mlp_dims=gcn_hidden, with_norm=with_norm)
             self.surface_ref = GCNConv(input_dim=self.pos_features, out_dim=3 + 1, gcn_dims=gcn_dims,
                                        mlp_dims=gcn_hidden, with_norm=with_norm)
         elif ref == 'conv':
-            self.ref1 = PointVoxelCNN(input_dim=1 + self.pos_features, out_dim=3 + 1,
+            self.ref1 = PointVoxelCNN(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
                                       grid_res=encoder_grids[0], dim=encoder_dims[0], dim_points=gcn_dims[-1],
                                       n_layers=4, with_norm=with_norm, skip=True)
-            self.ref2 = PointVoxelCNN(input_dim=1 + self.pos_features, out_dim=3 + 1,
+            self.ref2 = PointVoxelCNN(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
                                       grid_res=encoder_grids[0], dim=encoder_dims[0], dim_points=gcn_dims[-1],
                                       n_layers=4, with_norm=with_norm, skip=True)
             self.surface_ref = PointVoxelCNN(input_dim=self.pos_features, out_dim=3 + 1,
                                              grid_res=encoder_grids[0], dim=encoder_dims[0], dim_points=gcn_dims[-1],
                                              n_layers=4, with_norm=with_norm, skip=True)
         elif ref == 'linear':
-            self.ref1 = SimpleMLP(input_dim=1 + self.pos_features, out_dim=3 + 1, hidden_dims=gcn_dims + gcn_hidden,
-                                  with_norm=with_norm)
-            self.ref2 = SimpleMLP(input_dim=1 + self.pos_features, out_dim=3 + 1, hidden_dims=gcn_dims + gcn_hidden,
-                                  with_norm=with_norm)
+            self.ref1 = SimpleMLP(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
+                                  hidden_dims=gcn_dims + gcn_hidden, with_norm=with_norm)
+            self.ref2 = SimpleMLP(input_dim=1 + self.pos_features + res_features, out_dim=3 + 1 + res_features,
+                                  hidden_dims=gcn_dims + gcn_hidden, with_norm=with_norm)
             self.surface_ref = SimpleMLP(input_dim=self.pos_features, out_dim=3 + 1, hidden_dims=gcn_dims + gcn_hidden,
                                          with_norm=with_norm)
         else:
@@ -164,15 +170,17 @@ class PCD2Mesh(pl.LightningModule):
             self.debug_state = False
 
     def surf_batchify(self, out):
-        tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf = out
+        tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf, extra_tets = out
         return tet_vertexes.unsqueeze(0), tetrahedras, tet_sdf.unsqueeze(0), tet_features.unsqueeze(0), \
-               extra_vertexes.unsqueeze(0), extra_sdf.unsqueeze(0)
+               extra_vertexes.unsqueeze(0), extra_tets, extra_sdf.unsqueeze(0)
 
     def single_mesh_step(self, pcd_noised=None, vertices=None, faces=None, n_volume_division=None, true_sdf=None,
                          n_surface_division=None):
 
+        is_train = exists(vertices, faces)
+
         ### STEP 0 --- Sampling noisy point cloud from mesh
-        if exists(vertices, faces):
+        if is_train:
             # make vertices batched as all models and losses are expecting batched input
             vertices = vertices.unsqueeze(0)
             # sample pcd for train
@@ -188,7 +196,9 @@ class PCD2Mesh(pl.LightningModule):
 
         ### STEP 1 --- Initial sdf prediction
         # create output dict
-        out = {}
+        out = {
+            'loss': torch.tensor(0).type_as(pcd_noised)
+        }
         # NeRF like encoding
         pe_features = torch.cat([pcd_noised, get_positional_encoding(pcd_noised, self.pe_powers * 3)], dim=-1)
         # create first positional encoding grids for SDF prediction and save it for SDF discriminator
@@ -206,7 +216,7 @@ class PCD2Mesh(pl.LightningModule):
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
-            if exists(vertices, faces):
+            if is_train:
                 self.lg.log_tensor(pcd[0], 'Input point cloud')
                 self.lg.log_tensor(pcd_noised[0], 'Noised input point cloud')
                 self.lg.log_tensor(pe_features[0], 'NeRF like input features')
@@ -223,7 +233,7 @@ class PCD2Mesh(pl.LightningModule):
         ############################################################
 
         # # if we're training only on SDF
-        # if not self.volume_refinement and exists(vertices, faces):
+        # if not self.volume_refinement and is_train:
         #     # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
         #     true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
         #     # true_sdf = torch.norm(tet_vertexes, dim=-1) - 0.5
@@ -257,12 +267,14 @@ class PCD2Mesh(pl.LightningModule):
         if len(delta_v) > 0:
             out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
             out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
+            out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True), self.grid_res)
             # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
             # out['amips_loss'] = kaolin.metrics.tetmesh.amips(
             #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
         else:
             out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
             out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
+            out['delta_sdf'] = torch.tensor(0).type_as(delta_s)
             # out['amips_loss'] = torch.tensor(0).type_as(delta_v)
 
         ####################### DEBUG CODE #######################
@@ -275,7 +287,7 @@ class PCD2Mesh(pl.LightningModule):
             self.lg.log_tensor(tet_features, 'First refimenent features')
             self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
                                   'first_refined_tetrahedras', epoch=self.global_step)
-            debug_tet_vertexes, debug_tetrahedras, _, _, _, _ = self.surf_batchify(
+            debug_tet_vertexes, debug_tetrahedras, _, _, _, _, _ = self.surf_batchify(
                 get_surface_tetrahedras(tet_vertexes[0], tetrahedras, tet_sdf[0], tet_features[0]))
             if debug_tetrahedras.numel() > 0:
                 _, debug_faces = tetrahedras2mesh(debug_tet_vertexes[0], debug_tetrahedras)
@@ -289,14 +301,15 @@ class PCD2Mesh(pl.LightningModule):
         ### STEP 2.2 --- Volume subdivision
         if n_volume_division is None:
             n_volume_division = self.n_volume_division
-        not_subdivided_vertexes, not_subdivided_sdf = [], []
+        not_subdivided_vertexes, not_subdivided_sdf, not_subdivided_tets = [], [], []
         for div_id in range(n_volume_division):
             # we have to remove non-surface tetrahedras as volume subdivision is expensive
-            tet_vertexes, tetrahedras, tet_sdf, tet_features, __not_subdivided_vertexes, __not_subdivided_sdf \
-                = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
-                                                             tet_sdf[0], tet_features[0]))
+            tet_vertexes, tetrahedras, tet_sdf, tet_features, __not_subdivided_vertexes, __not_subdivided_tets, \
+            __not_subdivided_sdf = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
+                                                                              tet_sdf[0], tet_features[0]))
             not_subdivided_vertexes.append(__not_subdivided_vertexes)
             not_subdivided_sdf.append(__not_subdivided_sdf)
+            not_subdivided_tets.append(__not_subdivided_tets)
 
             # volume subdivision
             tet_vertexes, tetrahedras, out_features = kaolin.ops.mesh.subdivide_tetmesh(
@@ -309,7 +322,7 @@ class PCD2Mesh(pl.LightningModule):
             self.lg.log_tensor(tet_features, 'subdivided features')
             self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]), tn(tet_vertexes[0, :, 2]),
                                   'subdivided_tetrahedras', epoch=self.global_step)
-            debug_tet_vertexes, debug_tetrahedras, _, _, _, _ = self.surf_batchify(
+            debug_tet_vertexes, debug_tetrahedras, _, _, _, _, _ = self.surf_batchify(
                 get_surface_tetrahedras(tet_vertexes[0], tetrahedras, tet_sdf[0], tet_features[0]))
             if debug_tetrahedras.numel() > 0:
                 _, debug_faces = tetrahedras2mesh(debug_tet_vertexes[0], debug_tetrahedras)
@@ -347,6 +360,8 @@ class PCD2Mesh(pl.LightningModule):
             if len(delta_v) > 0:
                 out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
                 out['delta_laplace'] += delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
+                out['delta_sdf'] += sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
+                                                  self.grid_res / 2 ** self.n_volume_division)
                 # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
                 # out['amips_loss'] += kaolin.metrics.tetmesh.amips(
                 #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
@@ -360,7 +375,7 @@ class PCD2Mesh(pl.LightningModule):
                 self.lg.log_scatter3d(tn(tet_vertexes[0, :, 0]), tn(tet_vertexes[0, :, 1]),
                                       tn(tet_vertexes[0, :, 2]),
                                       'subdivided_refined_tetrahedras', epoch=self.global_step)
-                debug_tet_vertexes, debug_tetrahedras, _, _, _, _ = self.surf_batchify(
+                debug_tet_vertexes, debug_tetrahedras, _, _, _, _, _ = self.surf_batchify(
                     get_surface_tetrahedras(tet_vertexes[0], tetrahedras, tet_sdf[0], tet_features[0]))
                 if debug_tetrahedras.numel() > 0:
                     _, debug_faces = tetrahedras2mesh(debug_tet_vertexes[0], debug_tetrahedras)
@@ -373,18 +388,26 @@ class PCD2Mesh(pl.LightningModule):
             ############################################################
 
         ### STEP 2.4 ---  Apply marching tetrahedra on surface tetrahedras to extract mesh
-        mesh_vertices, mesh_faces = kaolin.ops.conversions.marching_tetrahedra(tet_vertexes, tetrahedras, tet_sdf)
-        mesh_vertices, mesh_faces = mesh_vertices[0].unsqueeze(0), mesh_faces[0]
+        mesh_vertices, mesh_faces, tet_indices = kaolin.ops.conversions.marching_tetrahedra(
+            tet_vertexes, tetrahedras, tet_sdf, return_tet_idx=True)
+        mesh_vertices, mesh_faces, tet_indices = mesh_vertices[0].unsqueeze(0), mesh_faces[0], tet_indices[0]
         out['mesh_vertices'] = mesh_vertices
         out['mesh_faces'] = mesh_faces
 
         ### LOSS --- sdf
-        if exists(vertices, faces):
+        if is_train:
             total_vertexes = torch.cat([tet_vertexes] + not_subdivided_vertexes, dim=1)
             total_sdf = torch.cat([tet_sdf] + not_subdivided_sdf, dim=1)
             out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
             sdf_weight = self.sdf_weight if self.volume_refinement else 1.0
-            out['loss'] = out['sdf_loss'] * sdf_weight
+            out['loss'] += out['sdf_loss'] * sdf_weight
+
+        ### REGULARIZATION --- close tetrahedras must have same sdf sign
+        if self.volume_refinement and is_train:
+            out['sdf_sign_reg'] = functools.reduce(lambda l1, l2: l1 + l2, [
+                sdf_sign_reg(sdf[0], get_tetrahedras_edges(tets, unique=True))
+                for sdf, tets in zip([tet_sdf] + not_subdivided_sdf, [tetrahedras] + not_subdivided_tets)])
+            out['loss'] += out['sdf_sign_reg'] * self.sdf_sign_reg
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -449,13 +472,14 @@ class PCD2Mesh(pl.LightningModule):
                 ############################################################
 
         ### REGULARIZATION --- delta vertexes and laplace
-        if self.volume_refinement and exists(vertices, faces):
+        if self.volume_refinement and is_train:
             out['loss'] += out['delta_vertex'] * self.delta_weight
             out['loss'] += out['delta_laplace'] * self.lap_reg
+            out['loss'] += out['delta_sdf'] * self.sdf_value_reg
             # out['loss'] += out['amips_loss'] * self.amips_weight
 
         ### LOSS --- Chamfer loss and smoothness normal loss
-        if self.volume_refinement and exists(vertices, faces):
+        if self.volume_refinement and is_train:
             if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
                 # calculate pcd chamfer loss
                 face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(mesh_vertices, mesh_faces), nan=1.0)
