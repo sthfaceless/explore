@@ -102,7 +102,8 @@ def voxelize_points3d(points, features, grid_res, mask=None):
     b, n_points, dim = features.shape
     points, features = points.view(b * n_points, 3), features.view(b * n_points, dim)
     # retrieve indexes inside grid
-    indexes = torch.tensor_split(torch.floor((points + 1.0) / 2 * (grid_res - 1) + 0.5).long(), 3, dim=-1)
+    indexes = torch.tensor_split(torch.clamp(torch.floor((points + 1.0) / 2 * (grid_res - 1) + 0.5),
+                                             min=0, max=grid_res - 1).long(), 3, dim=-1)
     indexes = [torch.arange(b).type_as(indexes[0]).view(b, 1).repeat(1, n_points).view(b * n_points)] + [
         index.squeeze(-1) for index in indexes]
     # setup grid
