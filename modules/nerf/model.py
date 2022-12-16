@@ -463,12 +463,16 @@ class NerfWeightsLinearDiscriminator(NerfWeightsDiscriminator):
 
 class XUnetBlock(torch.nn.Module):
 
-    def __init__(self, block, dim, num_groups=32, need_attn=False, cond='xunet', num_heads=4):
+    def __init__(self, block, dim, num_groups=32, need_attn=False, local_attn=False, local_attn_kernel=8,
+                 cond='xunet', num_heads=4):
         super(XUnetBlock, self).__init__()
         self.block = block
-        self.need_attn = need_attn and cond == 'xunet'
-        if self.need_attn:
+        self.need_attn = (need_attn or local_attn) and cond == 'xunet'
+        if need_attn and cond == 'xunet':
             self.cross_attn = MHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads)
+        elif local_attn and cond == 'xunet':
+            self.cross_attn = LocalMHAAttention2D(dim, num_groups=num_groups, num_heads=num_heads,
+                                                  kernel_size=local_attn_kernel)
 
     def forward(self, x, emb):
         h = self.block(x, emb)
@@ -483,6 +487,7 @@ class XUnetBlock(torch.nn.Module):
 class XUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
+                 local_attention_dim=64, local_attention_kernel=8,
                  num_groups=32, dropout=0.0, num_heads=4, embed_features=512, pos_enc=32,
                  extra_upsample_blocks=0, cond='xunet'):
         super(XUNetDenoiser, self).__init__()
@@ -529,21 +534,26 @@ class XUNetDenoiser(torch.nn.Module):
                 self.downsample_blocks.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.encoder_layers.append(torch.nn.ModuleList([]))
             need_attn = current_resolution <= attention_dim
+            local_attn = current_resolution <= local_attention_dim
             block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=self.emb_features, num_groups=num_groups,
-                                              kernel_size=kernel_size, attn=need_attn, dropout=dropout,
+                                              kernel_size=kernel_size, attn=need_attn, local_attn=local_attn,
+                                              local_attn_kernel=local_attention_kernel, dropout=dropout,
                                               num_heads=num_heads)
             block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads,
-                               cond=cond)
+                               local_attn=local_attn, local_attn_kernel=local_attention_kernel, cond=cond)
             self.encoder_layers[-1].append(block)
         self.downsample_blocks.append(torch.nn.Identity())
 
         self.mid_layers = torch.nn.Module()
         need_attn = current_resolution <= attention_dim
+        local_attn = current_resolution <= local_attention_dim
         block1 = ConditionalNormResBlock2D(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
-                                           num_groups=num_groups, kernel_size=kernel_size,
+                                           num_groups=num_groups, kernel_size=kernel_size, local_attn=local_attn,
+                                           local_attn_kernel=local_attention_kernel,
                                            attn=need_attn, dropout=dropout, num_heads=num_heads)
         self.mid_layers.block_1 = XUnetBlock(block1, dim=hidden_dims[-1], num_groups=num_groups, need_attn=need_attn,
-                                             num_heads=num_heads, cond=cond)
+                                             num_heads=num_heads, cond=cond, local_attn=local_attn,
+                                             local_attn_kernel=local_attention_kernel)
 
         # add extra res blocks for upsampling as it harder than downsampling
         _inverse_dims = hidden_dims[::-1]
@@ -560,12 +570,13 @@ class XUNetDenoiser(torch.nn.Module):
                 self.upsample_blocks.append(UpSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.decoder_layers.append(torch.nn.ModuleList([]))
             need_attn = current_resolution <= attention_dim
+            local_attn = current_resolution <= local_attention_dim
             block = ConditionalNormResBlock2D(hidden_dim=dim, in_dim=2 * dim, embed_dim=self.emb_features,
-                                              num_groups=num_groups,
+                                              num_groups=num_groups, local_attn=local_attn,
                                               kernel_size=kernel_size, attn=need_attn, dropout=dropout,
-                                              num_heads=num_heads)
+                                              num_heads=num_heads, local_attn_kernel=local_attention_kernel)
             block = XUnetBlock(block, dim=dim, num_groups=num_groups, need_attn=need_attn, num_heads=num_heads,
-                               cond=cond)
+                               cond=cond, local_attn=local_attn, local_attn_kernel=local_attention_kernel)
             self.decoder_layers[-1].append(block)
         self.upsample_blocks.append(torch.nn.Identity())
 

@@ -728,12 +728,14 @@ class MultiVAETrainer(pl.LightningModule):
 class NVSDiffusion(Diffusion):
 
     def __init__(self, shape, xunet_hiddens, dataset=None, dropout=0.1, classifier_free=0.1, clf_weight=3.0,
-                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, diffusion_steps=4000,
+                 batch_size=128, learning_rate=1e-4, min_lr_rate=0.1, attention_dim=32, local_attention_dim=64,
+                 local_attention_kernel=8, diffusion_steps=4000,
                  sample_steps=128, kl_weight=1e-3, num_heads=None, steps=100, epochs=10000, beta_schedule='cos',
                  embed_features=512, pos_enc=32, cond='xunet',
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_length=16, focal=1.5, use_ema=True):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = XUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=xunet_hiddens,
+                              local_attention_dim=local_attention_dim, local_attention_kernel=local_attention_kernel,
                               attention_dim=attention_dim, dropout=dropout, num_heads=num_heads,
                               embed_features=embed_features, pos_enc=pos_enc, cond=cond)
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,

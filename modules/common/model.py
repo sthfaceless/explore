@@ -188,6 +188,58 @@ class MHAAttention2D(torch.nn.Module):
         return (out + q_in) / 2 ** (1 / 2)
 
 
+class LocalMHAAttention2D(torch.nn.Module):
+    def __init__(self, dim, num_heads=None, head_channel=32, dropout=0.0, num_groups=32, kernel_size=8):
+        super().__init__()
+        self.dim = dim
+        if num_heads:
+            self.num_heads = num_heads
+            self.head_dim = dim // self.num_heads
+        else:
+            self.num_heads = dim // head_channel
+            self.head_dim = head_channel
+        self.scale = self.head_dim ** (-0.5)
+        self.dropout = dropout
+        self.kernel_size = kernel_size
+
+        self.norm = norm(dim, num_groups)
+        self.q = torch.nn.Conv2d(dim, dim, kernel_size=1)
+        self.k = torch.nn.Conv2d(dim, dim, kernel_size=1)
+        self.v = torch.nn.Conv2d(dim, dim, kernel_size=1)
+        self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
+
+    def forward(self, q, v=None):
+        q_in = q
+        q = self.norm(q)
+        if v is None:
+            v = q
+        else:
+            v = self.norm(v)
+        q, k, v = self.q(q), self.k(v), self.v(v)
+
+        # compute attention
+        b, c, h, w = q.shape
+        # b, c, h, w -> b, n, h/k * w/k, k*k, d
+        q, k, v = map(lambda t: t.reshape(
+            b, self.num_heads, self.head_dim,
+            h // self.kernel_size, self.kernel_size, w // self.kernel_size, self.kernel_size)
+                      .transpose(-2, -3).movedim(2, -1)
+                      .reshape(b, self.num_heads, h * w // self.kernel_size ** 2, self.kernel_size ** 2, self.head_dim),
+                      [q, k, v])
+        # b, n, h/k * w/k, k*k, k*k
+        attn_weights = torch.nn.functional.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale, dim=-1)
+
+        # attend to values (b n h/k * w/k k*k d)
+        out = torch.matmul(attn_weights, v)
+        # b n h/k * w/k k*k d ->
+        out = out.movedim(-1, 2).reshape(
+            b, self.dim, h // self.kernel_size, w // self.kernel_size, self.kernel_size, self.kernel_size) \
+            .transpose(-2, -3).reshape(b, self.dim, h, w)
+        out = self.out(out)
+
+        return (out + q_in) / 2 ** (1 / 2)
+
+
 class ResBlock2d(torch.nn.Module):
 
     def __init__(self, hidden_dim, kernel_size=3, num_groups=32, in_dim=-1):
@@ -257,8 +309,8 @@ class ConditionalNorm2D(torch.nn.Module):
 
 
 class ConditionalNormResBlock2D(torch.nn.Module):
-    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, dropout=0.0,
-                 num_heads=4):
+    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, local_attn=False,
+                 local_attn_kernel=8, dropout=0.0, num_heads=4):
         super(ConditionalNormResBlock2D, self).__init__()
 
         if in_dim == -1:
@@ -274,9 +326,12 @@ class ConditionalNormResBlock2D(torch.nn.Module):
         self.dropout = torch.nn.Dropout2d(p=dropout)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
-        self.need_attn = attn
-        if self.need_attn:
+        self.need_attn = attn or local_attn
+        if attn:
             self.attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads)
+        elif local_attn:
+            self.attn = LocalMHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads,
+                                            kernel_size=local_attn_kernel)
 
     def forward(self, x, emb):
         h = self.layer_1(nonlinear(self.ln_1(x)))
