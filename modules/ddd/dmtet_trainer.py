@@ -170,7 +170,7 @@ class PCD2Mesh(pl.LightningModule):
             self.debug_state = False
 
     def surf_batchify(self, out):
-        tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_sdf, extra_tets = out
+        tet_vertexes, tetrahedras, tet_sdf, tet_features, extra_vertexes, extra_tets, extra_sdf = out
         return tet_vertexes.unsqueeze(0), tetrahedras, tet_sdf.unsqueeze(0), tet_features.unsqueeze(0), \
                extra_vertexes.unsqueeze(0), extra_tets, extra_sdf.unsqueeze(0)
 

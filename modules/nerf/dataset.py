@@ -360,13 +360,14 @@ class PairViews(torch.utils.data.IterableDataset):
         idx = randint(0, self.cache_size - 1)
         views = self.images[idx]
         pair = sample(range(len(views)), k=2)
+        orig_pose, cond_pose = self.poses[idx][pair[0]], self.poses[idx][pair[1]]
         # for validation
         top_item = randint(len(views) // 2, len(views) - 1)
         return {
             'view': views[pair[0]],
-            'view_poses': self.poses[idx][pair[0]],
+            'view_poses': orig_pose,
             'cond': views[pair[1]],
-            'cond_poses': self.poses[idx][pair[1]],
+            'cond_poses': cond_pose,
             'top_view': views[top_item],
             'top_poses': self.poses[idx][top_item],
             'focal': self.focals[idx].astype(np.float32),
