@@ -264,8 +264,8 @@ class PCD2Mesh(pl.LightningModule):
             out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
             out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True), self.grid_res)
             tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-            out['amips_loss'] = kaolin.metrics.tetmesh.amips(
-                tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+            out['amips_loss'] = torch.mean(kaolin.metrics.tetmesh.amips(
+                tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes)))
         else:
             out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
             out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
@@ -358,8 +358,8 @@ class PCD2Mesh(pl.LightningModule):
                 out['delta_sdf'] += sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
                                                   self.grid_res * 2 ** self.n_volume_division)
                 tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-                out['amips_loss'] += kaolin.metrics.tetmesh.amips(
-                    tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+                out['amips_loss'] += torch.mean(kaolin.metrics.tetmesh.amips(
+                    tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes)))
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
