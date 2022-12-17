@@ -139,7 +139,7 @@ class PCD2Mesh(pl.LightningModule):
     @torch.no_grad()
     def get_mesh_sdf(self, points, vertices, faces, pcd=None, num_samples=5000):
         if faces.numel() == 0 or points.numel() == 0:
-            return torch.zeros(1, len(points)).type_as(points)
+            return torch.zeros(1, len(points[0])).type_as(points)
         if pcd is None:
             pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces, num_samples=num_samples)
         dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
@@ -150,7 +150,7 @@ class PCD2Mesh(pl.LightningModule):
     @torch.no_grad()
     def get_mesh_udf(self, points, vertices, faces, pcd=None, num_samples=5000):
         if faces.numel() == 0 or points.numel() == 0:
-            return torch.zeros(1, len(points)).type_as(points)
+            return torch.zeros(1, len(points[0])).type_as(points)
         if pcd is None:
             pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces, num_samples=num_samples)
         dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
