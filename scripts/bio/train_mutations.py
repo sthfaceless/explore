@@ -16,6 +16,7 @@ def get_parser():
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to training csv")
     parser.add_argument("--pdbs", default="", help="Path to directory with pdbs")
+    parser.add_argument("--features", default="", help="Path to directory with features")
 
     # Training settings
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for decoder and nerf")
@@ -49,8 +50,8 @@ if __name__ == "__main__":
     splitter = GroupShuffleSplit(train_size=args.train_rate, n_splits=1)
     split = splitter.split(df, groups=df['group'])
     train_inds, val_inds = next(split)
-    train_dataset = ProteinMutations(df=df.iloc[train_inds], pdb_root=args.pdbs)
-    val_dataset = ProteinMutations(df=df.iloc[val_inds], pdb_root=args.pdbs)
+    train_dataset = ProteinMutations(df=df.iloc[train_inds], pdb_root=args.pdbs, features_root=args.features)
+    val_dataset = ProteinMutations(df=df.iloc[val_inds], pdb_root=args.pdbs, features_root=args.features)
     # creating model
     checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                        filename=os.path.basename(args.out_model_name))

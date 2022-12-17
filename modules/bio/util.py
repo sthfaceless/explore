@@ -23,10 +23,78 @@ def agg_ph(df, base_ph=8.0):
     return df.iloc[best_idx]
 
 
-def agg_pairs(df, train=False):
+def calc_features(row, main_row, pdb_root, atoms_mapper=None, acid_mapper=None,
+                  max_atoms=3500, seq_len=400, pe_features=16):
+    if atoms_mapper is None:
+        atoms_mapper = {'ND2': 0, 'CZ3': 1, 'SD': 2, 'NH1': 3, 'SG': 4, 'CG1': 5, 'OG1': 6, 'CB': 7, 'CH2': 8,
+                        'CE': 9, 'OE1': 10, 'CZ': 11, 'OE2': 12, 'CZ2': 13, 'C': 14, 'OH': 15, 'CG': 16,
+                        'CD1': 17, 'CA': 18, 'OD2': 19, 'NZ': 20, 'CE1': 21, 'CE3': 22, 'NH2': 23, 'NE': 24,
+                        'ND1': 25, 'CE2': 26, 'OD1': 27, 'CD': 28, 'NE1': 29, 'OG': 30, 'CG2': 31, 'NE2': 32,
+                        'O': 33, 'N': 34, 'CD2': 35}
+    if acid_mapper is None:
+        acid_mapper = {'T': 0, 'P': 1, 'K': 2, 'Q': 3, 'E': 4, 'W': 5, 'C': 6, 'M': 7, 'Y': 8, 'D': 9, 'L': 10,
+                       'V': 11, 'F': 12, 'A': 13, 'G': 14, 'R': 15, 'N': 16, 'S': 17, 'H': 18, 'I': 19}
+
+    points, features, atom_ids, mask, alpha_points, alpha_mask = get_pdb_features(
+        os.path.join(pdb_root, row['pdb_path']), atoms_mapper, max_atoms, seq_len, pe_features)
+    main_points, main_features, main_atom_ids, main_mask, main_alpha_points, main_alpha_mask = get_pdb_features(
+        os.path.join(pdb_root, main_row['pdb_path']), atoms_mapper, max_atoms, seq_len, pe_features)
+
+    # rotate protein to main one
+    rotation, transform = get_protein_transform(main_alpha_points[main_alpha_mask], alpha_points[alpha_mask])
+    points[mask] = points[mask] @ rotation + transform
+
+    # normalize both proteins
+    all_points = np.concatenate([points[mask], main_points[main_mask]], axis=0)
+    center = (all_points.max(axis=0) + all_points.min(axis=0)) / 2
+    max_l = (np.abs(all_points).max(axis=0)).max(axis=-1)
+    points[mask] = (points[mask] - center) / max_l
+
+    acids = np.array([acid_mapper[aa] for aa in row['protein_sequence']], dtype=np.int64)
+    acids = np.concatenate([acids, np.ones(seq_len - len(acids), dtype=np.int64) * len(acid_mapper)])
+
+    return {
+        'points': points,
+        'mask': mask,
+        'alpha_points': alpha_points,
+        'alpha_mask': alpha_mask,
+        'features': features,
+        'atom_ids': atom_ids,
+        'acids': acids,
+        'pH': row['pH'].astype(np.float32)
+    }
+
+
+def save_features(features_root, *args, **kwargs):
+    features = calc_features(*args, **kwargs)
+    for k in features.keys():
+        if features[k].dtype == np.float32:
+            features[k] = features[k].astype(np.float16)
+        elif features[k].dtype == np.int64:
+            features[k] = features[k].astype(np.int16)
+    code = args[0]['pdb_id']
+    np.savez_compressed(f'{features_root}/{code}', features)
+
+
+def load_features(features_root, code):
+    try:
+        features = np.load(f'{features_root}/{code}.npz', allow_pickle=True)['arr_0'].item()
+        for k in features.keys():
+            if features[k].dtype == np.float16:
+                features[k] = features[k].astype(np.float32)
+            elif features[k].dtype == np.int16:
+                features[k] = features[k].astype(np.int64)
+
+        return features
+    except Exception as e:
+        print(f'Exception occured during loading features {str(e)}')
+        return None
+
+
+def agg_pairs(df, train=False, features_root=None, pdb_root=None):
     rows = {'protein_sequence': [], 'protein_sequence_mut': [],
             'ddG': None, 'dT': [], 'pdb_path': [], 'mut_path': [], 'pH': [],
-            'group': [], 'seq_id': [], 'mut_id': []}
+            'group': [], 'seq_id': [], 'mut_id': [], 'wt_code': [], 'mut_code': []}
 
     for first_idx in range(len(df)):
         if not train and first_idx != 0:
@@ -44,20 +112,27 @@ def agg_pairs(df, train=False):
             rows['group'].append(first_row['group'])
             rows['seq_id'].append(first_row['seq_id'])
             rows['mut_id'].append(second_row['seq_id'])
+            rows['wt_code'].append(first_row['pdb_id'])
+            rows['mut_code'].append(second_row['pdb_id'])
+
+    if features_root is not None and pdb_root is not None:
+        main_row = df.iloc[0]
+        for first_idx in range(len(df)):
+            save_features(features_root, df.iloc[first_idx], main_row, pdb_root)
 
     if not train:
         del rows['dT']
     return pd.DataFrame(rows)
 
 
-def make_mutation_df(df, pdb_root, train=True):
+def make_mutation_df(df, pdb_root, features_root, train=True):
     df = df.loc[df.group != -1]
     # ESMFold prediction accurate only for <= 400 seq lengths
     df = df[df['protein_sequence'].apply(len) <= 400]
 
     # left proteins with predicted ESMFold pdb files
-
-    df['pdb_path'] = df['protein_sequence'].apply(lambda seq: f'{get_hash(seq)[:6]}.pdb')
+    df['pdb_id'] = df['protein_sequence'].apply(lambda seq: f'{get_hash(seq)[:6]}')
+    df['pdb_path'] = df['pdb_id'].apply(lambda id: f'{id}.pdb')
     pdbs_paths = set(os.listdir(pdb_root))
     df = df[df['pdb_path'].apply(lambda x: os.path.basename(x) in pdbs_paths)]
 
@@ -70,8 +145,8 @@ def make_mutation_df(df, pdb_root, train=True):
     df = df[df.group.apply(lambda val: group_counts[val] > 1)]
 
     # make wt - mutant pairs
-    df = df.groupby('group', as_index=False, sort=False).apply(lambda aggdf: agg_pairs(aggdf, train)).reset_index(
-        drop=True)
+    df = df.groupby('group', as_index=False, sort=False).apply(
+        lambda aggdf: agg_pairs(aggdf, train, pdb_root=pdb_root, features_root=features_root)).reset_index(drop=True)
     return df
 
 
@@ -149,6 +224,3 @@ def get_protein_transform(x, y):
     sup.run()
     rot, tran = sup.get_rotran()
     return rot, tran
-
-
-

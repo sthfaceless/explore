@@ -1,14 +1,10 @@
-import multiprocessing
-
-from tqdm import tqdm
-
 from modules.bio.util import *
 
 
 class ProteinMutations(torch.utils.data.IterableDataset):
 
-    def __init__(self, df, true_indexes=None, atoms_mapper=None, acid_mapper=None, pdb_root='pdb', max_atoms=3500,
-                 seq_len=400, pe_features=16, precompute=None, precomputed=None):
+    def __init__(self, df, atoms_mapper=None, acid_mapper=None, pdb_root='pdb', max_atoms=3500,
+                 seq_len=400, pe_features=16, features_root=None):
         super(ProteinMutations, self).__init__()
 
         if atoms_mapper is None:
@@ -29,22 +25,13 @@ class ProteinMutations(torch.utils.data.IterableDataset):
             self.acid_mapper = {'T': 0, 'P': 1, 'K': 2, 'Q': 3, 'E': 4, 'W': 5, 'C': 6, 'M': 7, 'Y': 8, 'D': 9, 'L': 10,
                                 'V': 11, 'F': 12, 'A': 13, 'G': 14, 'R': 15, 'N': 16, 'S': 17, 'H': 18, 'I': 19}
         self.df = df
-        self.true_indexes = true_indexes
         self.pdb_root = pdb_root
         self.max_atoms = max_atoms
         self.seq_len = seq_len
         self.pe_features = pe_features
+        self.features_root = features_root
 
-        self.precompute = precompute
-        if precompute is not None:
-            os.makedirs(precompute, exist_ok=True)
-            with multiprocessing.Pool() as pool:
-                pool.map(self.save_features, tqdm(range(len(self.df))))
-
-        self.precomputed = precomputed
-
-    def calc_features(self, idx):
-        row = self.df.iloc[idx]
+    def calc_features(self, row):
         wt_points, wt_features, wt_atom_ids, wt_mask, wt_alpha_points, wt_alpha_mask = get_pdb_features(
             os.path.join(self.pdb_root, row['pdb_path']), self.atoms_mapper, self.max_atoms, self.seq_len,
             self.pe_features)
@@ -88,26 +75,20 @@ class ProteinMutations(torch.utils.data.IterableDataset):
             'pH': row['pH'].astype(np.float32)
         }
 
-    def save_features(self, idx):
-        features = self.calc_features(idx)
-        for k in features.keys():
-            if features[k].dtype == np.float32:
-                features[k] = features[k].astype(np.float16)
-            elif features[k].dtype == np.int64:
-                features[k] = features[k].astype(np.int16)
-        np.savez_compressed(f'{self.precompute}/{idx}', features)
-
-    def load_features(self, idx):
-        if self.precomputed is not None:
-            true_idx = self.true_indexes[idx]
-            features = np.load(f'{self.precomputed}/{true_idx}.npz', allow_pickle=True)['arr_0'].item()
-            for k in features.keys():
-                if features[k].dtype == np.float16:
-                    features[k] = features[k].astype(np.float32)
-                elif features[k].dtype == np.int16:
-                    features[k] = features[k].astype(np.int64)
+    def load_features(self, row):
+        if self.features_root is not None:
+            wt_features = load_features(self.features_root, row['wt_code'])
+            mut_features = load_features(self.features_root, row['mut_code'])
+            features = {
+                'dT': row['dT'].astype(np.float32),
+                'pH': row['pH'].astype(np.float32)
+            }
+            for k, v in wt_features.items():
+                features[f'wt_{k}'] = v
+            for k, v in mut_features.items():
+                features[f'mut_{k}'] = v
         else:
-            features = self.calc_features(idx)
+            features = self.calc_features(row)
         return features
 
     def __iter__(self):
@@ -115,4 +96,4 @@ class ProteinMutations(torch.utils.data.IterableDataset):
 
     def __next__(self):
         idx = random.randint(0, len(self.df) - 1)
-        return self.load_features(idx)
+        return self.load_features(self.df.iloc[idx])

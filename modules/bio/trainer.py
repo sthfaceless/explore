@@ -80,7 +80,7 @@ class ProteinMutationTrainer(pl.LightningModule):
         return self.shared_step(batch)
 
     def configure_optimizers(self):
-        opt = torch.optim.Adam(params=self.parameters(), lr=self.learning_rate, betas=(0.5, 0.9))
+        opt = torch.optim.Adam(params=self.parameters(), lr=self.learning_rate, betas=(0.9, 0.99))
         scheduler = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.learning_rate,
                                                         pct_start=3 / self.epochs, div_factor=2.0,
                                                         final_div_factor=1 / (2.0 * self.min_lr_rate),
