@@ -20,7 +20,7 @@ class PCD2Mesh(pl.LightningModule):
                  continuous_reg=1e-2,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
                  curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
-                 disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1.0, lap_reg=0.5, amips_weight=1e-5,
+                 disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5, amips_weight=1e-5,
                  encoder_grids=(32, 16, 8), batch_size=16, pe_powers=16, noise=0.02):
         super(PCD2Mesh, self).__init__()
         self.save_hyperparameters(ignore=['dataset', 'clearml', 'timelapse'])
@@ -118,7 +118,7 @@ class PCD2Mesh(pl.LightningModule):
             raise NotImplementedError
 
         self.disc = disc
-        self.sdf_disc = SDFDiscriminator(input_dim=1 + self.pos_features, hidden_dims=disc_dims, with_norm=with_norm)
+        self.sdf_disc = SDFDiscriminator(input_dim=1 + self.pos_features, hidden_dims=disc_dims, with_norm=True)
 
         # state variables
         self.volume_refinement = False
@@ -146,6 +146,15 @@ class PCD2Mesh(pl.LightningModule):
         signs = kaolin.ops.mesh.check_sign(vertices, faces, points)
         sdf = dists * (signs.type_as(dists) - 0.5) * 2 * (-1)  # inside is -1
         return sdf
+
+    @torch.no_grad()
+    def get_mesh_udf(self, points, vertices, faces, pcd=None, num_samples=5000):
+        if faces.numel() == 0 or points.numel() == 0:
+            return torch.zeros(1, len(points)).type_as(points)
+        if pcd is None:
+            pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces, num_samples=num_samples)
+        dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
+        return dists
 
     def calculate_sdf_loss(self, tet_vertexes, tet_sdf, vertices, faces, true_sdf=None):
         if tet_vertexes.numel() == 0 or faces.numel() == 0:
@@ -185,12 +194,6 @@ class PCD2Mesh(pl.LightningModule):
             vertices = vertices.unsqueeze(0)
             # sample pcd for train
             pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples)
-            # pretrain sphere
-            # if not self.volume_refinement:
-            #     pcd_noised = 2 * (torch.rand_like(pcd) - 0.5)
-            #     pcd_noised = pcd_noised / torch.norm(pcd_noised, dim=-1, keepdim=True) * 0.5
-            #     pcd_noised += torch.randn_like(pcd_noised) * self.noise
-            # else:
             pcd_noised = pcd + torch.randn_like(pcd) * self.noise
             pcd_noised = torch.clamp(pcd_noised, min=-1.0, max=1.0)
 
@@ -232,14 +235,6 @@ class PCD2Mesh(pl.LightningModule):
                                   epoch=self.global_step)
         ############################################################
 
-        # # if we're training only on SDF
-        # if not self.volume_refinement and is_train:
-        #     # true_sdf = self.get_mesh_sdf(tet_vertexes, vertices, faces)
-        #     true_sdf = calculate_sdf(tet_vertexes, vertices, faces, true_sdf=true_sdf)
-        #     # true_sdf = torch.norm(tet_vertexes, dim=-1) - 0.5
-        #     out['sdf_loss'] = torch.mean((true_sdf - tet_sdf) ** 2)
-        #     out['loss'] = out['sdf_loss']
-
         ### STEP 2.1 --- First surface refinement
         # encode same tetrahedras with another volume encoder
         grids = self.ref_points_encoder.voxelize(pcd_noised, pe_features)
@@ -268,14 +263,14 @@ class PCD2Mesh(pl.LightningModule):
             out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
             out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
             out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True), self.grid_res)
-            # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-            # out['amips_loss'] = kaolin.metrics.tetmesh.amips(
-            #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+            tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
+            out['amips_loss'] = kaolin.metrics.tetmesh.amips(
+                tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
         else:
             out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
             out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
             out['delta_sdf'] = torch.tensor(0).type_as(delta_s)
-            # out['amips_loss'] = torch.tensor(0).type_as(delta_v)
+            out['amips_loss'] = torch.tensor(0).type_as(delta_v)
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -361,10 +356,10 @@ class PCD2Mesh(pl.LightningModule):
                 out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
                 out['delta_laplace'] += delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
                 out['delta_sdf'] += sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
-                                                  self.grid_res / 2 ** self.n_volume_division)
-                # tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-                # out['amips_loss'] += kaolin.metrics.tetmesh.amips(
-                #     tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
+                                                  self.grid_res * 2 ** self.n_volume_division)
+                tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
+                out['amips_loss'] += kaolin.metrics.tetmesh.amips(
+                    tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes))[0]
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
@@ -435,11 +430,11 @@ class PCD2Mesh(pl.LightningModule):
 
                 # learnable surface subdivision predicts changed vertices and alpha smoothing factor
                 if self.ref == 'gcn':
-                    surface_ref_out = self.ref2(pos_features[0], get_mesh_edges(mesh_faces))
+                    surface_ref_out = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
                 elif self.ref == 'conv':
-                    surface_ref_out = self.ref2(mesh_vertices, pos_features)[0]
+                    surface_ref_out = self.surface_ref(mesh_vertices, pos_features)[0]
                 elif self.ref == 'linear':
-                    surface_ref_out = self.ref2(pos_features)[0]
+                    surface_ref_out = self.surface_ref(pos_features)[0]
                 else:
                     raise NotImplementedError
                 delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res), \
@@ -471,20 +466,20 @@ class PCD2Mesh(pl.LightningModule):
                                          epoch=self.global_step)
                 ############################################################
 
-        ### REGULARIZATION --- delta vertexes and laplace
+        ### REGULARIZATION --- delta vertexes, sdf and laplace
         if self.volume_refinement and is_train:
             out['loss'] += out['delta_vertex'] * self.delta_weight
             out['loss'] += out['delta_laplace'] * self.lap_reg
             out['loss'] += out['delta_sdf'] * self.sdf_value_reg
-            # out['loss'] += out['amips_loss'] * self.amips_weight
+            out['loss'] += out['amips_loss'] * self.amips_weight
 
         ### LOSS --- Chamfer loss and smoothness normal loss
         if self.volume_refinement and is_train:
             if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
                 # calculate pcd chamfer loss
                 face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(mesh_vertices, mesh_faces), nan=1.0)
-                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples,
-                                                                    areas=face_areas)
+                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces,
+                                                                    self.chamfer_samples * 10, areas=face_areas)
                 chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
                 normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
 
@@ -531,67 +526,74 @@ class PCD2Mesh(pl.LightningModule):
             indexes = torch.arange(len(curvatures)).type_as(curvatures).long()[curvatures >= self.curvature_threshold]
             if indexes.numel() > 0:
                 indexes = indexes[torch.randint(0, len(indexes), (self.curvature_samples,)).type_as(indexes).long()]
-
+                selected_vertices = vertices[indexes]
                 # create uniform grid nearby selected point
                 grid = torch.stack(torch.meshgrid(
                     torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
                     torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
                     torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices), ), dim=-1) * self.disc_sdf_scale
-                grids = (vertices[indexes] + torch.randn_like(vertices[indexes]) * self.disc_v_noise) \
+                grids = (selected_vertices + torch.randn_like(selected_vertices) * self.disc_v_noise) \
                             .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
 
                 # extract mesh output of generator
                 mesh_vertices, mesh_faces, sdf_grids = out['mesh_vertices'], out['mesh_faces'], out['sdf_grids']
-                pred_sdf_features, true_sdf_features = [], []
 
-                # generate true sdf and positional features for each grid
-                for grid_idx in range(len(grids)):
-                    # make each grid as n points as expected by models
-                    grid_points = grids[grid_idx].view(1, self.disc_sdf_grid ** 3, 3)
-                    pos_features = torch.cat([grid_points, get_positional_encoding(grid_points, self.pe_powers * 3),
-                                              self.sdf_points_encoder.devoxelize(grid_points, sdf_grids)], dim=-1) \
-                        .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, self.pos_features)
-                    true_grid_sdf = calculate_sdf(grid_points, vertices.unsqueeze(0), faces, true_sdf=true_sdf)[0] \
-                        .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                    true_sdf_features.append(torch.cat([true_grid_sdf, pos_features], dim=-1))
-                    if mesh_faces.numel() > 0:
-                        pred_grid_sdf = calculate_sdf(grid_points, mesh_vertices, mesh_faces)[0] \
-                            .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                        pred_sdf_features.append(torch.cat([pred_grid_sdf, pos_features], dim=-1))
-
-                    ####################### DEBUG CODE #######################
-                    if self.debug_state:
-                        self.lg.log_tensor(true_grid_sdf, 'True sdf grid at high curvature')
-                        tsp = grid_points.view(-1, 3)
-                        tsg = true_grid_sdf.view(-1, 1)
-                        self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]), f'true_sdf_grid_{grid_idx}',
-                                              color=tn(torch.ones(len(tsp), 3).type_as(tsg)
-                                                       * tsg.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
-                        if mesh_faces.numel() > 0:
-                            self.lg.log_tensor(pred_grid_sdf, 'Predicted sdf grid at high curvature')
-                            psg = pred_grid_sdf.view(-1, 1)
-                            self.lg.log_scatter3d(tn(tsp[:, 0]), tn(tsp[:, 1]), tn(tsp[:, 2]),
-                                                  f'pred_sdf_grid_{grid_idx}',
-                                                  color=tn(torch.ones(len(tsp), 3).type_as(tsg)
-                                                           * psg.clamp(min=-0.5, max=0.5) + 0.5),
-                                                  epoch=self.global_step)
-                    ############################################################
-
-                sdf_features = torch.stack(true_sdf_features, dim=0)
-                if len(pred_sdf_features) > 0:
-                    sdf_features = torch.cat([sdf_features, torch.stack(pred_sdf_features, dim=0)], dim=0)
-                disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
-                if len(pred_sdf_features) > 0:
-                    out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_sdf_features)]) ** 2)
-                    out['loss'] += out['adv_loss'] * self.disc_weight
-                    out['disc_loss'] = torch.mean(disc_preds[:len(pred_sdf_features)] ** 2) \
-                                       + torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
+                # create grid features
+                grid_points = grids.view(self.curvature_samples, self.disc_sdf_grid ** 3, 3)
+                pos_features = torch.cat([grid_points, get_positional_encoding(grid_points, self.pe_powers * 3),
+                                          self.sdf_points_encoder.devoxelize(grid_points, sdf_grids)], dim=-1) \
+                    .view(self.curvature_samples, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid,
+                          self.pos_features)
+                true_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0),
+                                                               vertices.unsqueeze(0),
+                                                               get_close_faces(selected_vertices[grid_idx],
+                                                                               vertices, faces, self.disc_sdf_scale),
+                                                               num_samples=self.chamfer_samples) \
+                                            .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
+                                             for grid_idx in range(self.curvature_samples)], dim=0)
+                true_udf_features = torch.cat([pos_features, true_grid_udf], dim=-1)
+                if mesh_faces.numel() > 0:
+                    pred_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0), mesh_vertices,
+                                                                   get_close_faces(selected_vertices[grid_idx],
+                                                                                   mesh_vertices[0], mesh_faces,
+                                                                                   self.disc_sdf_scale),
+                                                                   num_samples=self.chamfer_samples) \
+                                                .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
+                                                 for grid_idx in range(self.curvature_samples)], dim=0)
+                    pred_udf_features = torch.cat([pos_features, pred_grid_udf], dim=-1)
                 else:
-                    out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_sdf_features):]) ** 2)
+                    pred_udf_features = []
+
+                # concat true and pred udf features to one batch for discriminator
+                sdf_features = true_udf_features
+                if len(pred_udf_features) > 0:
+                    sdf_features = torch.cat([sdf_features, pred_udf_features], dim=0)
+                disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
+                if len(pred_udf_features) > 0:
+                    out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
+                    out['loss'] += out['adv_loss'] * self.disc_weight
+                    out['disc_loss'] = torch.mean(disc_preds[:len(pred_udf_features)] ** 2) \
+                                       + torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
+                else:
+                    out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
 
                 ####################### DEBUG CODE #######################
                 if self.debug_state:
                     self.lg.log_tensor(curvatures, 'Calculated gaussian curvatures')
+                    self.lg.log_tensor(disc_preds, 'Discriminator predictions')
+                    self.lg.log_tensor(true_grid_udf, 'True udf grid at high curvature')
+                    tup = grid_points[0].view(-1, 3)
+                    tug = true_grid_udf[0].view(-1, 1)
+                    self.lg.log_scatter3d(tn(tup[:, 0]), tn(tup[:, 1]), tn(tup[:, 2]), f'true_udf_grid_{0}',
+                                          color=tn(torch.ones(len(tup), 3).type_as(tug)
+                                                   * tug.clamp(min=-0.5, max=0.5) + 0.5), epoch=self.global_step)
+                    if mesh_faces.numel() > 0:
+                        self.lg.log_tensor(pred_grid_udf, 'Predicted sdf grid at high curvature')
+                        pug = pred_grid_udf[0].view(-1, 1)
+                        self.lg.log_scatter3d(tn(tup[:, 0]), tn(tup[:, 1]), tn(tup[:, 2]), f'pred_udf_grid_{0}',
+                                              color=tn(torch.ones(len(tup), 3).type_as(tug)
+                                                       * pug.clamp(min=-0.5, max=0.5) + 0.5),
+                                              epoch=self.global_step)
                 ############################################################
 
         for k, v in out.items():

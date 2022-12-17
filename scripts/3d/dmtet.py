@@ -24,20 +24,20 @@ def get_parser():
     # Training settings
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for decoder and nerf")
     parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Minimal learning rate ratio")
-    parser.add_argument("--steps", default=[1000, 20000, 50000, 100000], nargs='+', type=int,
+    parser.add_argument("--steps", default=[500, 4000, 6000, 10000], nargs='+', type=int,
                         help="sdf train --- surface train --- adversarial train --- subdivision train")
-    parser.add_argument("--batch_size", default=8, type=int, help="Batch size in training")
+    parser.add_argument("--batch_size", default=1, type=int, help="Batch size in training")
     parser.add_argument("--validations", default=100, type=int, help="Total numbers of validations during training")
     parser.add_argument("--debug_interval", default=-1, type=int, help="Interval of steps to debug model")
-    parser.add_argument("--acc_grads", default=8, type=int,
+    parser.add_argument("--acc_grads", default=10, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
     parser.add_argument("--samples_epoch", default=5, type=int, help="Samples of generator in one epoch")
     parser.add_argument("--img_size", default=128, type=int, help="Image size to train and render")
 
     # Model settings
-    parser.add_argument("--encoder_dims", default=[64, 128, 256], nargs='+', type=int,
+    parser.add_argument("--encoder_dims", default=[8, 64, 128, 256], nargs='+', type=int,
                         help="Hidden dims for volume encoder")
-    parser.add_argument("--encoder_grids", default=[32, 16, 8], nargs='+', type=int,
+    parser.add_argument("--encoder_grids", default=[64, 32, 16, 8], nargs='+', type=int,
                         help="Grid size for volume encoder")
     parser.add_argument("--sdf_dims", default=[256, 256, 128, 64], nargs='+', type=int, help="Hidden dims for SDF mlp")
     parser.add_argument("--disc_dims", default=[32, 64, 128, 256], nargs='+', type=int,
@@ -46,28 +46,30 @@ def get_parser():
                         help="Graph Convolutional refinement conv dims")
     parser.add_argument("--gcn_hidden", default=[128, 64], nargs='+', type=int,
                         help="Graph Convolutional refinement linear dims")
-    parser.add_argument("--grid", default=64, type=int, help="tetrahedras grid resolution")
+    parser.add_argument("--grid", default=35, type=int, help="tetrahedras grid resolution")
     parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
     parser.add_argument("--res_features", default=64, type=int, help="Num of features that will traverse over layers")
     parser.add_argument("--ref", default='gcn', help="What kind of network to use for refinement [gcn, conv, linear]")
     parser.add_argument("--disc", action='store_true')
 
-    parser.add_argument("--disc_weight", default=10, type=float, help="Weight for discriminator loss")
-    parser.add_argument("--chamfer_weight", default=500, type=float, help="Weight for chamfer distance")
-    parser.add_argument("--normal_weight", default=1e-6, type=float, help="Weight for faces normal reg")
-    parser.add_argument("--delta_weight", default=1, type=float, help="Weight for vertexes delta change reg")
-    parser.add_argument("--delta_scale", default=1 / 2, type=float, help="What value of grid resolution it could move")
-    parser.add_argument("--sdf_weight", default=0.4, type=float, help="Weight for sdf prediction reg")
+    parser.add_argument("--disc_weight", default=1.0, type=float, help="Weight for discriminator loss")
+    parser.add_argument("--chamfer_weight", default=100, type=float, help="Weight for chamfer distance")
+    parser.add_argument("--normal_weight", default=1e-5, type=float, help="Weight for faces normal reg")
+    parser.add_argument("--delta_weight", default=0.1, type=float, help="Weight for vertexes delta change reg")
+    parser.add_argument("--delta_scale", default=4.0, type=float, help="What value of grid resolution it could move")
+    parser.add_argument("--sdf_weight", default=0.0, type=float, help="Weight for sdf prediction reg")
     parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
-    parser.add_argument("--sdf_value_reg", default=0.01, type=float, help="Regularization for delta sdf values")
-    parser.add_argument("--sdf_sign_reg", default=1e-4, type=float, help="Regularization for close tetrahedras sdf sign")
+    parser.add_argument("--sdf_value_reg", default=0.1, type=float, help="Regularization for delta sdf values")
+    parser.add_argument("--sdf_sign_reg", default=0.1, type=float, help="Regularization for close tetrahedras sdf sign")
+    parser.add_argument("--amips_weight", default=1e-5, type=float, help="Weight for amips loss "
+                                                                         "(trying to avoid needle like tetrahedras)")
     parser.add_argument("--continuous_reg", default=0.01, type=float,
-                        help="Ensure that close tetrahedras has same similar faces")
+                        help="[Currently not used] Ensure that close tetrahedras has similar faces")
 
-    parser.add_argument("--sdf_clamp", default=0.03, type=float, help="Max absolute true sdf value")
+    parser.add_argument("--sdf_clamp", default=1.0, type=float, help="Max absolute true sdf value")
     parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
                         help="Vertices gaussian curvature threshold")
-    parser.add_argument("--disc_sdf_scale", default=0.1, type=float, help="SDF discriminator grid size")
+    parser.add_argument("--disc_sdf_scale", default=0.05, type=float, help="SDF discriminator grid size")
     parser.add_argument("--curvature_samples", default=10, type=int, help="SDF discriminator vertex samples")
     parser.add_argument("--disc_sdf_grid", default=16, type=int, help="SDF discriminator grid resolution")
     parser.add_argument("--disc_v_noise", default=1e-3, type=float, help="SDF discriminator origin vertex noise")
@@ -109,6 +111,7 @@ if __name__ == "__main__":
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
+                     amips_weight=args.amips_weight,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
                      gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,

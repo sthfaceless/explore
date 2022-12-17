@@ -424,7 +424,9 @@ def smoothness_loss(vertices, faces):
 def sdf_sign_reg(sdf, edges):
     if sdf.numel() == 0 or edges.numel() == 0:
         return torch.tensor(0).type_as(sdf)
-    v0, v1 = edges[0], edges[1]
+    edges = edges.transpose(0, 1)
+    edges = edges[torch.sign(sdf[edges[:, 0]]) != torch.sign(sdf[edges[:, 1]])]
+    v0, v1 = edges[:, 0], edges[:, 1]
     loss = -torch.mean(torch.where(sdf[v0] > 0, torch.log(torch.sigmoid(sdf[v1]) + 1e-7),
                                    torch.log(1 - torch.sigmoid(sdf[v1]) + 1e-7))
                        + torch.where(sdf[v1] > 0, torch.log(torch.sigmoid(sdf[v0]) + 1e-7),
@@ -459,3 +461,9 @@ def continuous_mesh_reg(vertices, faces, vertexes, tets):
     indexes = torch.arange(len(tet_faces) - 1).type_as(tet_faces)[pair_mask]
     indexes = torch.stack([indexes, indexes + 1], dim=1).view(-1)
     tet_faces = tet_faces[indexes].view(-1, 2) % m
+
+
+def get_close_faces(point, vertices, faces, dist=0.1):
+    close_vertices = torch.abs(vertices - point.unsqueeze(0)) < dist
+    face_mask = close_vertices[faces[:, 0]] | close_vertices[faces[:, 1]] | close_vertices[faces[:, 2]]
+    return faces[face_mask]
