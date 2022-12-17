@@ -1,4 +1,5 @@
 import mesh_to_sdf
+import torch
 import trimesh
 from sklearn.neighbors import KDTree
 
@@ -125,7 +126,7 @@ def voxelize_points3d(points, features, grid_res, mask=None):
 
 
 def devoxelize_points3d(points, grid, mask=None):
-    b, grid_res, _, _, dim = grid.shape
+    b_grid, grid_res, _, _, dim = grid.shape
     b, n_points, _ = points.shape
     points = points.view(b * n_points, 3)
     # retrieve values in grid scale
@@ -136,6 +137,8 @@ def devoxelize_points3d(points, grid, mask=None):
     x, y, z = torch.tensor_split(torch.clamp(torch.floor(grid_points), min=0, max=grid_res - 2).long(), 3, dim=-1)
     x, y, z = x.squeeze(-1), y.squeeze(-1), z.squeeze(-1)
     bb = torch.arange(b).type_as(x).view(b, 1).repeat(1, n_points).view(b * n_points)
+    if b_grid < b:
+        bb = torch.zeros_like(bb)
     # apply trilinear interpolation for each point
     xd, yd, zd = (xval - x.type_as(xval)).unsqueeze(-1), (yval - y.type_as(yval)).unsqueeze(-1), (
             zval - z.type_as(zval)).unsqueeze(-1)

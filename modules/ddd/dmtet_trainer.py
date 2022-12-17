@@ -483,18 +483,6 @@ class PCD2Mesh(pl.LightningModule):
                 chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
                 normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
 
-                # calculate mesh normal loss with finding normal for each point in pcd
-                # pred_normals = kaolin.ops.mesh.face_normals(
-                #     kaolin.ops.mesh.index_vertices_by_faces(mesh_vertices, mesh_faces), unit=True)[0]
-                # pred_normals = pred_normals[faces_ids[0]]
-                #
-                # # finding normal of the closest points
-                # dist, point_ids = kaolin.metrics.pointcloud.sided_distance(pred_pcd, pcd)
-                # true_normals = kaolin.ops.mesh.face_normals(
-                #     kaolin.ops.mesh.index_vertices_by_faces(vertices, faces), unit=True)[0]
-                # true_normals = true_normals[true_faces_ids[0, point_ids[0]]]
-                # normal_loss = torch.mean(1 - torch.abs(torch.sum(pred_normals * true_normals, dim=-1)))
-
                 ####################### DEBUG CODE #######################
                 if self.debug_state:
                     self.lg.log_tensor(face_areas, 'Face areas of predicted mesh')
