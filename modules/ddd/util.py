@@ -467,6 +467,6 @@ def continuous_mesh_reg(vertices, faces, vertexes, tets):
 
 
 def get_close_faces(point, vertices, faces, dist=0.1):
-    close_vertices = torch.abs(vertices - point.unsqueeze(0)) < dist
+    close_vertices = torch.all(torch.abs(vertices - point.unsqueeze(0)) < dist, dim=-1)
     face_mask = close_vertices[faces[:, 0]] | close_vertices[faces[:, 1]] | close_vertices[faces[:, 2]]
     return faces[face_mask]
