@@ -1,5 +1,4 @@
 import mesh_to_sdf
-import torch
 import trimesh
 from sklearn.neighbors import KDTree
 
@@ -429,11 +428,14 @@ def sdf_sign_reg(sdf, edges):
         return torch.tensor(0).type_as(sdf)
     edges = edges.transpose(0, 1)
     edges = edges[torch.sign(sdf[edges[:, 0]]) != torch.sign(sdf[edges[:, 1]])]
+    if edges.numel() == 0:
+        return torch.tensor(0).type_as(sdf)
     v0, v1 = edges[:, 0], edges[:, 1]
-    loss = -torch.mean(torch.where(sdf[v0] > 0, torch.log(torch.sigmoid(sdf[v1]) + 1e-7),
-                                   torch.log(1 - torch.sigmoid(sdf[v1]) + 1e-7))
-                       + torch.where(sdf[v1] > 0, torch.log(torch.sigmoid(sdf[v0]) + 1e-7),
-                                     torch.log(1 - torch.sigmoid(sdf[v0]) + 1e-7)))
+    loss = -torch.mean(torch.nan_to_num(torch.where(sdf[v0] > 0, torch.log(torch.sigmoid(sdf[v1]) + 1e-6),
+                                                    torch.log(1 - torch.sigmoid(sdf[v1]) + 1e-6))
+                                        + torch.where(sdf[v1] > 0, torch.log(torch.sigmoid(sdf[v0]) + 1e-6),
+                                                      torch.log(1 - torch.sigmoid(sdf[v0])) + 1e-6),
+                                        nan=0, posinf=0, neginf=0))
     return loss
 
 
