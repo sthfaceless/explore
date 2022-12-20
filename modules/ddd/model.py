@@ -1,7 +1,6 @@
 from builtins import ModuleNotFoundError
 
 import torch.nn
-import torch_geometric
 
 from modules.common.model import *
 from modules.ddd.util import *
@@ -211,12 +210,12 @@ class GCNConv(torch.nn.Module):
         super(GCNConv, self).__init__()
         self.gcn1 = torch.nn.Module()
         self.gcn1.input = torch.nn.Linear(input_dim, gcn_dims[0])
-        self.gcn1.first = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
-        self.gcn1.second = torch_geometric.nn.GCNConv(gcn_dims[0], gcn_dims[0])
+        self.gcn1.first = GraphConv(gcn_dims[0], gcn_dims[0])
+        self.gcn1.second = GraphConv(gcn_dims[0], gcn_dims[0])
         self.gcn2 = torch.nn.Module()
         self.gcn2.input = torch.nn.Linear(gcn_dims[0], gcn_dims[1])
-        self.gcn2.first = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
-        self.gcn2.second = torch_geometric.nn.GCNConv(gcn_dims[1], gcn_dims[1])
+        self.gcn2.first = GraphConv(gcn_dims[1], gcn_dims[1])
+        self.gcn2.second = GraphConv(gcn_dims[1], gcn_dims[1])
         self.gcn_out = torch.nn.Linear(gcn_dims[1], mlp_dims[0])
 
         self.layer1 = torch.nn.Linear(mlp_dims[0], mlp_dims[1])

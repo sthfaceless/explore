@@ -147,6 +147,10 @@ def exists(*args):
     return exist
 
 
+def normalize_vector(v):
+    return v / torch.norm(v, p=2, dim=-1, keepdim=True)
+
+
 def run_async(fun, *args, **kwargs):
     thread = threading.Thread(target=fun, args=args, kwargs=kwargs)
     thread.start()

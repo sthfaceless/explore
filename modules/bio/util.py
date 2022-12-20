@@ -24,7 +24,7 @@ def agg_ph(df, base_ph=8.0):
 
 
 def calc_features(row, main_row, pdb_root, atoms_mapper=None, acid_mapper=None,
-                  max_atoms=3500, seq_len=400, pe_features=16):
+                  max_atoms=3500, seq_len=401, pe_features=16):
     if atoms_mapper is None:
         atoms_mapper = {'ND2': 0, 'CZ3': 1, 'SD': 2, 'NH1': 3, 'SG': 4, 'CG1': 5, 'OG1': 6, 'CB': 7, 'CH2': 8,
                         'CE': 9, 'OE1': 10, 'CZ': 11, 'OE2': 12, 'CZ2': 13, 'C': 14, 'OH': 15, 'CG': 16,

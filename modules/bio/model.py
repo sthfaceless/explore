@@ -6,7 +6,7 @@ from modules.ddd.util import *
 
 class PointRegression(torch.nn.Module):
 
-    def __init__(self, input_dim, hidden_dim=256, n_blocks=8, out_dims=(512, 256, 128), seq_len=400,
+    def __init__(self, input_dim, hidden_dim=256, n_blocks=8, out_dims=(512, 256, 128), seq_len=401,
                  num_heads=8, dropout=0.0, agg_dim=4):
         super(PointRegression, self).__init__()
         self.seq_len = seq_len

@@ -405,3 +405,49 @@ class ResBlockConv1D(torch.nn.Module):
 
     def forward(self, x):
         return torch.nn.functional.gelu((self.block(x) + x) / 2 ** (1 / 2))
+
+
+class GraphConv(torch.nn.Module):
+
+    def __init__(self, in_features, out_features, use_sparse=False):
+        super(GraphConv, self).__init__()
+        self.layer = torch.nn.Linear(in_features, out_features)
+        self.use_sparse = use_sparse
+
+    def forward(self, vertices, edges, self_loop=True, normalize=True):
+        # vertices - (n, features)
+        # edges (2, edges)
+        n_vertices, features = vertices.shape
+        _, n_edges = edges.shape
+
+        # add self loops
+        if self_loop:
+            idx = torch.arange(n_vertices).type_as(edges)
+            self_edges = torch.stack([idx, idx], dim=0)
+            edges = torch.cat([edges, self_edges], dim=1)
+            n_edges += n_vertices
+
+        if self.use_sparse:
+            # create adjacent matrix of graph
+            adj = torch.sparse_coo_tensor(edges, torch.ones(n_edges).type_as(vertices),
+                                          (n_vertices, n_vertices), dtype=vertices.dtype, device=vertices.device)
+            # aggregate features for each vertex based on it's neighbourhood
+            agg = torch.sparse.mm(adj, vertices)
+
+            # normalize calculated sum by inverse sqrt of vertex degree
+            if normalize:
+                D = torch.sparse.sum(adj, dim=-1).to_dense() ** (-1 / 2)
+                agg = agg * D.unsqueeze(-1)
+        else:
+            agg = torch.zeros_like(vertices)
+            neighbours = vertices[edges[1]]
+            agg = agg.index_put_((edges[0],), neighbours, accumulate=True)
+
+            if normalize:
+                d = torch.zeros_like(vertices)
+                d = d.index_put_((edges[0],), torch.ones_like(neighbours), accumulate=True)
+                agg = agg * (d.clamp(min=1.0) ** (-1 / 2))
+
+        # apply linear transformation on output
+        out = self.layer(agg)
+        return out

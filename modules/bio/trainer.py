@@ -9,7 +9,7 @@ class ProteinMutationTrainer(pl.LightningModule):
 
     def __init__(self, train_dataset=None, val_dataset=None, encoder_dims=(32, 64, 128), encoder_grids=(32, 16, 8),
                  encoder_dim=128, learning_rate=1e-4, min_lr_rate=0.5, epochs=30, steps=1000, batch_size=32,
-                 unique_atoms=36, atoms_embedding_dim=128, generated_features=48, seq_len=400, regression_blocks=8,
+                 unique_atoms=36, atoms_embedding_dim=128, generated_features=48, seq_len=401, regression_blocks=8,
                  regression_dim=256, seq_agg=4, regression_out_dims=(512, 256, 128), acids=20, acid_embedding_dim=128,
                  pe_powers=16):
         super(ProteinMutationTrainer, self).__init__()

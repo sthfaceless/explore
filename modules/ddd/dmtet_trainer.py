@@ -6,13 +6,14 @@ import pytorch_lightning as pl
 import kaolin
 from modules.common.trainer import SimpleLogger
 from modules.ddd.model import *
-from modules.ddd.render_util import render_mesh
+from modules.ddd.rast_util import Rasterizer
 
 
 class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
-                 learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True,
+                 learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True, use_rasterizer=True,
+                 n_views=8, view_resolution=256,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
@@ -28,6 +29,12 @@ class PCD2Mesh(pl.LightningModule):
         self.debug = debug_interval > 0
         self.debug_interval = debug_interval
         self.debug_state = False
+
+        self.use_rasterizer = use_rasterizer
+        self.n_views = n_views
+        self.view_resolution = view_resolution
+        if use_rasterizer:
+            self.rasterizer = Rasterizer(torch.device('cuda:0'))
 
         self.timelapse = timelapse
         self.lg = SimpleLogger(clearml)
@@ -297,19 +304,21 @@ class PCD2Mesh(pl.LightningModule):
         if n_volume_division is None:
             n_volume_division = self.n_volume_division
         not_subdivided_vertexes, not_subdivided_sdf, not_subdivided_tets = [], [], []
-        for div_id in range(n_volume_division):
-            # we have to remove non-surface tetrahedras as volume subdivision is expensive
-            tet_vertexes, tetrahedras, tet_sdf, tet_features, __not_subdivided_vertexes, __not_subdivided_tets, \
-            __not_subdivided_sdf = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
-                                                                              tet_sdf[0], tet_features[0]))
-            not_subdivided_vertexes.append(__not_subdivided_vertexes)
-            not_subdivided_sdf.append(__not_subdivided_sdf)
-            not_subdivided_tets.append(__not_subdivided_tets)
+        if len(get_only_surface_tetrahedras(tetrahedras, tet_sdf[0])) <= 0.1 * len(tetrahedras):
 
-            # volume subdivision
-            tet_vertexes, tetrahedras, out_features = kaolin.ops.mesh.subdivide_tetmesh(
-                tet_vertexes, tetrahedras, torch.cat([tet_sdf.unsqueeze(-1), tet_features], dim=-1))
-            tet_sdf, tet_features = out_features[:, :, 0], out_features[:, :, 1:]
+            for div_id in range(n_volume_division):
+                # we have to remove non-surface tetrahedras as volume subdivision is expensive
+                tet_vertexes, tetrahedras, tet_sdf, tet_features, __not_subdivided_vertexes, __not_subdivided_tets, \
+                __not_subdivided_sdf = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
+                                                                                  tet_sdf[0], tet_features[0]))
+                not_subdivided_vertexes.append(__not_subdivided_vertexes)
+                not_subdivided_sdf.append(__not_subdivided_sdf)
+                not_subdivided_tets.append(__not_subdivided_tets)
+
+                # volume subdivision
+                tet_vertexes, tetrahedras, out_features = kaolin.ops.mesh.subdivide_tetmesh(
+                    tet_vertexes, tetrahedras, torch.cat([tet_sdf.unsqueeze(-1), tet_features], dim=-1))
+                tet_sdf, tet_features = out_features[:, :, 0], out_features[:, :, 1:]
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -558,8 +567,9 @@ class PCD2Mesh(pl.LightningModule):
                     sdf_features = torch.cat([sdf_features, pred_udf_features], dim=0)
                 disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
                 if len(pred_udf_features) > 0:
-                    out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
-                    out['loss'] += out['adv_loss'] * self.disc_weight
+                    if self.adversarial_training:
+                        out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
+                        out['loss'] += out['adv_loss'] * self.disc_weight
                     out['disc_loss'] = torch.mean(disc_preds[:len(pred_udf_features)] ** 2) \
                                        + torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
                 else:
@@ -639,15 +649,22 @@ class PCD2Mesh(pl.LightningModule):
                 self.lg.log_mesh(tn(v), tn(f), f'rendered_mesh_{batch_idx}', epoch=self.global_step)
         ############################################################
 
-        rendered_images = [render_mesh(v, f, device=self.device) for v, f in zip(mesh_vertices, mesh_faces)
-                           if len(f) > 0]
-        if len(rendered_images) > 0:
-            images = np.stack(rendered_images, axis=0)
-            b, views, h, w, _ = images.shape
-            images = np.moveaxis(images.reshape((b, 2, views // 2, h, w, 3)), 1, 3).reshape(
-                (b, 2 * h, views // 2 * w, 3))
-            images = [images[idx] for idx in range(len(images))]
-            self.lg.log_images(images, 'rendered_mesh', self.global_step)
+        if self.use_rasterizer:
+            rendered_images = []
+            for v, f in zip(mesh_vertices, mesh_faces):
+                poses = get_random_poses(torch.ones(self.n_views).type_as(v) * 2.0)
+                projections = projection_matrix(near=torch.ones(self.n_views).type_as(v) * 1.0,
+                                                far=torch.ones(self.n_views).type_as(v) * 3.0)
+                out = self.rasterizer.rasterize(v, f, poses, projections, res=self.view_resolution)
+                rendered_images.append(tn(out[..., 3].unsqueeze(-1).repeat(1, 1, 1, 3).bool().float() * 255)
+                                       .astype(np.uint8))
+            if len(rendered_images) > 0:
+                images = np.stack(rendered_images, axis=0)
+                b, views, h, w, _ = images.shape
+                images = np.moveaxis(images.reshape((b, 2, views // 2, h, w, 3)), 1, 3).reshape(
+                    (b, 2 * h, views // 2 * w, 3))
+                images = [images[idx] for idx in range(len(images))]
+                self.lg.log_images(images, 'rendered_mesh', self.global_step)
 
     def validation_step(self, batch, batch_idx):
         loss = functools.reduce(lambda l1, l2: l1 + l2,
@@ -664,7 +681,7 @@ class PCD2Mesh(pl.LightningModule):
             return loss
         # discriminator optimization
         if optimizer_idx == 1:
-            if not self.adversarial_training:
+            if not self.disc or not self.volume_refinement:
                 return None
             outs = [self.shared_step(v, f, optimizer_idx, true_sdf=sdf)
                     for v, f, sdf in zip(batch['vertices'], batch['faces'], batch['sdf'])]

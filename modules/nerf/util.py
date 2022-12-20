@@ -5,6 +5,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from modules.common.util import *
+from modules.ddd.util import *
 
 
 def build_nerf_weights(layers, shapes, raw):
@@ -20,58 +21,6 @@ def build_nerf_weights(layers, shapes, raw):
         offset += size
 
     return weights
-
-
-def get_images_rays(h, w, focal, poses):
-    y, x = torch.meshgrid(torch.arange(h).type_as(focal), torch.arange(w).type_as(focal), indexing='ij')
-    x = (x + 0.5 - w / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * w)
-    y = (y + 0.5 - h / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * h)
-    dirs = torch.stack([x, -y, -torch.ones_like(x)], dim=-1)  # b h w 3
-    ray_o = poses[..., -1]  # b 3
-    ray_d = torch.matmul(dirs.unsqueeze(-2), poses[:, None, None, :, :3].transpose(-1, -2)).squeeze(-2)
-    return ray_o, ray_d
-
-
-def get_image_coords(h, w, focal_x, focal_y, device=torch.device('cpu')):
-    # returns coordinates of each pixel in camera coordinate system
-    y, x = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing='ij')
-    x = (x + 0.5 - w / 2) / (focal_x * w)
-    y = (y + 0.5 - h / 2) / (focal_y * h)
-    dirs = torch.stack([
-        x, -y, -torch.ones((h, w), device=device)
-    ], dim=-1)  # h w 3
-    return dirs
-
-
-def get_rays(poses, pixel_coords):
-    ray_o = poses[..., -1]  # b 3
-    ray_d = torch.matmul(poses[..., :3], pixel_coords[..., None]).squeeze(-1)  # b 3 3
-    return ray_o, ray_d
-
-
-def normalize_vector(v):
-    return v / torch.norm(v, p=2, dim=-1, keepdim=True)
-
-
-def look_at_matrix(eye, target):
-    fwd = target - eye
-    side = torch.linalg.cross(fwd, torch.tensor([0, 1, 0]).type_as(eye).view(1, 3).repeat(len(fwd), 1))
-    up = torch.linalg.cross(side, fwd)
-    fwd, side, up = normalize_vector(fwd), normalize_vector(side), normalize_vector(up)
-    side = torch.cat([side, -torch.matmul(side.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
-    up = torch.cat([up, -torch.matmul(up.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
-    fwd = torch.cat([-fwd, torch.matmul(fwd.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
-    pad = torch.tensor([0, 0, 0, 1]).type_as(eye).view(1, 4).repeat(len(eye), 1)
-    w2c = torch.stack([side, up, fwd, pad], dim=1)  # b 4 4
-    c2w = torch.linalg.inv(w2c)[:, :3]
-    return c2w
-
-
-def get_random_poses(dist):
-    n_poses = len(dist)
-    target = torch.zeros(n_poses, 3).type_as(dist)
-    eye = normalize_vector(torch.rand(n_poses, 3).type_as(dist) - 0.5) * dist.unsqueeze(-1)
-    return look_at_matrix(eye, target)
 
 
 def positional_points_encoding(points, pe_powers, base=2):
@@ -130,34 +79,6 @@ def conical_encoding(ray_o, ray_d, dists, pe_powers, radius):
     return x
 
 
-def render_pixels(rgb, density, dists):
-    # rgb (b spp 3)
-    # density (b spp)
-    # dists (b spp+1)
-    b, spp = density.shape
-    device = density.device
-    weighted_intervals = (dists[:, 1:] - dists[:, :-1]) * density  # b spp
-    cum_transmittance = torch.cat(
-        [torch.ones(b, 1, device=device), torch.exp(-torch.cumsum(weighted_intervals, dim=1))[:, :-1]], dim=-1)  # b spp
-    weights = cum_transmittance * (1 - torch.exp(-weighted_intervals))
-    pixels = torch.sum(weights.unsqueeze(-1) * rgb, dim=1)  # b 3
-    return pixels, weights, cum_transmittance
-
-
-def sample_dists(near, far, spp):
-    device = near.device
-    b = near.shape[0]
-
-    dist = near.unsqueeze(1) + (far - near).unsqueeze(1) \
-           * torch.linspace(start=0, end=1, steps=spp + 1, device=device).unsqueeze(0)  # b spp+1
-    dist += torch.rand(b, spp + 1, device=device) * ((far - near) / spp).unsqueeze(1)
-    return dist
-
-
-def dist_to_rays(ray_o, ray_d, dist):
-    # (b 1 3) * (b spp+1 1) so it will copy d 3 times and ray_d, ray_o spp+1 times
-    points = ray_o.unsquueze(1) + ray_d.unsqueeze(1) * dist.unsquueze(2)
-    return points
 
 
 def adaptive_sample_dists(near, far, spp, coarse_dists, weights, weight_noise=0.01):

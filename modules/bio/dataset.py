@@ -4,7 +4,7 @@ from modules.bio.util import *
 class ProteinMutations(torch.utils.data.IterableDataset):
 
     def __init__(self, df, atoms_mapper=None, acid_mapper=None, pdb_root='pdb', max_atoms=3500,
-                 seq_len=400, pe_features=16, features_root=None):
+                 seq_len=401 , pe_features=16, features_root=None):
         super(ProteinMutations, self).__init__()
 
         if atoms_mapper is None:

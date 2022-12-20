@@ -5,6 +5,102 @@ from sklearn.neighbors import KDTree
 from modules.common.util import *
 
 
+def render_pixels(rgb, density, dists):
+    # rgb (b spp 3)
+    # density (b spp)
+    # dists (b spp+1)
+    b, spp = density.shape
+    device = density.device
+    weighted_intervals = (dists[:, 1:] - dists[:, :-1]) * density  # b spp
+    cum_transmittance = torch.cat(
+        [torch.ones(b, 1, device=device), torch.exp(-torch.cumsum(weighted_intervals, dim=1))[:, :-1]], dim=-1)  # b spp
+    weights = cum_transmittance * (1 - torch.exp(-weighted_intervals))
+    pixels = torch.sum(weights.unsqueeze(-1) * rgb, dim=1)  # b 3
+    return pixels, weights, cum_transmittance
+
+
+def sample_dists(near, far, spp):
+    device = near.device
+    b = near.shape[0]
+
+    dist = near.unsqueeze(1) + (far - near).unsqueeze(1) \
+           * torch.linspace(start=0, end=1, steps=spp + 1, device=device).unsqueeze(0)  # b spp+1
+    dist += torch.rand(b, spp + 1, device=device) * ((far - near) / spp).unsqueeze(1)
+    return dist
+
+
+def dist_to_rays(ray_o, ray_d, dist):
+    # (b 1 3) * (b spp+1 1) so it will copy d 3 times and ray_d, ray_o spp+1 times
+    points = ray_o.unsquueze(1) + ray_d.unsqueeze(1) * dist.unsquueze(2)
+    return points
+
+
+def get_images_rays(h, w, focal, poses):
+    y, x = torch.meshgrid(torch.arange(h).type_as(focal), torch.arange(w).type_as(focal), indexing='ij')
+    x = (x + 0.5 - w / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * w)
+    y = (y + 0.5 - h / 2).reshape(1, h, w) / (focal.reshape(-1, 1, 1) * h)
+    dirs = torch.stack([x, -y, -torch.ones_like(x)], dim=-1)  # b h w 3
+    ray_o = poses[:, :3, -1]  # b 3
+    ray_d = torch.matmul(dirs.unsqueeze(-2), poses[:, None, None, :3, :3].transpose(-1, -2)).squeeze(-2)
+    return ray_o, ray_d
+
+
+def get_image_coords(h, w, focal_x, focal_y, device=torch.device('cpu')):
+    # returns coordinates of each pixel in camera coordinate system
+    y, x = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing='ij')
+    x = (x + 0.5 - w / 2) / (focal_x * w)
+    y = (y + 0.5 - h / 2) / (focal_y * h)
+    dirs = torch.stack([
+        x, -y, -torch.ones((h, w), device=device)
+    ], dim=-1)  # h w 3
+    return dirs
+
+
+def get_rays(poses, pixel_coords):
+    ray_o = poses[:, :3, -1]  # b 3
+    ray_d = torch.matmul(poses[:, :3, :3], pixel_coords[..., None]).squeeze(-1)  # b 3 3
+    return ray_o, ray_d
+
+
+def look_at_matrix(eye, target):
+    fwd = target - eye
+    side = torch.linalg.cross(fwd, torch.tensor([0, 1, 0]).type_as(eye).view(1, 3).repeat(len(fwd), 1))
+    up = torch.linalg.cross(side, fwd)
+    fwd, side, up = normalize_vector(fwd), normalize_vector(side), normalize_vector(up)
+    side = torch.cat([side, -torch.matmul(side.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    up = torch.cat([up, -torch.matmul(up.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    fwd = torch.cat([-fwd, torch.matmul(fwd.unsqueeze(-2), eye.unsqueeze(-1)).squeeze(-1)], dim=-1)
+    pad = torch.tensor([0, 0, 0, 1]).type_as(eye).view(1, 4).repeat(len(eye), 1)
+    w2c = torch.stack([side, up, fwd, pad], dim=1)  # b 4 4
+    return w2c
+
+
+def projection_matrix(near, far, fov=90, degrees=True, aspect_ratio=1.0):
+
+    # transform FOV of camera to rop and right coordinates of image plane
+    if not isinstance(fov, torch.Tensor):
+        fov = torch.ones_like(near) * fov
+    if degrees:
+        fov = fov / 180 * torch.pi
+    h = torch.tan(fov / 2) * near
+    t, r = h, h * aspect_ratio
+
+    z, e = torch.zeros_like(near), torch.ones_like(near)
+    row1 = torch.stack([near / r, z, z, z], dim=1)
+    row2 = torch.stack([z, near / t, z, z], dim=1)
+    row3 = torch.stack([z, z, -(near + far) / (far - near), -2 * far * near / (far - near)], dim=1)
+    row4 = torch.stack([z, z, -e, z], dim=1)
+    matrix = torch.stack([row1, row2, row3, row4], dim=1)
+    return matrix
+
+
+def get_random_poses(dist):
+    n_poses = len(dist)
+    target = torch.zeros(n_poses, 3).type_as(dist)
+    eye = normalize_vector(torch.rand(n_poses, 3).type_as(dist) - 0.5) * dist.unsqueeze(-1)
+    return torch.linalg.inv(look_at_matrix(eye, target))
+
+
 def get_tetrahedras_grid(grid_resolution, offset_x=0.5, offset_y=0.5, offset_z=0.5,
                          scale_x=2.0, scale_y=2.0, scale_z=2.0, less=True):
     # define vertexes positions
@@ -74,14 +170,14 @@ def get_vertex_id(x, y, z, grid_res):
 def normalize_points(points):
     if len(points.shape) == 2:
         center = (points.max(0)[0] + points.min(0)[0]) / 2
-        points -= center
+        points = points - center
         max_l = (torch.abs(points).max(0)[0]).max()
-        points /= max_l
+        points = points / max_l
     else:
         center = (points.max(dim=1)[0] + points.min(dim=1)[0]) / 2
-        points -= center
+        points = points - center
         max_l = (torch.abs(points).max(dim=1)[0]).max(dim=-1)[0]
-        points /= max_l
+        points = points / max_l
     return points
 
 
@@ -117,9 +213,9 @@ def voxelize_points3d(points, features, grid_res, mask=None):
     else:
         feature_ones = torch.ones_like(features)
 
-    grid.index_put_(indexes, features, accumulate=True)
-    denom.index_put_(indexes, feature_ones, accumulate=True)
-    grid /= torch.clamp(torch.sqrt(denom), min=1.0)
+    grid = grid.index_put_(indexes, features, accumulate=True)
+    denom = denom.index_put_(indexes, feature_ones, accumulate=True)
+    grid = grid / torch.clamp(torch.sqrt(denom), min=1.0)
 
     return grid
 
@@ -150,6 +246,14 @@ def devoxelize_points3d(points, grid, mask=None):
     if mask is not None:
         features = torch.where(mask.unsqueeze(-1), features, torch.zeros_like(features))
     return features
+
+
+def get_only_surface_tetrahedras(tets, sdf):
+    vertex_outside = sdf > 0
+    tet_sdf = vertex_outside[tets.reshape(len(tets) * 4)].reshape(len(tets), 4).byte()
+    tet_sum = torch.sum(tet_sdf, dim=-1)
+    surface_tets = tets[(tet_sum > 0) & (tet_sum < 4)]
+    return surface_tets
 
 
 def get_surface_tetrahedras(vertexes, tets, sdf, features):
@@ -243,21 +347,21 @@ def calculate_gaussian_curvature(vertices, faces):
     v1, v2, v3 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
     angles = torch.zeros(len(vertices)).type_as(vertices)
     n_faces = len(faces)
-    angles.index_put_((faces[:, 0],),
-                      torch.arccos((torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(n_faces)
-                                    / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))
-                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
-                      accumulate=True)
-    angles.index_put_((faces[:, 1],),
-                      torch.arccos((torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(n_faces)
-                                    / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))
-                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
-                      accumulate=True)
-    angles.index_put_((faces[:, 2],),
-                      torch.arccos((torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(n_faces)
-                                    / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))
-                                    .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
-                      accumulate=True)
+    angles = angles.index_put_((faces[:, 0],),
+                               torch.arccos((torch.matmul((v2 - v1).unsqueeze(1), (v3 - v1).unsqueeze(2)).view(n_faces)
+                                             / (torch.norm(v2 - v1, dim=-1) * torch.norm(v3 - v1, dim=-1))
+                                             .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
+                               accumulate=True)
+    angles = angles.index_put_((faces[:, 1],),
+                               torch.arccos((torch.matmul((v1 - v2).unsqueeze(1), (v3 - v2).unsqueeze(2)).view(n_faces)
+                                             / (torch.norm(v1 - v2, dim=-1) * torch.norm(v3 - v2, dim=-1))
+                                             .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
+                               accumulate=True)
+    angles = angles.index_put_((faces[:, 2],),
+                               torch.arccos((torch.matmul((v1 - v3).unsqueeze(1), (v2 - v3).unsqueeze(2)).view(n_faces)
+                                             / (torch.norm(v1 - v3, dim=-1) * torch.norm(v2 - v3, dim=-1))
+                                             .clamp(min=1e-6)).clamp(min=-1 + 1e-6, max=1 - 1e-6)),
+                               accumulate=True)
 
     return 2 * torch.pi - angles
 
@@ -331,9 +435,9 @@ def encode_3d_features2sequence(points, features, grid_res, seq_len):
     __denom = torch.zeros(b, seq_len, dim).type_as(features)
 
     batch_index = torch.arange(b).type_as(hashes).view(b, 1).repeat(1, n_points).view(-1)
-    __features.index_put_((batch_index, hashes.view(-1)), features, accumulate=True)
-    __denom.index_put_((batch_index, hashes.view(-1)), torch.ones_like(features), accumulate=True)
-    __features /= torch.clamp(__denom ** 0.5, min=1.0)
+    __features = __features.index_put_((batch_index, hashes.view(-1)), features, accumulate=True)
+    __denom = __denom.index_put_((batch_index, hashes.view(-1)), torch.ones_like(features), accumulate=True)
+    __features = __features / torch.clamp(__denom ** 0.5, min=1.0)
 
     return __features
 
@@ -368,9 +472,9 @@ def laplace_smoothing(vertices, edges):
 
     v0, v1 = edges[0], edges[1]
     neighbour_vertices = vertices[v1]
-    values.index_put_((v0,), neighbour_vertices)
-    norms.index_put_((v0,), torch.ones_like(neighbour_vertices))
-    values /= torch.clamp(norms, min=1.0)
+    values = values.index_put_((v0,), neighbour_vertices)
+    norms = norms.index_put_((v0,), torch.ones_like(neighbour_vertices))
+    values = values / torch.clamp(norms, min=1.0)
     return values
 
 
