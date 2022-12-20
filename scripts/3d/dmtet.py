@@ -61,8 +61,6 @@ def get_parser():
     parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
     parser.add_argument("--sdf_value_reg", default=0.1, type=float, help="Regularization for delta sdf values")
     parser.add_argument("--sdf_sign_reg", default=0.1, type=float, help="Regularization for close tetrahedras sdf sign")
-    parser.add_argument("--amips_weight", default=1e-5, type=float, help="Weight for amips loss "
-                                                                         "(trying to avoid needle like tetrahedras)")
     parser.add_argument("--continuous_reg", default=0.01, type=float,
                         help="[Currently not used] Ensure that close tetrahedras has similar faces")
 
@@ -111,7 +109,6 @@ if __name__ == "__main__":
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
-                     amips_weight=args.amips_weight,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
                      gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,

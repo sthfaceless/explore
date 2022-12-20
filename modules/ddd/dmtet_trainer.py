@@ -21,7 +21,7 @@ class PCD2Mesh(pl.LightningModule):
                  continuous_reg=1e-2,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
                  curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
-                 disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5, amips_weight=1e-5,
+                 disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5,
                  encoder_grids=(32, 16, 8), batch_size=16, pe_powers=16, noise=0.02):
         super(PCD2Mesh, self).__init__()
         self.save_hyperparameters(ignore=['dataset', 'clearml', 'timelapse'])
@@ -79,7 +79,6 @@ class PCD2Mesh(pl.LightningModule):
         self.sdf_value_reg = sdf_value_reg
         self.sdf_sign_reg = sdf_sign_reg
         self.continuous_reg = continuous_reg
-        self.amips_weight = amips_weight
 
         self.curvature_threshold = curvature_threshold
         self.curvature_samples = curvature_samples
@@ -270,14 +269,10 @@ class PCD2Mesh(pl.LightningModule):
             out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
             out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
             out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True), self.grid_res)
-            tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-            out['amips_loss'] = torch.mean(kaolin.metrics.tetmesh.amips(
-                tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes)))
         else:
             out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
             out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
             out['delta_sdf'] = torch.tensor(0).type_as(delta_s)
-            out['amips_loss'] = torch.tensor(0).type_as(delta_v)
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -366,9 +361,6 @@ class PCD2Mesh(pl.LightningModule):
                 out['delta_laplace'] += delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
                 out['delta_sdf'] += sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
                                                   self.grid_res * 2 ** self.n_volume_division)
-                tets_vertexes = kaolin.ops.mesh.index_vertices_by_faces(tet_vertexes, tetrahedras)
-                out['amips_loss'] += torch.mean(kaolin.metrics.tetmesh.amips(
-                    tets_vertexes, kaolin.ops.mesh.inverse_vertices_offset(tets_vertexes)))
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
@@ -480,7 +472,6 @@ class PCD2Mesh(pl.LightningModule):
             out['loss'] += out['delta_vertex'] * self.delta_weight
             out['loss'] += out['delta_laplace'] * self.lap_reg
             out['loss'] += out['delta_sdf'] * self.sdf_value_reg
-            out['loss'] += out['amips_loss'] * self.amips_weight
 
         ### LOSS --- Chamfer loss and smoothness normal loss
         if self.volume_refinement and is_train:
