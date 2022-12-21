@@ -653,7 +653,7 @@ class PCD2Mesh(pl.LightningModule):
             if len(rendered_images) > 0:
                 images = np.stack(rendered_images, axis=0)
                 b, views, h, w, _ = images.shape
-                images = np.moveaxis(images.reshape((b, 2, views // 2, h, w, 3)), 1, 3).reshape(
+                images = np.moveaxis(images.reshape((b, 2, views // 2, h, w, 3)), 2, 3).reshape(
                     (b, 2 * h, views // 2 * w, 3))
                 images = [images[idx] for idx in range(len(images))]
                 self.lg.log_images(images, 'rendered_mesh', self.global_step)
