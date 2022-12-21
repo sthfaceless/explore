@@ -394,9 +394,10 @@ class PCD2Mesh(pl.LightningModule):
         if is_train:
             total_vertexes = torch.cat([tet_vertexes] + not_subdivided_vertexes, dim=1)
             total_sdf = torch.cat([tet_sdf] + not_subdivided_sdf, dim=1)
-            out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
             sdf_weight = self.sdf_weight if self.volume_refinement else 1.0
-            out['loss'] += out['sdf_loss'] * sdf_weight
+            if abs(sdf_weight) > 1e-6:
+                out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
+                out['loss'] += out['sdf_loss'] * sdf_weight
 
         ### REGULARIZATION --- close tetrahedras must have same sdf sign
         if self.volume_refinement and is_train:
@@ -643,7 +644,7 @@ class PCD2Mesh(pl.LightningModule):
         if self.use_rasterizer:
             rendered_images = []
             for v, f in zip(mesh_vertices, mesh_faces):
-                poses = get_random_poses(torch.ones(self.n_views).type_as(v) * 2.0)
+                poses = get_random_view(torch.ones(self.n_views).type_as(v) * 2.0)
                 projections = projection_matrix(near=torch.ones(self.n_views).type_as(v) * 1.0,
                                                 far=torch.ones(self.n_views).type_as(v) * 3.0)
                 out = self.rasterizer.rasterize(v, f, poses, projections, res=self.view_resolution)
