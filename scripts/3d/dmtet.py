@@ -14,6 +14,7 @@ def get_parser():
     parser = ArgumentParser(description="Training deep marching tetrahedras representation")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to shapenet")
+    parser.add_argument("--tets", default=None, help="Path to file with tetrahedras")
     parser.add_argument("--cats", default=['plane'], nargs='+', help="Shapenet categories to train")
     parser.add_argument("--noise", default=1e-2, type=float, help="How much noise to add to point cloud")
     parser.add_argument("--train_rate", default=0.8, type=float, help="Train data split")
@@ -56,7 +57,8 @@ def get_parser():
     parser.add_argument("--chamfer_weight", default=100, type=float, help="Weight for chamfer distance")
     parser.add_argument("--normal_weight", default=1e-5, type=float, help="Weight for faces normal reg")
     parser.add_argument("--delta_weight", default=0.1, type=float, help="Weight for vertexes delta change reg")
-    parser.add_argument("--delta_scale", default=4.0, type=float, help="What value of grid resolution it could move")
+    parser.add_argument("--delta_scale", default=1 / 2.0, type=float,
+                        help="What value of grid resolution it could move")
     parser.add_argument("--sdf_weight", default=0.0, type=float, help="Weight for sdf prediction reg")
     parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
     parser.add_argument("--sdf_value_reg", default=0.1, type=float, help="Regularization for delta sdf values")
@@ -107,6 +109,7 @@ if __name__ == "__main__":
     model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
                      grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
+                     tets=args.tets,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,

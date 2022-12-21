@@ -13,7 +13,7 @@ class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
                  learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True, use_rasterizer=True,
-                 n_views=8, view_resolution=256,
+                 n_views=8, view_resolution=256, tets=None,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
@@ -51,7 +51,12 @@ class PCD2Mesh(pl.LightningModule):
         self.min_lr_rate = min_lr_rate
         self.batch_size = batch_size
 
-        tet_vertexes, tetrahedras = get_tetrahedras_grid(grid_resolution, less=False)
+        if tets is None:
+            tet_vertexes, tetrahedras = get_tetrahedras_grid(grid_resolution, less=False)
+        else:
+            data = np.load(tets)
+            tet_vertexes = torch.tensor(data['vertices'], dtype=torch.float32)
+            tetrahedras = torch.tensor(data['tets'], dtype=torch.long)
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
