@@ -586,7 +586,7 @@ def get_close_faces(point, vertices, faces, dist=0.1):
 
 def viscosity_sdf_reg(sdf, eps=1e-2):
     grid3 = len(sdf)
-    grid_res = int(grid3 ** (1 / 3))
+    grid_res = int(grid3 ** (1 / 3) + 0.5)
     sdf = sdf.view(grid_res, grid_res, grid_res)
     h = 1 / grid_res
 
@@ -611,7 +611,7 @@ def viscosity_sdf_reg(sdf, eps=1e-2):
 
 def coarea_sdf_reg(sdf, beta=1e-6):
     grid3 = len(sdf)
-    grid_res = int(grid3 ** (1 / 3))
+    grid_res = int(grid3 ** (1 / 3) + 0.5)
     sdf = sdf.view(grid_res, grid_res, grid_res)
 
     xx, yy, zz = torch.meshgrid(torch.arange(grid_res - 1).type_as(sdf).long(),

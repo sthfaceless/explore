@@ -51,7 +51,7 @@ class PCD2Mesh(pl.LightningModule):
         self.min_lr_rate = min_lr_rate
         self.batch_size = batch_size
 
-        tet_vertexes, tetrahedras = get_tetrahedras_grid(grid_resolution)
+        tet_vertexes, tetrahedras = get_tetrahedras_grid(grid_resolution, less=False)
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
