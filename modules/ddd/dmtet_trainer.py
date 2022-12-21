@@ -55,7 +55,7 @@ class PCD2Mesh(pl.LightningModule):
             tet_vertexes, tetrahedras = get_tetrahedras_grid(grid_resolution, less=False)
         else:
             data = np.load(tets)
-            tet_vertexes = torch.tensor(data['vertices'], dtype=torch.float32)
+            tet_vertexes = torch.tensor(data['vertices'], dtype=torch.float32) * 2
             tetrahedras = torch.tensor(data['tets'], dtype=torch.long)
         self.register_buffer('tet_vertexes', tet_vertexes)
         self.register_buffer('tetrahedras', tetrahedras)
