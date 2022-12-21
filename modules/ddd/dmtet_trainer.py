@@ -13,7 +13,7 @@ class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
                  learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True, use_rasterizer=True,
-                 n_views=8, view_resolution=256, tets=None,
+                 n_views=8, view_resolution=256, tets=None, steps=100000,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
@@ -47,6 +47,7 @@ class PCD2Mesh(pl.LightningModule):
             self.val_idxs = idxs[n_train_items:]
 
         self.steps_schedule = steps_schedule
+        self.steps = steps
         self.learning_rate = learning_rate
         self.min_lr_rate = min_lr_rate
         self.batch_size = batch_size
@@ -701,13 +702,13 @@ class PCD2Mesh(pl.LightningModule):
                                                             pct_start=self.steps_schedule[0] / self.steps_schedule[-1],
                                                             div_factor=2.0,
                                                             final_div_factor=1 / (2.0 * self.min_lr_rate),
-                                                            total_steps=self.steps_schedule[-1])
+                                                            total_steps=self.steps)
         gen_scheduler = {
             'scheduler': gen_scheduler,
             'interval': 'step'
         }
         dis_optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.sdf_disc.parameters(), betas=(0.9, 0.99))
-        dis_steps = self.steps_schedule[-1] - self.steps_schedule[1]
+        dis_steps = self.steps
         dis_scheduler = torch.optim.lr_scheduler.OneCycleLR(dis_optimizer, max_lr=self.learning_rate,
                                                             pct_start=self.steps_schedule[0] / dis_steps,
                                                             div_factor=2.0,

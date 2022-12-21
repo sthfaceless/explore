@@ -109,7 +109,7 @@ if __name__ == "__main__":
     model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
                      grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
-                     tets=args.tets,
+                     tets=args.tets, steps=args.steps[-1] * args.acc_grads,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
