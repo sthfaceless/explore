@@ -479,8 +479,9 @@ class PCD2Mesh(pl.LightningModule):
             if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
                 # calculate pcd chamfer loss
                 face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(mesh_vertices, mesh_faces), nan=1.0)
-                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces,
-                                                                    self.chamfer_samples * 10, areas=face_areas)
+                pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples * 10)
+                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples,
+                                                                    areas=face_areas)
                 chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
                 normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
 
