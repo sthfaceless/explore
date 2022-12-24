@@ -403,14 +403,14 @@ class PCD2Mesh(pl.LightningModule):
             sdf_weight = self.sdf_weight if self.volume_refinement else 1.0
             if abs(sdf_weight) > 1e-6:
                 out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
-                out['loss'] += out['sdf_loss'] * sdf_weight
+                out['loss'] += weight_loss(out['sdf_loss'], sdf_weight)
 
         ### REGULARIZATION --- close tetrahedras must have same sdf sign
         if self.volume_refinement and is_train:
             out['sdf_sign_reg'] = functools.reduce(lambda l1, l2: l1 + l2, [
                 sdf_sign_reg(sdf[0], get_tetrahedras_edges(tets, unique=True))
                 for sdf, tets in zip([tet_sdf] + not_subdivided_sdf, [tetrahedras] + not_subdivided_tets)])
-            out['loss'] += out['sdf_sign_reg'] * self.sdf_sign_reg
+            out['loss'] += weight_loss(out['sdf_sign_reg'], self.sdf_sign_reg)
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -445,7 +445,8 @@ class PCD2Mesh(pl.LightningModule):
                     surface_ref_out = self.surface_ref(pos_features)[0]
                 else:
                     raise NotImplementedError
-                delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res), \
+                delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res *
+                                                                        (2 ** self.n_volume_division)),\
                                   torch.sigmoid(surface_ref_out[:, 3])
                 mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
 
@@ -476,9 +477,9 @@ class PCD2Mesh(pl.LightningModule):
 
         ### REGULARIZATION --- delta vertexes, sdf and laplace
         if self.volume_refinement and is_train:
-            out['loss'] += out['delta_vertex'] * self.delta_weight
-            out['loss'] += out['delta_laplace'] * self.lap_reg
-            out['loss'] += out['delta_sdf'] * self.sdf_value_reg
+            out['loss'] += weight_loss(out['delta_vertex'], self.delta_weight)
+            out['loss'] += weight_loss(out['delta_laplace'], self.lap_reg)
+            out['loss'] += weight_loss(out['delta_sdf'], self.sdf_value_reg)
 
         ### LOSS --- Chamfer loss and smoothness normal loss
         if self.volume_refinement and is_train:
@@ -498,9 +499,9 @@ class PCD2Mesh(pl.LightningModule):
                 ############################################################
 
                 out['chamfer_loss'] = chamfer_loss
-                out['loss'] += out['chamfer_loss'] * self.chamfer_weight
+                out['loss'] += weight_loss(out['chamfer_loss'], self.chamfer_weight)
                 out['normal_loss'] = normal_loss
-                out['loss'] += out['normal_loss'] * self.normal_weight
+                out['loss'] += weight_loss(out['normal_loss'], self.normal_weight)
 
         return out
 
@@ -568,7 +569,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(pred_udf_features) > 0:
                     if self.adversarial_training:
                         out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
-                        out['loss'] += out['adv_loss'] * self.disc_weight
+                        out['loss'] += weight_loss(out['adv_loss'], self.disc_weight)
                     out['disc_loss'] = torch.mean(disc_preds[:len(pred_udf_features)] ** 2) \
                                        + torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
                 else:

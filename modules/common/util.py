@@ -158,3 +158,7 @@ def run_async(fun, *args, **kwargs):
 
 def tn(tensor):
     return tensor.detach().cpu().numpy()
+
+
+def weight_loss(loss, weight):
+    return torch.nan_to_num(loss, nan=0, posinf=0, neginf=0) * weight
