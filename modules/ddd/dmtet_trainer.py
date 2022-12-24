@@ -18,7 +18,7 @@ class PCD2Mesh(pl.LightningModule):
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000, sdf_sign_reg=1e-4, sdf_value_reg=1e-2,
-                 continuous_reg=1e-2,
+                 continuous_reg=1e-2, surface_subdivision_warmup=1000,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
                  curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
                  disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5,
@@ -72,6 +72,8 @@ class PCD2Mesh(pl.LightningModule):
         self.n_volume_division = 0
         self.true_volume_division = n_volume_division
         self.n_surface_division = n_surface_division
+        self.surface_subdivision_warmup = surface_subdivision_warmup
+        self.surface_subdivision_weight = 0
         self.encoder_grids = encoder_grids
         self.res_features = res_features
 
@@ -168,6 +170,15 @@ class PCD2Mesh(pl.LightningModule):
         dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
         return dists
 
+    def chamfer_loss(self, pred_vertices, pred_faces, vertices, faces):
+        # calculate pcd chamfer loss
+        face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(pred_vertices, pred_faces), nan=1.0)
+        pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples * 10)
+        pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(pred_vertices, pred_faces, self.chamfer_samples,
+                                                            areas=face_areas)
+        chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
+        return chamfer_loss
+
     def calculate_sdf_loss(self, tet_vertexes, tet_sdf, vertices, faces, true_sdf=None):
         if tet_vertexes.numel() == 0 or faces.numel() == 0:
             return torch.tensor(0).type_as(tet_sdf)
@@ -185,6 +196,11 @@ class PCD2Mesh(pl.LightningModule):
             self.adversarial_training = True
         if self.global_step >= self.steps_schedule[2]:
             self.surface_subdivision = True
+            if self.global_step - self.steps_schedule[2] < self.surface_subdivision_warmup:
+                self.surface_subdivision_weight = \
+                    (self.global_step - self.steps_schedule[2] + 1) / self.surface_subdivision_warmup
+            else:
+                self.surface_subdivision_weight = 1.0
         if self.debug and self.global_step % self.debug_interval == 0:
             self.debug_state = True
         else:
@@ -405,6 +421,13 @@ class PCD2Mesh(pl.LightningModule):
                 out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
                 out['loss'] += weight_loss(out['sdf_loss'], sdf_weight)
 
+        ### LOSS --- chamfer loss on initial predicted surface
+        if self.volume_refinement and is_train and self.surface_subdivision_weight < 1.0:
+            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+                out['chamfer_loss'] = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
+                out['loss'] += weight_loss(out['chamfer_loss'],
+                                           self.chamfer_weight * (1 - self.surface_subdivision_weight))
+
         ### REGULARIZATION --- close tetrahedras must have same sdf sign
         if self.volume_refinement and is_train:
             out['sdf_sign_reg'] = functools.reduce(lambda l1, l2: l1 + l2, [
@@ -446,7 +469,7 @@ class PCD2Mesh(pl.LightningModule):
                 else:
                     raise NotImplementedError
                 delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res *
-                                                                        (2 ** self.n_volume_division)),\
+                                                                        (2 ** self.n_volume_division)), \
                                   torch.sigmoid(surface_ref_out[:, 3])
                 mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
 
@@ -475,31 +498,26 @@ class PCD2Mesh(pl.LightningModule):
                                          epoch=self.global_step)
                 ############################################################
 
+        ### LOSS --- chamfer loss on initial predicted surface
+        if self.surface_subdivision and is_train and self.surface_subdivision_weight > 0:
+            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+                chamfer_loss = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
+                if 'chamfer_loss' in out:
+                    out['chamfer_loss'] += chamfer_loss
+                else:
+                    out['chamfer_loss'] = chamfer_loss
+                out['loss'] += weight_loss(chamfer_loss, self.chamfer_weight * self.surface_subdivision_weight)
+
         ### REGULARIZATION --- delta vertexes, sdf and laplace
         if self.volume_refinement and is_train:
             out['loss'] += weight_loss(out['delta_vertex'], self.delta_weight)
             out['loss'] += weight_loss(out['delta_laplace'], self.lap_reg)
             out['loss'] += weight_loss(out['delta_sdf'], self.sdf_value_reg)
 
-        ### LOSS --- Chamfer loss and smoothness normal loss
+        ### LOSS --- smoothness normal loss
         if self.volume_refinement and is_train:
             if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
-                # calculate pcd chamfer loss
-                face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(mesh_vertices, mesh_faces), nan=1.0)
-                pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples * 10)
-                pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(mesh_vertices, mesh_faces, self.chamfer_samples,
-                                                                    areas=face_areas)
-                chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
                 normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
-
-                ####################### DEBUG CODE #######################
-                if self.debug_state:
-                    self.lg.log_tensor(face_areas, 'Face areas of predicted mesh')
-                    self.lg.log_tensor(pred_pcd, 'Predicted point cloud on mesh')
-                ############################################################
-
-                out['chamfer_loss'] = chamfer_loss
-                out['loss'] += weight_loss(out['chamfer_loss'], self.chamfer_weight)
                 out['normal_loss'] = normal_loss
                 out['loss'] += weight_loss(out['normal_loss'], self.normal_weight)
 

@@ -27,6 +27,8 @@ def get_parser():
     parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Minimal learning rate ratio")
     parser.add_argument("--steps", default=[500, 4000, 6000, 10000], nargs='+', type=int,
                         help="sdf train --- surface train --- adversarial train --- subdivision train")
+    parser.add_argument("--surface_subdivision_warmup", default=1000, type=int, help="Steps when loss calculated "
+                                                                                     "on initial mesh also")
     parser.add_argument("--batch_size", default=1, type=int, help="Batch size in training")
     parser.add_argument("--validations", default=100, type=int, help="Total numbers of validations during training")
     parser.add_argument("--debug_interval", default=-1, type=int, help="Interval of steps to debug model")
@@ -110,6 +112,7 @@ if __name__ == "__main__":
                      grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
                      tets=args.tets, steps=args.steps[-1] * args.acc_grads,
+                     surface_subdivision_warmup=args.surface_subdivision_warmup,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
