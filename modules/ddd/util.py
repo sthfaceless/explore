@@ -616,7 +616,7 @@ def coarea_sdf_reg(sdf, beta=1e-6):
     xx, yy, zz = torch.meshgrid(torch.arange(grid_res - 1).type_as(sdf).long(),
                                 torch.arange(grid_res - 1).type_as(sdf).long(),
                                 torch.arange(grid_res - 1).type_as(sdf).long())
-    xx, yy, zz = xx.view(-1), yy.view(-1), zz.view(-1)
+    xx, yy, zz = xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)
 
     # trilinear interpolation for center of the voxel
     f_mid = (sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] + sdf[xx, yy + 1, zz + 1] +
