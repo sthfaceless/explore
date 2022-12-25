@@ -65,6 +65,8 @@ def get_parser():
     parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
     parser.add_argument("--sdf_value_reg", default=0.1, type=float, help="Regularization for delta sdf values")
     parser.add_argument("--sdf_sign_reg", default=0.1, type=float, help="Regularization for close tetrahedras sdf sign")
+    parser.add_argument("--sdf_coarea", default=1e-4, type=float, help="Regularization for solve poisson equation")
+    parser.add_argument("--sdf_viscosity", default=1e-2, type=float, help="Regularization for area minimization")
     parser.add_argument("--continuous_reg", default=0.01, type=float,
                         help="[Currently not used] Ensure that close tetrahedras has similar faces")
 
@@ -117,6 +119,7 @@ if __name__ == "__main__":
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
                      gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
+                     sdf_viscosity=args.sdf_viscosity, sdf_coarea=args.sdf_coarea,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,

@@ -18,7 +18,7 @@ class PCD2Mesh(pl.LightningModule):
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000, sdf_sign_reg=1e-4, sdf_value_reg=1e-2,
-                 continuous_reg=1e-2, surface_subdivision_warmup=1000,
+                 continuous_reg=1e-2, surface_subdivision_warmup=1000, sdf_viscosity=1e-2, sdf_coarea=1e-4,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
                  curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
                  disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5,
@@ -86,6 +86,8 @@ class PCD2Mesh(pl.LightningModule):
         self.lap_reg = lap_reg
         self.sdf_value_reg = sdf_value_reg
         self.sdf_sign_reg = sdf_sign_reg
+        self.sdf_viscosity = sdf_viscosity
+        self.sdf_coarea = sdf_coarea
         self.continuous_reg = continuous_reg
 
         self.curvature_threshold = curvature_threshold
@@ -288,13 +290,28 @@ class PCD2Mesh(pl.LightningModule):
 
         # add regularization on vertex delta
         if len(delta_v) > 0:
-            out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
-            out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
-            out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True), self.grid_res)
+            if abs(self.delta_weight) > 1e-6:
+                out['delta_vertex'] = torch.mean(torch.sum(delta_v ** 2, dim=1))
+            if abs(self.lap_reg) > 1e-6:
+                out['delta_laplace'] = delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
+            if abs(self.sdf_value_reg) > 1e-6:
+                out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
+                                                 self.grid_res)
+            if abs(self.sdf_viscosity) > 1e-6:
+                out['sdf_viscosity'] = viscosity_sdf_reg(tet_sdf[0], h=self.true_grid_res)
+            if abs(self.sdf_coarea) > 1e-6:
+                out['sdf_coarea'] = coarea_sdf_reg(tet_sdf[0])
         else:
-            out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
-            out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
-            out['delta_sdf'] = torch.tensor(0).type_as(delta_s)
+            if abs(self.delta_weight) > 1e-6:
+                out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
+            if abs(self.lap_reg) > 1e-6:
+                out['delta_laplace'] = torch.tensor(0).type_as(delta_v)
+            if abs(self.sdf_value_reg) > 1e-6:
+                out['delta_sdf'] = torch.tensor(0).type_as(delta_s)
+            if abs(self.sdf_viscosity) > 1e-6:
+                out['sdf_viscosity'] = torch.tensor(0).type_as(delta_s)
+            if abs(self.sdf_coarea) > 1e-6:
+                out['sdf_coarea'] = torch.tensor(0).type_as(delta_s)
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -321,9 +338,9 @@ class PCD2Mesh(pl.LightningModule):
         if n_volume_division is None:
             n_volume_division = self.n_volume_division
         not_subdivided_vertexes, not_subdivided_sdf, not_subdivided_tets = [], [], []
-        if len(get_only_surface_tetrahedras(tetrahedras, tet_sdf[0])) <= 0.1 * len(tetrahedras):
-
-            for div_id in range(n_volume_division):
+        total_tetrahedras = len(tetrahedras)
+        for div_id in range(n_volume_division):
+            if len(get_only_surface_tetrahedras(tetrahedras, tet_sdf[0])) <= 0.1 * total_tetrahedras:
                 # we have to remove non-surface tetrahedras as volume subdivision is expensive
                 tet_vertexes, tetrahedras, tet_sdf, tet_features, __not_subdivided_vertexes, __not_subdivided_tets, \
                 __not_subdivided_sdf = self.surf_batchify(get_surface_tetrahedras(tet_vertexes[0], tetrahedras,
@@ -369,7 +386,7 @@ class PCD2Mesh(pl.LightningModule):
             else:
                 raise NotImplementedError
             delta_v, delta_s, tet_features = torch.tanh(ref2_out[:, :3]) / \
-                                             (self.true_grid_res * (2 ** self.n_volume_division)), \
+                                             (self.true_grid_res * (2 ** n_volume_division)), \
                                              torch.tanh(ref2_out[:, 3]), ref2_out[:, 4:]
             tet_features = tet_features.unsqueeze(0)
 
@@ -379,10 +396,14 @@ class PCD2Mesh(pl.LightningModule):
 
             # add regularization on vertex delta
             if len(delta_v) > 0:
-                out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
-                out['delta_laplace'] += delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
-                out['delta_sdf'] += sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
-                                                  self.grid_res * 2 ** self.n_volume_division)
+                if abs(self.delta_weight) > 1e-6:
+                    out['delta_vertex'] = out['delta_vertex'] + torch.mean(torch.sum(delta_v ** 2, dim=1))
+                if abs(self.lap_reg) > 1e-6:
+                    out['delta_laplace'] = out['delta_laplace'] + delta_laplace_loss_tetrahedras(delta_v, tetrahedras)
+                if abs(self.sdf_value_reg) > 1e-6:
+                    out['delta_sdf'] = out['delta_sdf'] + sdf_value_reg(delta_s,
+                                                                        get_tetrahedras_edges(tetrahedras, unique=True),
+                                                                        self.grid_res * 2 ** n_volume_division)
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
@@ -419,21 +440,21 @@ class PCD2Mesh(pl.LightningModule):
             sdf_weight = self.sdf_weight if self.volume_refinement else 1.0
             if abs(sdf_weight) > 1e-6:
                 out['sdf_loss'] = self.calculate_sdf_loss(total_vertexes, total_sdf, vertices, faces, true_sdf=true_sdf)
-                out['loss'] += weight_loss(out['sdf_loss'], sdf_weight)
+                out['loss'] = out['loss'] + weight_loss(out['sdf_loss'], sdf_weight)
 
         ### LOSS --- chamfer loss on initial predicted surface
-        if self.volume_refinement and is_train and self.surface_subdivision_weight < 1.0:
-            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
-                out['chamfer_loss'] = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
-                out['loss'] += weight_loss(out['chamfer_loss'],
-                                           self.chamfer_weight * (1 - self.surface_subdivision_weight))
+        if self.volume_refinement and is_train and self.surface_subdivision_weight < 1.0 - 1e-6 \
+                and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+            out['chamfer_loss'] = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
+            out['loss'] = out['loss'] + weight_loss(out['chamfer_loss'],
+                                                    self.chamfer_weight * (1 - self.surface_subdivision_weight))
 
         ### REGULARIZATION --- close tetrahedras must have same sdf sign
-        if self.volume_refinement and is_train:
+        if self.volume_refinement and is_train and abs(self.sdf_sign_reg) > 1e-6:
             out['sdf_sign_reg'] = functools.reduce(lambda l1, l2: l1 + l2, [
                 sdf_sign_reg(sdf[0], get_tetrahedras_edges(tets, unique=True))
                 for sdf, tets in zip([tet_sdf] + not_subdivided_sdf, [tetrahedras] + not_subdivided_tets)])
-            out['loss'] += weight_loss(out['sdf_sign_reg'], self.sdf_sign_reg)
+            out['loss'] = out['loss'] + weight_loss(out['sdf_sign_reg'], self.sdf_sign_reg)
 
         ####################### DEBUG CODE #######################
         if self.debug_state:
@@ -449,77 +470,85 @@ class PCD2Mesh(pl.LightningModule):
         ### STEP 3 --- Learnable surface subdivision
         if n_surface_division is None:
             n_surface_division = self.n_surface_division
-        if self.surface_subdivision:
-            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+        if self.surface_subdivision and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+            mesh_vertices = laplace_smoothing(mesh_vertices[0], get_mesh_edges(mesh_faces)).unsqueeze(0)
 
-                mesh_vertices = laplace_smoothing(mesh_vertices[0], get_mesh_edges(mesh_faces)).unsqueeze(0)
+            # positional features for mesh vertices
+            pos_features = self.ref_points_encoder.devoxelize(mesh_vertices, grids)
+            pos_features = torch.cat([mesh_vertices, get_positional_encoding(mesh_vertices, self.pe_powers * 3),
+                                      pos_features], dim=-1)
 
-                # positional features for mesh vertices
-                pos_features = self.ref_points_encoder.devoxelize(mesh_vertices, grids)
-                pos_features = torch.cat([mesh_vertices, get_positional_encoding(mesh_vertices, self.pe_powers * 3),
-                                          pos_features], dim=-1)
+            # learnable surface subdivision predicts changed vertices and alpha smoothing factor
+            if self.ref == 'gcn':
+                surface_ref_out = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
+            elif self.ref == 'conv':
+                surface_ref_out = self.surface_ref(mesh_vertices, pos_features)[0]
+            elif self.ref == 'linear':
+                surface_ref_out = self.surface_ref(pos_features)[0]
+            else:
+                raise NotImplementedError
+            delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res *
+                                                                    (2 ** n_volume_division)), \
+                              torch.sigmoid(surface_ref_out[:, 3])
+            mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
 
-                # learnable surface subdivision predicts changed vertices and alpha smoothing factor
-                if self.ref == 'gcn':
-                    surface_ref_out = self.surface_ref(pos_features[0], get_mesh_edges(mesh_faces))
-                elif self.ref == 'conv':
-                    surface_ref_out = self.surface_ref(mesh_vertices, pos_features)[0]
-                elif self.ref == 'linear':
-                    surface_ref_out = self.surface_ref(pos_features)[0]
-                else:
-                    raise NotImplementedError
-                delta_v, alphas = torch.tanh(surface_ref_out[:, :3]) / (self.true_grid_res *
-                                                                        (2 ** self.n_volume_division)), \
-                                  torch.sigmoid(surface_ref_out[:, 3])
-                mesh_vertices = mesh_vertices + delta_v.unsqueeze(0)
+            # add regularization on vertex delta
+            if len(delta_v) > 0:
+                if abs(self.delta_weight) > 1e-6:
+                    out['delta_vertex'] = out['delta_vertex'] + torch.mean(torch.sum(delta_v ** 2, dim=1))
+                if abs(self.lap_reg) > 1e-6:
+                    out['delta_laplace'] = out['delta_laplace'] + delta_laplace_loss_mesh(delta_v, mesh_faces)
 
-                # add regularization on vertex delta
-                if len(delta_v) > 0:
-                    out['delta_vertex'] += torch.mean(torch.sum(delta_v ** 2, dim=1))
-                    out['delta_laplace'] += delta_laplace_loss_mesh(delta_v, mesh_faces)
+            mesh_vertices, mesh_faces = kaolin.ops.mesh.subdivide_trianglemesh(
+                mesh_vertices, mesh_faces, iterations=n_surface_division, alpha=alphas.unsqueeze(0))
 
-                mesh_vertices, mesh_faces = kaolin.ops.mesh.subdivide_trianglemesh(
-                    mesh_vertices, mesh_faces, iterations=n_surface_division, alpha=alphas.unsqueeze(0))
+            out['mesh_vertices'] = mesh_vertices
+            out['mesh_faces'] = mesh_faces
 
-                out['mesh_vertices'] = mesh_vertices
-                out['mesh_faces'] = mesh_faces
-
-                ####################### DEBUG CODE #######################
-                if self.debug_state:
-                    self.lg.log_tensor(delta_v, 'Surface subdivision delta vertices')
-                    self.lg.log_tensor(alphas, 'Surface subdivision alphas')
-                    if mesh_faces.numel() > 0:
-                        debug_faces = mesh_faces
-                        if len(debug_faces) > 50000:
-                            indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(
-                                debug_faces)
-                            debug_faces = debug_faces[indexes]
-                        self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'subdivided_predicted_mesh',
-                                         epoch=self.global_step)
-                ############################################################
+            ####################### DEBUG CODE #######################
+            if self.debug_state:
+                self.lg.log_tensor(delta_v, 'Surface subdivision delta vertices')
+                self.lg.log_tensor(alphas, 'Surface subdivision alphas')
+                if mesh_faces.numel() > 0:
+                    debug_faces = mesh_faces
+                    if len(debug_faces) > 50000:
+                        indexes = torch.randint(low=0, high=len(debug_faces), size=(50000,)).type_as(
+                            debug_faces)
+                        debug_faces = debug_faces[indexes]
+                    self.lg.log_mesh(tn(mesh_vertices[0]), tn(debug_faces), 'subdivided_predicted_mesh',
+                                     epoch=self.global_step)
+            ############################################################
 
         ### LOSS --- chamfer loss on initial predicted surface
-        if self.surface_subdivision and is_train and self.surface_subdivision_weight > 0:
-            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
-                chamfer_loss = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
-                if 'chamfer_loss' in out:
-                    out['chamfer_loss'] += chamfer_loss
-                else:
-                    out['chamfer_loss'] = chamfer_loss
-                out['loss'] += weight_loss(chamfer_loss, self.chamfer_weight * self.surface_subdivision_weight)
+        if self.surface_subdivision and is_train and self.surface_subdivision_weight > 0 \
+                and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+            chamfer_loss = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
+            if 'chamfer_loss' in out:
+                out['chamfer_loss'] = out['chamfer_loss'] + chamfer_loss
+            else:
+                out['chamfer_loss'] = chamfer_loss
+            out['loss'] = out['loss'] + weight_loss(chamfer_loss,
+                                                    self.chamfer_weight * self.surface_subdivision_weight)
 
         ### REGULARIZATION --- delta vertexes, sdf and laplace
         if self.volume_refinement and is_train:
-            out['loss'] += weight_loss(out['delta_vertex'], self.delta_weight)
-            out['loss'] += weight_loss(out['delta_laplace'], self.lap_reg)
-            out['loss'] += weight_loss(out['delta_sdf'], self.sdf_value_reg)
+            if abs(self.delta_weight) > 1e-6:
+                out['loss'] = out['loss'] + weight_loss(out['delta_vertex'], self.delta_weight)
+            if abs(self.lap_reg) > 1e-6:
+                out['loss'] = out['loss'] + weight_loss(out['delta_laplace'], self.lap_reg)
+            if abs(self.sdf_value_reg) > 1e-6:
+                out['loss'] = out['loss'] + weight_loss(out['delta_sdf'], self.sdf_value_reg)
+            if abs(self.sdf_viscosity) > 1e-6:
+                out['loss'] = out['loss'] + weight_loss(out['sdf_viscosity'], self.sdf_viscosity)
+            if abs(self.sdf_coarea) > 1e-6:
+                out['loss'] = out['loss'] + weight_loss(out['sdf_coarea'], self.sdf_coarea)
 
         ### LOSS --- smoothness normal loss
-        if self.volume_refinement and is_train:
-            if mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
-                normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
-                out['normal_loss'] = normal_loss
-                out['loss'] += weight_loss(out['normal_loss'], self.normal_weight)
+        if self.volume_refinement and is_train and abs(self.normal_weight) > 1e-6 \
+                and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+            normal_loss = smoothness_loss(mesh_vertices[0], mesh_faces)
+            out['normal_loss'] = normal_loss
+            out['loss'] = out['loss'] + weight_loss(out['normal_loss'], self.normal_weight)
 
         return out
 
@@ -587,7 +616,7 @@ class PCD2Mesh(pl.LightningModule):
                 if len(pred_udf_features) > 0:
                     if self.adversarial_training:
                         out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
-                        out['loss'] += weight_loss(out['adv_loss'], self.disc_weight)
+                        out['loss'] = out['loss'] + weight_loss(out['adv_loss'], self.disc_weight)
                     out['disc_loss'] = torch.mean(disc_preds[:len(pred_udf_features)] ** 2) \
                                        + torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
                 else:
@@ -646,7 +675,8 @@ class PCD2Mesh(pl.LightningModule):
         mesh_vertices, mesh_faces = [], []
         with torch.no_grad():
             for _pcd_noised in pcd_noised:
-                out = self.single_mesh_step(pcd_noised=_pcd_noised.unsqueeze(0))
+                out = self.single_mesh_step(pcd_noised=_pcd_noised.unsqueeze(0),
+                                            n_volume_division=self.n_volume_division + 1)
                 if 'mesh_vertices' in out and 'mesh_faces' in out and out['mesh_faces'].numel() > 0:
                     mesh_vertices.append(out['mesh_vertices'][0])
                     mesh_faces.append(out['mesh_faces'])
