@@ -584,53 +584,71 @@ def get_close_faces(point, vertices, faces, dist=0.1):
     return faces[face_mask]
 
 
-def viscosity_sdf_reg(sdf, h, eps=1e-2):
-    grid3 = len(sdf)
-    grid_res = int(grid3 ** (1 / 3) + 0.5)
-    sdf = sdf.view(grid_res, grid_res, grid_res)
+def viscosity_sdf_reg(sdf, h, eps=1e-2, grid_grad=False, sdf_points=None):
+    assert sdf_points is not None or grid_grad, 'Viscosity gradients requires either initial points or approx grid'
 
-    pad = torch.ones(grid_res, grid_res).type_as(sdf)
-    x_sdf = torch.cat([pad.unsqueeze(0), sdf, pad.unsqueeze(0)], dim=0)
-    y_sdf = torch.cat([pad.unsqueeze(1), sdf, pad.unsqueeze(1)], dim=1)
-    z_sdf = torch.cat([pad.unsqueeze(2), sdf, pad.unsqueeze(2)], dim=2)
+    if grid_grad:
+        grid3 = len(sdf)
+        grid_res = int(grid3 ** (1 / 3) + 0.5)
+        sdf = sdf.view(grid_res, grid_res, grid_res)
 
-    df = torch.stack([
-        x_sdf[2:, :, :] - x_sdf[:-2, :, :],
-        y_sdf[:, 2:, :] - y_sdf[:, :-2, :],
-        z_sdf[:, :, 2:] - z_sdf[:, :, :-2]], dim=-1) / (2 * h)
+        pad = torch.ones(grid_res, grid_res).type_as(sdf)
+        x_sdf = torch.cat([pad.unsqueeze(0), sdf, pad.unsqueeze(0)], dim=0)
+        y_sdf = torch.cat([pad.unsqueeze(1), sdf, pad.unsqueeze(1)], dim=1)
+        z_sdf = torch.cat([pad.unsqueeze(2), sdf, pad.unsqueeze(2)], dim=2)
+        df = torch.stack([
+            x_sdf[2:, :, :] - x_sdf[:-2, :, :],
+            y_sdf[:, 2:, :] - y_sdf[:, :-2, :],
+            z_sdf[:, :, 2:] - z_sdf[:, :, :-2]], dim=-1) / (2 * h)
 
-    ddf = torch.stack([
-        x_sdf[2:, :, :] + x_sdf[:-2, :, :] - 2 * x_sdf[1:-1, :, :],
-        y_sdf[:, 2:, :] + y_sdf[:, :-2, :] - 2 * y_sdf[:, 1:-1, :],
-        z_sdf[:, :, 2:] + z_sdf[:, :, :-2] - 2 * z_sdf[:, :, 1:-1]], dim=-1) / h ** 2
-
-    loss = torch.mean(((torch.norm(df, dim=-1) - 1) * torch.sign(sdf) - eps * torch.sum(ddf, dim=-1)) ** 2)
+        ddf = torch.stack([
+            x_sdf[2:, :, :] + x_sdf[:-2, :, :] - 2 * x_sdf[1:-1, :, :],
+            y_sdf[:, 2:, :] + y_sdf[:, :-2, :] - 2 * y_sdf[:, 1:-1, :],
+            z_sdf[:, :, 2:] + z_sdf[:, :, :-2] - 2 * z_sdf[:, :, 1:-1]], dim=-1) / h ** 2
+    else:
+        if not sdf.requires_grad:
+            return torch.tensor(0).type_as(sdf)
+        df = torch.autograd.grad(sdf.sum(), sdf_points, retain_graph=True, allow_unused=True, create_graph=True)[0]
+        ddf = torch.stack([
+            torch.autograd.grad(df[:, 0].sum(), sdf_points, retain_graph=True, allow_unused=True)[0][:, 0],
+            torch.autograd.grad(df[:, 1].sum(), sdf_points, retain_graph=True, allow_unused=True)[0][:, 1],
+            torch.autograd.grad(df[:, 2].sum(), sdf_points, retain_graph=True, allow_unused=True)[0][:, 2]
+        ], dim=-1)
+    loss = torch.mean(((torch.norm(df.view(-1, 3), dim=-1) - 1) * torch.sign(sdf.view(-1))
+                       - eps * torch.sum(ddf.view(-1, 3), dim=-1)) ** 2)
     return loss
 
 
-def coarea_sdf_reg(sdf, beta=1e-6):
-    grid3 = len(sdf)
-    grid_res = int(grid3 ** (1 / 3) + 0.5)
-    sdf = sdf.view(grid_res, grid_res, grid_res)
+def coarea_sdf_reg(sdf, beta=1e-6, grid_grad=False, sdf_points=None):
+    assert sdf_points is not None or grid_grad, 'Coarea gradients requires either initial points or approx grid'
+    if grid_grad:
+        grid3 = len(sdf)
+        grid_res = int(grid3 ** (1 / 3) + 0.5)
+        sdf = sdf.view(grid_res, grid_res, grid_res)
 
-    xx, yy, zz = torch.meshgrid(torch.arange(grid_res - 1).type_as(sdf).long(),
-                                torch.arange(grid_res - 1).type_as(sdf).long(),
-                                torch.arange(grid_res - 1).type_as(sdf).long())
-    xx, yy, zz = xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)
+        xx, yy, zz = torch.meshgrid(torch.arange(grid_res - 1).type_as(sdf).long(),
+                                    torch.arange(grid_res - 1).type_as(sdf).long(),
+                                    torch.arange(grid_res - 1).type_as(sdf).long())
+        xx, yy, zz = xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)
 
-    # trilinear interpolation for center of the voxel
-    f_mid = (sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] + sdf[xx, yy + 1, zz + 1] +
-             sdf[xx + 1, yy, zz] + sdf[xx + 1, yy, zz + 1] + sdf[xx + 1, yy + 1, zz] + sdf[xx + 1, yy + 1, zz + 1]) / 8
-
-    # gradient of trilinear interpolation at the center of the voxel
-    df_mid = torch.stack([
-        sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] + sdf[xx, yy + 1, zz + 1] +
-        -sdf[xx + 1, yy, zz] - sdf[xx + 1, yy, zz + 1] - sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1],
-        sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] - sdf[xx, yy + 1, zz] - sdf[xx, yy + 1, zz + 1] +
-        sdf[xx + 1, yy, zz] + sdf[xx + 1, yy, zz + 1] - sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1],
-        sdf[xx, yy, zz] - sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] - sdf[xx, yy + 1, zz + 1] +
-        sdf[xx + 1, yy, zz] - sdf[xx + 1, yy, zz + 1] + sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1]
-    ], dim=-1) / 4.0
-
-    loss = torch.mean(torch.exp(torch.abs(f_mid * (-1)) / beta) / (2 * beta) * torch.norm(df_mid, dim=-1))
+        # trilinear interpolation for center of the voxel
+        f = (sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] + sdf[xx, yy + 1, zz + 1] +
+             sdf[xx + 1, yy, zz] + sdf[xx + 1, yy, zz + 1] + sdf[xx + 1, yy + 1, zz] + sdf[
+                 xx + 1, yy + 1, zz + 1]) / 8
+        # gradient of trilinear interpolation at the center of the voxel
+        df = torch.stack([
+            sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] + sdf[xx, yy + 1, zz + 1] +
+            -sdf[xx + 1, yy, zz] - sdf[xx + 1, yy, zz + 1] - sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1],
+            sdf[xx, yy, zz] + sdf[xx, yy, zz + 1] - sdf[xx, yy + 1, zz] - sdf[xx, yy + 1, zz + 1] +
+            sdf[xx + 1, yy, zz] + sdf[xx + 1, yy, zz + 1] - sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1],
+            sdf[xx, yy, zz] - sdf[xx, yy, zz + 1] + sdf[xx, yy + 1, zz] - sdf[xx, yy + 1, zz + 1] +
+            sdf[xx + 1, yy, zz] - sdf[xx + 1, yy, zz + 1] + sdf[xx + 1, yy + 1, zz] - sdf[xx + 1, yy + 1, zz + 1]
+        ], dim=-1) / 4.0
+    else:
+        if not sdf.requires_grad:
+            return torch.tensor(0).type_as(sdf)
+        f = sdf
+        df = torch.autograd.grad(sdf.sum(), sdf_points, retain_graph=True, allow_unused=True)[0]
+    loss = torch.mean(torch.exp(torch.abs(f.view(-1)) / beta * (-1) - np.log(2 * beta))
+                      * torch.norm(df.view(-1, 3), dim=-1))
     return loss

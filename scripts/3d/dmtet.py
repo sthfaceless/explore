@@ -7,13 +7,14 @@ from pytorch_lightning import Trainer
 
 import kaolin
 from modules.ddd.dmtet_trainer import PCD2Mesh
-from modules.ddd.shapenet_pcd import ShapenetPointClouds
+from modules.ddd.dataset import ShapenetPointClouds
 
 
 def get_parser():
     parser = ArgumentParser(description="Training deep marching tetrahedras representation")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to shapenet")
+    parser.add_argument("--smoothed_suffix", default=None, help="Suffix to smoothed shapenet files")
     parser.add_argument("--tets", default=None, help="Path to file with tetrahedras")
     parser.add_argument("--cats", default=['plane'], nargs='+', help="Shapenet categories to train")
     parser.add_argument("--noise", default=1e-2, type=float, help="How much noise to add to point cloud")
@@ -67,8 +68,11 @@ def get_parser():
     parser.add_argument("--sdf_sign_reg", default=0.1, type=float, help="Regularization for close tetrahedras sdf sign")
     parser.add_argument("--sdf_coarea", default=1e-4, type=float, help="Regularization for solve poisson equation")
     parser.add_argument("--sdf_viscosity", default=1e-2, type=float, help="Regularization for area minimization")
+    parser.add_argument("--min_initial_mesh_weight", default=0.1, type=float,
+                        help="Minimal weight for chamfer on initial mesh")
     parser.add_argument("--continuous_reg", default=0.01, type=float,
                         help="[Currently not used] Ensure that close tetrahedras has similar faces")
+    parser.add_argument("--grid_grad", action='store_true', help='Use grid gradient approximation for sdf')
 
     parser.add_argument("--sdf_clamp", default=1.0, type=float, help="Max absolute true sdf value")
     parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
@@ -85,8 +89,8 @@ def get_parser():
     parser.add_argument("--logs_path", default="./", help="Kaolin logs dir")
     parser.add_argument("--out_model_name", default="dmtet", help="Name of output model path")
     parser.add_argument("--task_name", default="DMTet training", help="ClearML task name")
-    parser.add_argument("--clearml", action='store_true')
-    parser.set_defaults(clearml=False, disc=False)
+    parser.add_argument("--clearml", action='store_true', help='Enable log to clearml agent')
+    parser.set_defaults(clearml=False, disc=False, grid_grad=False)
     return parser
 
 
@@ -108,18 +112,20 @@ if __name__ == "__main__":
                                                        filename=os.path.basename(args.out_model_name))
 
     dataset = ShapenetPointClouds(shapenet_root=args.dataset, n_points=args.n_points, categories=args.cats,
-                                  noise=args.noise, cache_dir=args.cache_dir, cache_scenes=args.cache_size)
+                                  noise=args.noise, cache_dir=args.cache_dir, cache_scenes=args.cache_size,
+                                  smoothed_suffix=args.smoothed_suffix)
     timelapse = kaolin.visualize.Timelapse(args.logs_path)
     model = PCD2Mesh(dataset=dataset, clearml=logger, timelapse=timelapse, train_rate=args.train_rate,
                      grid_resolution=args.grid, ref=args.ref, lap_reg=args.laplace_reg,
                      sdf_sign_reg=args.sdf_sign_reg, sdf_value_reg=args.sdf_value_reg,
-                     tets=args.tets, steps=args.steps[-1] * args.acc_grads,
+                     tets=args.tets, steps=args.steps[-1] * args.acc_grads, grid_grad=args.grid_grad,
                      surface_subdivision_warmup=args.surface_subdivision_warmup,
                      steps_schedule=args.steps, min_lr_rate=args.min_lr_rate, encoder_dims=args.encoder_dims,
                      encoder_grids=args.encoder_grids, delta_scale=args.delta_scale,
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
                      gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
                      sdf_viscosity=args.sdf_viscosity, sdf_coarea=args.sdf_coarea,
+                     min_initial_mesh_weight=args.min_initial_mesh_weight,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,

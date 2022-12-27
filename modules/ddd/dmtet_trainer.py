@@ -13,10 +13,11 @@ class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
                  learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True, use_rasterizer=True,
-                 n_views=8, view_resolution=256, tets=None, steps=100000,
+                 n_views=8, view_resolution=256, tets=None, steps=100000, grid_grad=False,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
+                 min_initial_mesh_weight=0.1,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000, sdf_sign_reg=1e-4, sdf_value_reg=1e-2,
                  continuous_reg=1e-2, surface_subdivision_warmup=1000, sdf_viscosity=1e-2, sdf_coarea=1e-4,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
@@ -58,7 +59,7 @@ class PCD2Mesh(pl.LightningModule):
             data = np.load(tets)
             tet_vertexes = torch.tensor(data['vertices'], dtype=torch.float32) * 2
             tetrahedras = torch.tensor(data['tets'], dtype=torch.long)
-        self.register_buffer('tet_vertexes', tet_vertexes)
+        self.register_buffer('tet_vertexes', tet_vertexes.requires_grad_())
         self.register_buffer('tetrahedras', tetrahedras)
         self.n_tetrahedra_vertexes = len(tet_vertexes)
         self.grid_res = grid_resolution
@@ -73,6 +74,7 @@ class PCD2Mesh(pl.LightningModule):
         self.true_volume_division = n_volume_division
         self.n_surface_division = n_surface_division
         self.surface_subdivision_warmup = surface_subdivision_warmup
+        self.min_initial_mesh_weight = min_initial_mesh_weight
         self.surface_subdivision_weight = 0
         self.encoder_grids = encoder_grids
         self.res_features = res_features
@@ -84,11 +86,13 @@ class PCD2Mesh(pl.LightningModule):
         self.chamfer_samples = chamfer_samples
         self.normal_weight = normal_weight
         self.lap_reg = lap_reg
+        self.continuous_reg = continuous_reg
+
         self.sdf_value_reg = sdf_value_reg
         self.sdf_sign_reg = sdf_sign_reg
         self.sdf_viscosity = sdf_viscosity
         self.sdf_coarea = sdf_coarea
-        self.continuous_reg = continuous_reg
+        self.grid_grad = grid_grad
 
         self.curvature_threshold = curvature_threshold
         self.curvature_samples = curvature_samples
@@ -172,12 +176,12 @@ class PCD2Mesh(pl.LightningModule):
         dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
         return dists
 
-    def chamfer_loss(self, pred_vertices, pred_faces, vertices, faces):
+    def chamfer_loss(self, pred_vertices, pred_faces, vertices, faces, sample_multiplier=10):
         # calculate pcd chamfer loss
         face_areas = torch.nan_to_num(kaolin.ops.mesh.face_areas(pred_vertices, pred_faces), nan=1.0)
-        pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples * 10)
-        pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(pred_vertices, pred_faces, self.chamfer_samples,
-                                                            areas=face_areas)
+        pcd, true_faces_ids = kaolin.ops.mesh.sample_points(vertices, faces, self.chamfer_samples * sample_multiplier)
+        pred_pcd, faces_ids = kaolin.ops.mesh.sample_points(pred_vertices, pred_faces,
+                                                            self.chamfer_samples * sample_multiplier, areas=face_areas)
         chamfer_loss = kaolin.metrics.pointcloud.chamfer_distance(pred_pcd, pcd)[0]
         return chamfer_loss
 
@@ -201,6 +205,7 @@ class PCD2Mesh(pl.LightningModule):
             if self.global_step - self.steps_schedule[2] < self.surface_subdivision_warmup:
                 self.surface_subdivision_weight = \
                     (self.global_step - self.steps_schedule[2] + 1) / self.surface_subdivision_warmup
+                self.surface_subdivision_weight = min(self.surface_subdivision_weight, 1 - self.min_initial_mesh_weight)
             else:
                 self.surface_subdivision_weight = 1.0
         if self.debug and self.global_step % self.debug_interval == 0:
@@ -298,9 +303,10 @@ class PCD2Mesh(pl.LightningModule):
                 out['delta_sdf'] = sdf_value_reg(delta_s, get_tetrahedras_edges(tetrahedras, unique=True),
                                                  self.grid_res)
             if abs(self.sdf_viscosity) > 1e-6:
-                out['sdf_viscosity'] = viscosity_sdf_reg(tet_sdf[0], h=self.true_grid_res)
+                out['sdf_viscosity'] = viscosity_sdf_reg(tet_sdf[0], h=self.true_grid_res, grid_grad=self.grid_grad,
+                                                         sdf_points=self.tet_vertexes)
             if abs(self.sdf_coarea) > 1e-6:
-                out['sdf_coarea'] = coarea_sdf_reg(tet_sdf[0])
+                out['sdf_coarea'] = coarea_sdf_reg(tet_sdf[0], grid_grad=self.grid_grad, sdf_points=self.tet_vertexes)
         else:
             if abs(self.delta_weight) > 1e-6:
                 out['delta_vertex'] = torch.tensor(0).type_as(delta_v)
@@ -404,6 +410,14 @@ class PCD2Mesh(pl.LightningModule):
                     out['delta_sdf'] = out['delta_sdf'] + sdf_value_reg(delta_s,
                                                                         get_tetrahedras_edges(tetrahedras, unique=True),
                                                                         self.grid_res * 2 ** n_volume_division)
+                if abs(self.sdf_viscosity) > 1e-6:
+                    out['sdf_viscosity'] = viscosity_sdf_reg(tet_sdf[0],
+                                                             h=(self.true_grid_res * (2 ** n_volume_division)),
+                                                             grid_grad=self.grid_grad,
+                                                             sdf_points=self.tet_vertexes)
+                if abs(self.sdf_coarea) > 1e-6:
+                    out['sdf_coarea'] = coarea_sdf_reg(tet_sdf[0], grid_grad=self.grid_grad,
+                                                       sdf_points=self.tet_vertexes)
 
             ####################### DEBUG CODE #######################
             if self.debug_state:
@@ -676,7 +690,7 @@ class PCD2Mesh(pl.LightningModule):
         with torch.no_grad():
             for _pcd_noised in pcd_noised:
                 out = self.single_mesh_step(pcd_noised=_pcd_noised.unsqueeze(0),
-                                            n_volume_division=self.n_volume_division + 1)
+                                            n_volume_division=self.n_volume_division)
                 if 'mesh_vertices' in out and 'mesh_faces' in out and out['mesh_faces'].numel() > 0:
                     mesh_vertices.append(out['mesh_vertices'][0])
                     mesh_faces.append(out['mesh_faces'])
