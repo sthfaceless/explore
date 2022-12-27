@@ -125,7 +125,7 @@ if __name__ == "__main__":
                      sdf_dims=args.sdf_dims, disc_dims=args.disc_dims, gcn_dims=args.gcn_dims,
                      gcn_hidden=args.gcn_hidden, debug_interval=args.debug_interval,
                      sdf_viscosity=args.sdf_viscosity, sdf_coarea=args.sdf_coarea,
-                     min_initial_mesh_weight=args.min_initial_mesh_weight,
+                     min_initial_mesh_weight=args.min_initial_mesh_weight, disc=args.disc,
                      sdf_weight=args.sdf_weight, disc_weight=args.disc_weight, chamfer_weight=args.chamfer_weight,
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,
