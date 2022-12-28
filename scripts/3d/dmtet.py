@@ -130,7 +130,7 @@ if __name__ == "__main__":
                      normal_weight=args.normal_weight, delta_weight=args.delta_weight, learning_rate=args.learning_rate,
                      n_volume_division=args.n_volume_division, n_surface_division=args.n_surface_division,
                      chamfer_samples=args.n_points, sdf_clamp=args.sdf_clamp, disc_sdf_scale=args.disc_sdf_scale,
-                     disc_sdf_grid=args.disc_sdf_grid, curvature_samples=args.curvature_samples,
+                     disc_sdf_grid=args.disc_sdf_grid, disc_samples=args.disc_samples,
                      curvature_threshold=args.curvature_threshold, disc_v_noise=args.disc_v_noise,
                      encoder_out=args.encoder_out, noise=args.noise, batch_size=args.batch_size)
     trainer = Trainer(max_steps=args.steps[-1] * args.acc_grads, val_check_interval=args.steps[-1] // args.validations,
