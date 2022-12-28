@@ -23,3 +23,7 @@ class Rasterizer:
         out = nvt.rasterize(glctx=self.context, pos=vertices.float(), tri=faces.int(),
                             resolution=(res, res))[0]
         return out
+
+    def interpolate(self, attr, rast, tri):
+        out = nvt.interpolate(attr.float(), rast, tri.int())[0]
+        return out

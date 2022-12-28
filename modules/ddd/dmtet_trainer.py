@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 
 import kaolin
 from modules.common.trainer import SimpleLogger
+from modules.dd.model import *
 from modules.ddd.model import *
 from modules.ddd.rast_util import Rasterizer
 
@@ -12,16 +13,16 @@ from modules.ddd.rast_util import Rasterizer
 class PCD2Mesh(pl.LightningModule):
 
     def __init__(self, dataset=None, clearml=None, timelapse=None, train_rate=0.8, grid_resolution=64,
-                 learning_rate=1e-4, debug_interval=100, ref='gcn', disc=True, use_rasterizer=True,
+                 learning_rate=1e-4, debug_interval=100, ref='gcn', disc='3d', use_rasterizer=True,
                  n_views=8, view_resolution=256, tets=None, steps=100000, grid_grad=False,
                  steps_schedule=(1000, 20000, 50000, 100000), min_lr_rate=1.0, encoder_dims=(64, 128, 256),
                  encoder_out=256, with_norm=False, delta_scale=1 / 2.0, res_features=64,
                  sdf_dims=(256, 256, 128, 64), disc_dims=(32, 64, 128, 256), sdf_clamp=0.03,
-                 min_initial_mesh_weight=0.1,
+                 min_initial_mesh_weight=0.1, disc_res=512,
                  n_volume_division=1, n_surface_division=1, chamfer_samples=5000, sdf_sign_reg=1e-4, sdf_value_reg=1e-2,
                  continuous_reg=1e-2, surface_subdivision_warmup=1000, sdf_viscosity=1e-2, sdf_coarea=1e-4,
                  sdf_weight=0.4, gcn_dims=(256, 128), gcn_hidden=(128, 64), delta_weight=1.0, disc_weight=10,
-                 curvature_threshold=torch.pi / 16, curvature_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
+                 curvature_threshold=torch.pi / 16, disc_samples=10, disc_sdf_grid=16, disc_sdf_scale=0.1,
                  disc_v_noise=1e-3, chamfer_weight=500, normal_weight=1e-4, lap_reg=0.5,
                  encoder_grids=(32, 16, 8), batch_size=16, pe_powers=16, noise=0.02):
         super(PCD2Mesh, self).__init__()
@@ -34,7 +35,7 @@ class PCD2Mesh(pl.LightningModule):
         self.use_rasterizer = use_rasterizer
         self.n_views = n_views
         self.view_resolution = view_resolution
-        if use_rasterizer:
+        if use_rasterizer or disc is not None:
             self.rasterizer = Rasterizer(torch.device('cuda:0'))
 
         self.timelapse = timelapse
@@ -95,7 +96,7 @@ class PCD2Mesh(pl.LightningModule):
         self.grid_grad = grid_grad
 
         self.curvature_threshold = curvature_threshold
-        self.curvature_samples = curvature_samples
+        self.disc_samples = disc_samples
         self.disc_sdf_grid = disc_sdf_grid
         self.disc_sdf_scale = disc_sdf_scale
         self.disc_v_noise = disc_v_noise
@@ -138,7 +139,13 @@ class PCD2Mesh(pl.LightningModule):
             raise NotImplementedError
 
         self.disc = disc
-        self.sdf_disc = SDFDiscriminator(input_dim=1 + self.pos_features, hidden_dims=disc_dims, with_norm=True)
+        self.disc_res = disc_res
+        if disc == '3d':
+            self.discriminator = SDFDiscriminator(input_dim=1 + self.pos_features, hidden_dims=disc_dims,
+                                                  with_norm=True)
+        else:
+            self.discriminator = Discriminator2D(shape=(disc_res, disc_res), input_dim=1, hidden_dims=disc_dims,
+                                                 with_norm=True)
 
         # state variables
         self.volume_refinement = False
@@ -168,11 +175,12 @@ class PCD2Mesh(pl.LightningModule):
         return sdf
 
     @torch.no_grad()
-    def get_mesh_udf(self, points, vertices, faces, pcd=None, num_samples=5000):
+    def get_mesh_udf(self, points, vertices, faces, pcd=None, sample_multiplier=10):
         if faces.numel() == 0 or points.numel() == 0:
             return torch.zeros(1, len(points[0])).type_as(points)
         if pcd is None:
-            pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces, num_samples=num_samples)
+            pcd, _ = kaolin.ops.mesh.sample_points(vertices, faces,
+                                                   num_samples=self.chamfer_samples * sample_multiplier)
         dists, _ = kaolin.metrics.pointcloud.sided_distance(points, pcd)
         return dists
 
@@ -198,7 +206,7 @@ class PCD2Mesh(pl.LightningModule):
         if self.global_step >= self.steps_schedule[0]:
             self.volume_refinement = True
             self.n_volume_division = self.true_volume_division
-        if self.global_step >= self.steps_schedule[1] and self.disc:
+        if self.global_step >= self.steps_schedule[1] and self.disc is not None:
             self.adversarial_training = True
         if self.global_step >= self.steps_schedule[2]:
             self.surface_subdivision = True
@@ -578,7 +586,7 @@ class PCD2Mesh(pl.LightningModule):
                                         n_surface_division=n_surface_division, true_sdf=true_sdf)
 
         ### STEP 4 --- Discriminate output
-        if self.adversarial_training:
+        if self.volume_refinement and self.disc == '3d':
             # find high curvature points on mesh
             curvatures = calculate_gaussian_curvature(vertices, faces)
             indexes = torch.arange(len(curvatures)).type_as(curvatures).long()[curvatures >= self.curvature_threshold]
@@ -605,8 +613,7 @@ class PCD2Mesh(pl.LightningModule):
                 true_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0),
                                                                vertices.unsqueeze(0),
                                                                get_close_faces(selected_vertices[grid_idx],
-                                                                               vertices, faces, self.disc_sdf_scale),
-                                                               num_samples=self.chamfer_samples) \
+                                                                               vertices, faces, self.disc_sdf_scale)) \
                                             .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
                                              for grid_idx in range(self.curvature_samples)], dim=0)
                 true_udf_features = torch.cat([pos_features, true_grid_udf], dim=-1)
@@ -614,8 +621,7 @@ class PCD2Mesh(pl.LightningModule):
                     pred_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0), mesh_vertices,
                                                                    get_close_faces(selected_vertices[grid_idx],
                                                                                    mesh_vertices[0], mesh_faces,
-                                                                                   self.disc_sdf_scale),
-                                                                   num_samples=self.chamfer_samples) \
+                                                                                   self.disc_sdf_scale)) \
                                                 .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
                                                  for grid_idx in range(self.curvature_samples)], dim=0)
                     pred_udf_features = torch.cat([pos_features, pred_grid_udf], dim=-1)
@@ -626,15 +632,15 @@ class PCD2Mesh(pl.LightningModule):
                 sdf_features = true_udf_features
                 if len(pred_udf_features) > 0:
                     sdf_features = torch.cat([sdf_features, pred_udf_features], dim=0)
-                disc_preds = self.sdf_disc(sdf_features.movedim(-1, 1))
+                disc_preds = self.discriminator(sdf_features.movedim(-1, 1))
                 if len(pred_udf_features) > 0:
                     if self.adversarial_training:
-                        out['adv_loss'] = torch.mean((1 - disc_preds[:len(pred_udf_features)]) ** 2)
+                        out['adv_loss'] = torch.mean((1 - disc_preds[len(true_udf_features):]) ** 2)
                         out['loss'] = out['loss'] + weight_loss(out['adv_loss'], self.disc_weight)
-                    out['disc_loss'] = torch.mean(disc_preds[:len(pred_udf_features)] ** 2) \
-                                       + torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
+                    out['disc_loss'] = torch.mean(disc_preds[len(true_udf_features):] ** 2) \
+                                       + torch.mean((1 - disc_preds[:len(true_udf_features)]) ** 2)
                 else:
-                    out['disc_loss'] = torch.mean((1 - disc_preds[len(pred_udf_features):]) ** 2)
+                    out['disc_loss'] = torch.mean((1 - disc_preds) ** 2)
 
                 ####################### DEBUG CODE #######################
                 if self.debug_state:
@@ -654,6 +660,39 @@ class PCD2Mesh(pl.LightningModule):
                                                        * pug.clamp(min=-0.5, max=0.5) + 0.5),
                                               epoch=self.global_step)
                 ############################################################
+        if self.volume_refinement and self.disc == '2d':
+            # get random camera views of mesh
+            poses = get_random_view(torch.ones(self.disc_samples).type_as(vertices) * 2.0)
+            projections = projection_matrix(near=torch.ones(self.disc_samples).type_as(vertices) * 1.0,
+                                            far=torch.ones(self.disc_samples).type_as(vertices) * 3.0)
+            # render true mesh
+            true_rast = self.rasterizer.rasterize(vertices, faces, poses, projections, res=self.disc_res)
+            true_silhouettes = (self.rasterizer.interpolate(
+                torch.ones(self.disc_samples, len(vertices), 1).type_as(vertices), true_rast, faces) - 0.5) * 2
+            # render pred mesh
+            mesh_vertices, mesh_faces = out['mesh_vertices'], out['mesh_faces']
+            pred_silhouettes = None
+            if mesh_faces.numel() > 0:
+                pred_rast = self.rasterizer.rasterize(mesh_vertices[0], mesh_faces, poses, projections,
+                                                      res=self.disc_res)
+                pred_silhouettes = (self.rasterizer.interpolate(
+                    torch.ones(self.disc_samples, mesh_vertices.shape[1], 1).type_as(mesh_vertices), pred_rast, faces)
+                                    - 0.5) * 2
+            # create input features and labels for discriminator
+            if pred_silhouettes is not None:
+                silhouettes = torch.cat([true_silhouettes, pred_silhouettes])
+                labels = torch.cat([torch.ones(len(true_silhouettes)).type_as(silhouettes),
+                                    torch.zeros(len(pred_silhouettes)).type_as(silhouettes)], dim=0)
+            else:
+                silhouettes = true_silhouettes
+                labels = torch.ones(len(true_silhouettes)).type_as(silhouettes)
+
+            disc_preds = self.discriminator(silhouettes.movedim(-1, 1))
+            if self.adversarial_training and pred_silhouettes is not None:
+                out['adv_loss'] = torch.mean((1 - disc_preds[len(true_silhouettes):]) ** 2)
+                out['loss'] = out['loss'] + weight_loss(out['adv_loss'], self.disc_weight)
+
+            out['disc_loss'] = torch.mean((disc_preds - labels) ** 2)
 
         for k, v in out.items():
             if isinstance(v, torch.Tensor) and v.numel() == 1:
@@ -743,7 +782,7 @@ class PCD2Mesh(pl.LightningModule):
             return loss
         # discriminator optimization
         if optimizer_idx == 1:
-            if not self.disc or not self.volume_refinement:
+            if self.disc is None or not self.volume_refinement:
                 return None
             outs = [self.shared_step(v, f, optimizer_idx, true_sdf=sdf)
                     for v, f, sdf in zip(batch['vertices'], batch['faces'], batch['sdf'])]
@@ -770,7 +809,8 @@ class PCD2Mesh(pl.LightningModule):
             'scheduler': gen_scheduler,
             'interval': 'step'
         }
-        dis_optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.sdf_disc.parameters(), betas=(0.9, 0.99))
+        dis_optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.discriminator.parameters(),
+                                         betas=(0.9, 0.99))
         dis_steps = self.steps
         dis_scheduler = torch.optim.lr_scheduler.OneCycleLR(dis_optimizer, max_lr=self.learning_rate,
                                                             pct_start=self.steps_schedule[0] / dis_steps,

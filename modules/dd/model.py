@@ -1,3 +1,5 @@
+import torch.nn
+
 from modules.common.model import *
 from modules.gen.model import VAE
 
@@ -244,4 +246,47 @@ class ImageVAE(VAE):
             h = block(h)
         h = self.out_norm(h)
         out = torch.nn.functional.tanh(self.out_layer(h))
+        return out
+
+
+class Discriminator2D(torch.nn.Module):
+
+    def __init__(self, shape, hidden_dims=(32, 64, 128, 256), with_norm=True, input_dim=3, kernel_size=3, num_groups=32,
+                 attention_dim=0, num_heads=None, head_channel=32):
+        super(Discriminator2D, self).__init__()
+        self.convs = torch.nn.ModuleList([])
+        self.with_norm = with_norm
+
+        current_res = shape[0]
+        for prev_dim, dim in zip([input_dim] + hidden_dims[:-1], hidden_dims):
+            conv = torch.nn.Module()
+            conv.layer1 = torch.nn.Conv2d(prev_dim, dim, kernel_size=kernel_size, padding=kernel_size // 2)
+            if current_res <= attention_dim:
+                conv.layer2 = MHAAttention2D(dim, num_heads=num_heads, head_channel=head_channel)
+            else:
+                conv.layer2 = torch.nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2)
+            conv.ds = DownSample2d(dim, dim, kernel_size=kernel_size)
+            if with_norm:
+                conv.norm1 = norm(prev_dim, num_groups)
+                conv.norm2 = norm(dim, num_groups)
+            self.convs.append(conv)
+            current_res //= 2
+
+        if with_norm:
+            self.out_norm = norm(hidden_dims[-1], num_groups)
+        self.out_layer = torch.nn.Linear(hidden_dims[-1] * current_res ** 2, 1)
+
+    def forward(self, x):
+        for block in self.convs:
+            if self.with_norm:
+                x = block.norm1(x)
+            x = block.layer1(nonlinear(x))
+            if self.with_norm:
+                x = block.norm2(x)
+            x = block.layer2(nonlinear(x))
+            x = block.ds(x)
+        if self.with_norm:
+            x = self.out_norm(x)
+        out = self.out_layer(x.view(x.shape[0], -1)).view(-1)
+        out = torch.sigmoid(out)
         return out

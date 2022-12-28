@@ -6,8 +6,8 @@ import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 
 import kaolin
-from modules.ddd.dmtet_trainer import PCD2Mesh
 from modules.ddd.dataset import ShapenetPointClouds
+from modules.ddd.dmtet_trainer import PCD2Mesh
 
 
 def get_parser():
@@ -54,7 +54,7 @@ def get_parser():
     parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
     parser.add_argument("--res_features", default=64, type=int, help="Num of features that will traverse over layers")
     parser.add_argument("--ref", default='gcn', help="What kind of network to use for refinement [gcn, conv, linear]")
-    parser.add_argument("--disc", action='store_true')
+    parser.add_argument("--disc", default=None, help='What kind of discriminator to use (2d | 3d)')
 
     parser.add_argument("--disc_weight", default=1.0, type=float, help="Weight for discriminator loss")
     parser.add_argument("--chamfer_weight", default=100, type=float, help="Weight for chamfer distance")
@@ -78,7 +78,7 @@ def get_parser():
     parser.add_argument("--curvature_threshold", default=3.1415926 / 16, type=float,
                         help="Vertices gaussian curvature threshold")
     parser.add_argument("--disc_sdf_scale", default=0.05, type=float, help="SDF discriminator grid size")
-    parser.add_argument("--curvature_samples", default=10, type=int, help="SDF discriminator vertex samples")
+    parser.add_argument("--disc_samples", default=10, type=int, help="Discriminator samples")
     parser.add_argument("--disc_sdf_grid", default=16, type=int, help="SDF discriminator grid resolution")
     parser.add_argument("--disc_v_noise", default=1e-3, type=float, help="SDF discriminator origin vertex noise")
 
@@ -90,7 +90,7 @@ def get_parser():
     parser.add_argument("--out_model_name", default="dmtet", help="Name of output model path")
     parser.add_argument("--task_name", default="DMTet training", help="ClearML task name")
     parser.add_argument("--clearml", action='store_true', help='Enable log to clearml agent')
-    parser.set_defaults(clearml=False, disc=False, grid_grad=False)
+    parser.set_defaults(clearml=False, grid_grad=False)
     return parser
 
 
