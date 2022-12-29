@@ -33,7 +33,7 @@ def get_parser():
     parser.add_argument("--batch_size", default=1, type=int, help="Batch size in training")
     parser.add_argument("--validations", default=100, type=int, help="Total numbers of validations during training")
     parser.add_argument("--debug_interval", default=-1, type=int, help="Interval of steps to debug model")
-    parser.add_argument("--acc_grads", default=10, type=int,
+    parser.add_argument("--acc_grads", default=4, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
     parser.add_argument("--samples_epoch", default=5, type=int, help="Samples of generator in one epoch")
     parser.add_argument("--img_size", default=128, type=int, help="Image size to train and render")
@@ -43,34 +43,34 @@ def get_parser():
                         help="Hidden dims for volume encoder")
     parser.add_argument("--encoder_grids", default=[64, 32, 16, 8], nargs='+', type=int,
                         help="Grid size for volume encoder")
-    parser.add_argument("--sdf_dims", default=[256, 256, 128, 64], nargs='+', type=int, help="Hidden dims for SDF mlp")
+    parser.add_argument("--sdf_dims", default=[512, 512, 256, 256, 128, 64], nargs='+', type=int, help="Hidden dims for SDF mlp")
     parser.add_argument("--disc_dims", default=[32, 64, 128, 256], nargs='+', type=int,
                         help="SDF discriminator hidden dims")
     parser.add_argument("--gcn_dims", default=[256, 128], nargs='+', type=int,
                         help="Graph Convolutional refinement conv dims")
     parser.add_argument("--gcn_hidden", default=[128, 64], nargs='+', type=int,
                         help="Graph Convolutional refinement linear dims")
-    parser.add_argument("--grid", default=35, type=int, help="tetrahedras grid resolution")
+    parser.add_argument("--grid", default=32, type=int, help="tetrahedras grid resolution")
     parser.add_argument("--encoder_out", default=256, type=int, help="Positional encoding output dimension")
     parser.add_argument("--res_features", default=64, type=int, help="Num of features that will traverse over layers")
     parser.add_argument("--ref", default='gcn', help="What kind of network to use for refinement [gcn, conv, linear]")
     parser.add_argument("--disc", default=None, help='What kind of discriminator to use (2d | 3d)')
 
-    parser.add_argument("--disc_weight", default=1.0, type=float, help="Weight for discriminator loss")
+    parser.add_argument("--disc_weight", default=0.01, type=float, help="Weight for discriminator loss")
     parser.add_argument("--chamfer_weight", default=100, type=float, help="Weight for chamfer distance")
     parser.add_argument("--normal_weight", default=1e-5, type=float, help="Weight for faces normal reg")
     parser.add_argument("--delta_weight", default=0.1, type=float, help="Weight for vertexes delta change reg")
     parser.add_argument("--delta_scale", default=1 / 2.0, type=float,
                         help="What value of grid resolution it could move")
     parser.add_argument("--sdf_weight", default=0.0, type=float, help="Weight for sdf prediction reg")
-    parser.add_argument("--laplace_reg", default=0.1, type=float, help="Regularization for delta laplace when moving")
+    parser.add_argument("--laplace_reg", default=0.01, type=float, help="Regularization for delta laplace when moving")
     parser.add_argument("--sdf_value_reg", default=0.1, type=float, help="Regularization for delta sdf values")
-    parser.add_argument("--sdf_sign_reg", default=0.1, type=float, help="Regularization for close tetrahedras sdf sign")
-    parser.add_argument("--sdf_coarea", default=1e-4, type=float, help="Regularization for solve poisson equation")
-    parser.add_argument("--sdf_viscosity", default=1e-2, type=float, help="Regularization for area minimization")
+    parser.add_argument("--sdf_sign_reg", default=0.0, type=float, help="Regularization for close tetrahedras sdf sign")
+    parser.add_argument("--sdf_coarea", default=0.0, type=float, help="Regularization for solve poisson equation")
+    parser.add_argument("--sdf_viscosity", default=0.0, type=float, help="Regularization for area minimization")
     parser.add_argument("--min_initial_mesh_weight", default=0.1, type=float,
                         help="Minimal weight for chamfer on initial mesh")
-    parser.add_argument("--continuous_reg", default=0.01, type=float,
+    parser.add_argument("--continuous_reg", default=0.00, type=float,
                         help="[Currently not used] Ensure that close tetrahedras has similar faces")
     parser.add_argument("--grid_grad", action='store_true', help='Use grid gradient approximation for sdf')
 
