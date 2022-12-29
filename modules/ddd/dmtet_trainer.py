@@ -152,6 +152,9 @@ class PCD2Mesh(pl.LightningModule):
         self.adversarial_training = False
         self.surface_subdivision = False
 
+        self.volume_params = list(self.sdf_points_encoder.parameters()) + list(self.sdf_model.parameters()) + list(
+            self.ref_points_encoder.parameters()) + list(self.ref1.parameters()) + list(self.ref2.parameters())
+
         ####################### DEBUG CODE #######################
         if self.debug:
             print(self.lg.log_tensor(tet_vertexes.transpose(0, 1), 'Tetrahedras grid vertices', depth=1))
@@ -210,6 +213,9 @@ class PCD2Mesh(pl.LightningModule):
             self.adversarial_training = True
         if self.global_step >= self.steps_schedule[2]:
             self.surface_subdivision = True
+            if self.global_step == self.steps_schedule[2]:
+                for param in self.volume_params:
+                    param.requires_grad_(False)
             if self.global_step - self.steps_schedule[2] < self.surface_subdivision_warmup:
                 self.surface_subdivision_weight = \
                     (self.global_step - self.steps_schedule[2] + 1) / self.surface_subdivision_warmup
@@ -466,7 +472,7 @@ class PCD2Mesh(pl.LightningModule):
 
         ### LOSS --- chamfer loss on initial predicted surface
         if self.volume_refinement and is_train and self.surface_subdivision_weight < 1.0 - 1e-6 \
-                and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0:
+                and mesh_faces.numel() > 0 and mesh_vertices.numel() > 0 and not self.surface_subdivision:
             out['chamfer_loss'] = self.chamfer_loss(mesh_vertices, mesh_faces, vertices, faces)
             out['loss'] = out['loss'] + weight_loss(out['chamfer_loss'],
                                                     self.chamfer_weight * (1 - self.surface_subdivision_weight))
@@ -591,7 +597,7 @@ class PCD2Mesh(pl.LightningModule):
             curvatures = calculate_gaussian_curvature(vertices, faces)
             indexes = torch.arange(len(curvatures)).type_as(curvatures).long()[curvatures >= self.curvature_threshold]
             if indexes.numel() > 0:
-                indexes = indexes[torch.randint(0, len(indexes), (self.curvature_samples,)).type_as(indexes).long()]
+                indexes = indexes[torch.randint(0, len(indexes), (self.disc_samples,)).type_as(indexes).long()]
                 selected_vertices = vertices[indexes]
                 # create uniform grid nearby selected point
                 grid = torch.stack(torch.meshgrid(
@@ -599,23 +605,23 @@ class PCD2Mesh(pl.LightningModule):
                     torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices),
                     torch.linspace(-1, 1, self.disc_sdf_grid).type_as(vertices), ), dim=-1) * self.disc_sdf_scale
                 grids = (selected_vertices + torch.randn_like(selected_vertices) * self.disc_v_noise) \
-                            .view(self.curvature_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
+                            .view(self.disc_samples, 1, 1, 1, 3) + grid.unsqueeze(0)
 
                 # extract mesh output of generator
                 mesh_vertices, mesh_faces, sdf_grids = out['mesh_vertices'], out['mesh_faces'], out['sdf_grids']
 
                 # create grid features
-                grid_points = grids.view(self.curvature_samples, self.disc_sdf_grid ** 3, 3)
+                grid_points = grids.view(self.disc_samples, self.disc_sdf_grid ** 3, 3)
                 pos_features = torch.cat([grid_points, get_positional_encoding(grid_points, self.pe_powers * 3),
                                           self.sdf_points_encoder.devoxelize(grid_points, sdf_grids)], dim=-1) \
-                    .view(self.curvature_samples, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid,
+                    .view(self.disc_samples, self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid,
                           self.pos_features)
                 true_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0),
                                                                vertices.unsqueeze(0),
                                                                get_close_faces(selected_vertices[grid_idx],
                                                                                vertices, faces, self.disc_sdf_scale)) \
                                             .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                                             for grid_idx in range(self.curvature_samples)], dim=0)
+                                             for grid_idx in range(self.disc_samples)], dim=0)
                 true_udf_features = torch.cat([pos_features, true_grid_udf], dim=-1)
                 if mesh_faces.numel() > 0:
                     pred_grid_udf = torch.stack([self.get_mesh_udf(grid_points[grid_idx].unsqueeze(0), mesh_vertices,
@@ -623,7 +629,7 @@ class PCD2Mesh(pl.LightningModule):
                                                                                    mesh_vertices[0], mesh_faces,
                                                                                    self.disc_sdf_scale)) \
                                                 .view(self.disc_sdf_grid, self.disc_sdf_grid, self.disc_sdf_grid, 1)
-                                                 for grid_idx in range(self.curvature_samples)], dim=0)
+                                                 for grid_idx in range(self.disc_samples)], dim=0)
                     pred_udf_features = torch.cat([pos_features, pred_grid_udf], dim=-1)
                 else:
                     pred_udf_features = []
@@ -794,11 +800,7 @@ class PCD2Mesh(pl.LightningModule):
 
     def configure_optimizers(self):
         gen_optimizer = torch.optim.Adam(lr=self.learning_rate,
-                                         params=list(self.sdf_points_encoder.parameters())
-                                                + list(self.sdf_model.parameters())
-                                                + list(self.ref_points_encoder.parameters())
-                                                + list(self.ref1.parameters()) + list(self.ref2.parameters())
-                                                + list(self.surface_ref.parameters()),
+                                         params=self.volume_params + list(self.surface_ref.parameters()),
                                          betas=(0.9, 0.99))
         gen_scheduler = torch.optim.lr_scheduler.OneCycleLR(gen_optimizer, max_lr=self.learning_rate,
                                                             pct_start=self.steps_schedule[0] / self.steps_schedule[-1],
