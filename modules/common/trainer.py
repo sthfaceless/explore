@@ -1,5 +1,7 @@
+import os
 from copy import deepcopy
 
+import cv2
 import lovely_tensors as lt
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -81,6 +83,7 @@ class SimpleLogger:
             run_async(self._log_scatter2d, x, y, name, color=color, epoch=epoch)
         else:
             self._log_scatter2d(x, y, name, color=color, epoch=epoch)
+
     def _log_scatter3d(self, x, y, z, name, color=None, epoch=0):
         ax = plt.axes(projection="3d")
         ax.set_xlim3d(-1, 1)
@@ -110,3 +113,24 @@ class SimpleLogger:
             run_async(self._log_mesh, vertices, faces, name, epoch=epoch)
         else:
             self._log_mesh(vertices, faces, name, epoch=epoch)
+
+    def log_video(self, frames, gap, name, tempdir, epoch=0):
+        if tempdir:
+            path = os.path.join(tempdir, f'{name}_{epoch}.mp4')
+        else:
+            path = f'{name}_{epoch}.mp4'
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        w, h = frames[0].shape[1], frames[0].shape[0]
+        writer = cv2.VideoWriter(path, apiPreference=0, fourcc=fourcc, fps=int(1 / (gap / 1000)), frameSize=(w, h))
+        for frame in frames:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            writer.write(frame)
+        writer.release()
+
+        if self.clearml:
+            self.clearml.report_media('video', name, iteration=epoch, local_path=path)
+
+    def log_videos(self, videos_frames, gap, name, tempdir, epoch=0):
+        for video_id, frames in enumerate(videos_frames):
+            self.log_video(frames, gap, f'{name}_{video_id}', tempdir, epoch)

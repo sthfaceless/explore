@@ -739,6 +739,7 @@ class NVSDiffusion(Diffusion):
                               attention_dim=attention_dim, dropout=dropout, num_heads=num_heads,
                               embed_features=embed_features, pos_enc=pos_enc, cond=cond)
         super(NVSDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
+                                           use_ema=use_ema,
                                            learning_rate=learning_rate, batch_size=batch_size, min_lr_rate=min_lr_rate,
                                            min_beta=min_beta, max_beta=max_beta, sample_steps=sample_steps,
                                            kl_weight=kl_weight, steps=steps, epochs=epochs, beta_schedule=beta_schedule)
@@ -748,10 +749,6 @@ class NVSDiffusion(Diffusion):
         self.focal = focal
         self.classifier_free = classifier_free
         self.classifier_weight = clf_weight
-
-        self.use_ema = use_ema
-        if use_ema:
-            self.ema_model = EMA(self.model)
 
         self.log_samples = log_samples
         self.log_length = log_length
@@ -794,12 +791,6 @@ class NVSDiffusion(Diffusion):
             ray_d_sequence.append(ray_d)
         return cond_sequence
 
-    def forward(self, x, t, train=True, **kwargs):
-        if (not self.training or not train) and self.use_ema:
-            model = self.ema_model.module
-        else:
-            model = self.model
-        return model(x, t, **kwargs)
 
     def step(self, batch):
         # extract origin view
@@ -851,10 +842,6 @@ class NVSDiffusion(Diffusion):
         del images, batch, galleries
         gc.collect()
         torch.cuda.empty_cache()
-
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if self.use_ema:
-            self.ema_model.update(self.model)
 
     def train_dataloader(self):
         self.dataset.reset_cache()

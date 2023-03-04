@@ -1,17 +1,20 @@
-import numpy as np
 import pytorch_lightning as pl
-import torch
+
+from modules.common.trainer import *
 
 
 class Diffusion(pl.LightningModule):
 
-    def __init__(self, dataset=None, model=None, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
+    def __init__(self, dataset=None, model=None, use_ema=False, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
                  diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100, clip_denoised=True,
                  min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
         self.model = model
+        self.use_ema = use_ema
+        if use_ema:
+            self.ema_model = EMA(self.model)
 
         self.learning_rate = learning_rate
         self.min_lr_rate = min_lr_rate
@@ -189,6 +192,17 @@ class Diffusion(pl.LightningModule):
             'kl_loss': kl_loss,
             'loss': mse_loss + self.kl_weight * kl_loss
         }
+
+    def forward(self, x, t, train=True, **kwargs):
+        if (not self.training or not train) and self.use_ema:
+            model = self.ema_model.module
+        else:
+            model = self.model
+        return model(x, t, **kwargs)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self.use_ema:
+            self.ema_model.update(self.model)
 
     def step(self, batch):
         ####

@@ -162,3 +162,25 @@ def tn(tensor):
 
 def weight_loss(loss, weight):
     return torch.nan_to_num(loss, nan=0, posinf=0, neginf=0) * weight
+
+
+def repeat_dim(tensor, dim, n):
+    shape = []
+    for idx in range(len(tensor.shape)):
+        if idx == dim:
+            shape.append(n)
+        else:
+            shape.append(1)
+
+    return tensor.repeat(*shape)
+
+
+def prepare_torch_images(images):
+    images = images.detach().cpu().numpy()
+    images = np.clip(np.moveaxis(images, -3, -1), -1.0, 1.0)
+    images = denormalize_image(images)
+    return images
+
+
+def tensor2list(tensor):
+    return [tensor[idx] for idx in range(len(tensor))]
