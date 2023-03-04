@@ -14,6 +14,7 @@ def get_parser():
     parser = ArgumentParser(description="Training NeRF latents")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
+    parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
 
     # Training settings
     parser.add_argument("--base_lr", default=1e-6, type=float, help="Learning rate for decoder and nerf")
@@ -67,6 +68,7 @@ if __name__ == "__main__":
     dataset = LandscapeAnimation(root=args.dataset, w=args.w, h=args.h, frames=args.frames + 1, step=args.gap)
     learning_rate = min(args.base_lr * args.batch_size * args.acc_grads * args.frames, 1e-4)
     model = LandscapeDiffusion(clearml=logger, shape=(3, args.h, args.w), dataset=dataset,
+                               tempdir=args.tmp,
                                attention_dim=args.attention_dim, frames=args.frames, gap=args.gap,
                                unet_hiddens=args.hidden_dims, dropout=args.dropout,
                                classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
