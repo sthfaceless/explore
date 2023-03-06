@@ -123,6 +123,7 @@ class TemporalUNetDenoiser(torch.nn.Module):
         self.features = features
         self.steps = steps
         self.cond = cond
+        self.extra_upsample_blocks = extra_upsample_blocks
         # Input mapping
         self.input_mapper = torch.nn.Conv2d(features, hidden_dims[0], kernel_size=kernel_size,
                                             padding=kernel_size // 2)
@@ -156,18 +157,20 @@ class TemporalUNetDenoiser(torch.nn.Module):
         self.encoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
         self.downsample_blocks = torch.nn.ModuleList([])
         current_resolution = h
+        encoder_block_count = {hidden_dims[0]: 0}
         for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
             if prev_dim != dim:
                 current_resolution //= 2
+                encoder_block_count[dim] = 0
                 self.downsample_blocks.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.encoder_layers.append(torch.nn.ModuleList([]))
-
             block = TemporalCondResBlock2d(dim, embed_dim=self.emb_features, kernel_size=kernel_size,
                                            num_heads=num_heads, num_groups=num_groups,
                                            attn=current_resolution <= attention_dim, dropout=dropout,
                                            local_attn=current_resolution <= local_attn_dim,
                                            local_attn_patch=local_attn_patch)
             self.encoder_layers[-1].append(block)
+            encoder_block_count[dim] += 1
         self.downsample_blocks.append(torch.nn.Identity())
 
         self.mid_layers = torch.nn.Module()
@@ -187,17 +190,21 @@ class TemporalUNetDenoiser(torch.nn.Module):
                 inverse_dims += [_inverse_dims[dim_id] for _ in range(extra_upsample_blocks)]
         self.decoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
         self.upsample_blocks = torch.nn.ModuleList([])
+        decoder_block_count = {inverse_dims[0]: 0}
         for prev_dim, dim in zip([inverse_dims[0]] + list(inverse_dims), inverse_dims):
             if prev_dim != dim:
                 current_resolution *= 2
+                decoder_block_count[dim] = 0
                 self.upsample_blocks.append(UpSample2d(prev_dim, dim, kernel_size=kernel_size))
                 self.decoder_layers.append(torch.nn.ModuleList([]))
-            block = TemporalCondResBlock2d(dim, in_dim=2 * dim, embed_dim=self.emb_features, kernel_size=kernel_size,
+            in_dim = 2 * dim if decoder_block_count[dim] < encoder_block_count[dim] else dim
+            block = TemporalCondResBlock2d(dim, in_dim=in_dim, embed_dim=self.emb_features, kernel_size=kernel_size,
                                            num_heads=num_heads, num_groups=num_groups,
                                            local_attn=current_resolution <= local_attn_dim,
                                            local_attn_patch=local_attn_patch,
                                            attn=current_resolution <= attention_dim, dropout=dropout)
             self.decoder_layers[-1].append(block)
+            decoder_block_count[dim] += 1
         self.upsample_blocks.append(torch.nn.Identity())
 
         # Out latent prediction
@@ -263,8 +270,10 @@ class TemporalUNetDenoiser(torch.nn.Module):
                 h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
             else:
                 h_cond = None
-            for block in blocks:
-                h = block(torch.cat([h, outs.pop()], dim=1), temporal_dim, emb, cond=h_cond)
+            for block_id, block in enumerate(blocks):
+                if len(blocks) - block_id > self.extra_upsample_blocks:
+                    h = torch.cat([h, outs.pop()], dim=1)
+                h = block(h, temporal_dim, emb, cond=h_cond)
             h = upsample(h)
 
         h = nonlinear(self.out_norm(h))
