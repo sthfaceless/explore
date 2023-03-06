@@ -208,7 +208,7 @@ class TemporalUNetDenoiser(torch.nn.Module):
     def forward(self, x, time, cond=None):
 
         if self.cond == 'concat':
-            x = torch.cat([cond, x], dim=1)
+            x = torch.cat([cond.unsqueeze(1), x], dim=1)
 
         b, temporal_dim, in_channels, height, width = x.shape
         x = x.view(b * temporal_dim, in_channels, height, width)
