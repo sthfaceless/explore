@@ -83,7 +83,7 @@ if __name__ == "__main__":
                                sample_steps=args.sample_steps, steps=args.steps, epochs=args.epochs)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 1000,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=False),
+                      strategy=DDPStrategy(find_unused_parameters=True),
                       accumulate_grad_batches=args.acc_grads,
                       accelerator='gpu', devices=1, callbacks=[checkpoint_callback])
     trainer.fit(model)
