@@ -13,12 +13,12 @@ class LandscapeDiffusion(Diffusion):
                  min_lr_rate=0.01, attention_dim=32, epochs=30, diffusion_steps=1000, sample_steps=64,
                  kl_weight=1e-3, beta_schedule='cos', debug=True, num_heads=2, use_ema=True,
                  tempdir=None, gap=300, frames=8, classifier_free=0.1, clf_weight=12.0,
-                 local_attn_dim=64, local_attn_patch=8,
+                 local_attn_dim=64, local_attn_patch=8, cond='cross',
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=20):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = TemporalUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
                                      attention_dim=attention_dim, num_heads=num_heads, dropout=dropout,
-                                     local_attn_dim=local_attn_dim, local_attn_patch=local_attn_patch)
+                                     local_attn_dim=local_attn_dim, local_attn_patch=local_attn_patch, cond=cond)
         super(LandscapeDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                                  learning_rate=learning_rate, min_lr_rate=min_lr_rate,
                                                  sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,

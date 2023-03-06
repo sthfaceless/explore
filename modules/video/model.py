@@ -135,21 +135,22 @@ class TemporalUNetDenoiser(torch.nn.Module):
         ])
 
         # Conditional image embeddings
-        self.cond_input = torch.nn.Conv2d(features, hidden_dims[0], kernel_size=kernel_size,
-                                          padding=kernel_size // 2)
-        self.cond_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
-        self.cond_downsample = torch.nn.ModuleList([])
-        current_resolution = h
-        for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
-            if prev_dim != dim:
-                current_resolution //= 2
-                self.cond_downsample.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
-                self.cond_layers.append(torch.nn.ModuleList([]))
-            block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=self.emb_features, num_groups=num_groups,
-                                              kernel_size=kernel_size, attn=False, dropout=dropout,
-                                              num_heads=num_heads)
-            self.cond_layers[-1].append(block)
-        self.cond_downsample.append(torch.nn.Identity())
+        if cond == 'cross':
+            self.cond_input = torch.nn.Conv2d(features, hidden_dims[0], kernel_size=kernel_size,
+                                              padding=kernel_size // 2)
+            self.cond_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
+            self.cond_downsample = torch.nn.ModuleList([])
+            current_resolution = h
+            for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
+                if prev_dim != dim:
+                    current_resolution //= 2
+                    self.cond_downsample.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
+                    self.cond_layers.append(torch.nn.ModuleList([]))
+                block = ConditionalNormResBlock2D(hidden_dim=dim, embed_dim=self.emb_features, num_groups=num_groups,
+                                                  kernel_size=kernel_size, attn=False, dropout=dropout,
+                                                  num_heads=num_heads)
+                self.cond_layers[-1].append(block)
+            self.cond_downsample.append(torch.nn.Identity())
 
         # Main encoder blocks
         self.encoder_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
@@ -206,6 +207,9 @@ class TemporalUNetDenoiser(torch.nn.Module):
 
     def forward(self, x, time, cond=None):
 
+        if self.cond == 'concat':
+            x = torch.cat([cond, x], dim=1)
+
         b, temporal_dim, in_channels, height, width = x.shape
         x = x.view(b * temporal_dim, in_channels, height, width)
 
@@ -216,39 +220,49 @@ class TemporalUNetDenoiser(torch.nn.Module):
                             repeat_dim(h_temporal[None, :, :], 0, b)], dim=2)
         h_time = self.time_layers[1](nonlinear(self.time_layers[0](h_time))).view(b * temporal_dim, self.emb_features)
 
-        # Map condition image to latents
-        h_cond = self.cond_input(cond)
         conds = []
-        for blocks, downsample in zip(self.cond_layers, self.cond_downsample):
-            emb = h_time[:1, :, None, None]
-            for block in blocks:
-                h_cond = block(h_cond, emb)
-            conds.append(h_cond)
-            h_cond = downsample(h_cond)
+        if self.cond == 'cross':
+            # Map condition image to latents
+            h_cond = self.cond_input(cond)
+            for blocks, downsample in zip(self.cond_layers, self.cond_downsample):
+                emb = h_time[:1, :, None, None]
+                for block in blocks:
+                    h_cond = block(h_cond, emb)
+                conds.append(h_cond)
+                h_cond = downsample(h_cond)
 
         # Prepare input for mapping
         h = self.input_mapper(x)
         outs = []
-        for blocks, downsample, h_cond in zip(self.encoder_layers, self.downsample_blocks, conds):
+        for layer_id, (blocks, downsample) in enumerate(zip(self.encoder_layers, self.downsample_blocks)):
+            if self.cond == 'cross':
+                h_cond = repeat_dim(conds[layer_id].unsqueeze(1), 1, temporal_dim)
+                h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
+            else:
+                h_cond = None
             emb = h_time[:, :, None, None]
-            h_cond = repeat_dim(h_cond.unsqueeze(1), 1, temporal_dim)
-            h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
             for block in blocks:
                 h = block(h, temporal_dim, emb, cond=h_cond)
                 outs.append(h)
             h = downsample(h)
 
         # Mid mapping
+        if self.cond == 'cross':
+            h_cond = repeat_dim(conds[-1].unsqueeze(1), 1, temporal_dim)
+            h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
+        else:
+            h_cond = None
         emb = h_time[:, :, None, None]
-        h_cond = repeat_dim(conds[-1].unsqueeze(1), 1, temporal_dim)
-        h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
         h = self.mid_layers.block_1(h, temporal_dim, emb, cond=h_cond)
 
         # Decode latent
-        for blocks, upsample, h_cond in zip(self.decoder_layers, self.upsample_blocks, reversed(conds)):
+        for layer_id, (blocks, upsample) in enumerate(zip(self.decoder_layers, self.upsample_blocks)):
             emb = h_time[:, :, None, None]
-            h_cond = repeat_dim(h_cond.unsqueeze(1), 1, temporal_dim)
-            h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
+            if self.cond == 'cross':
+                h_cond = repeat_dim(conds[-(layer_id + 1)].unsqueeze(1), 1, temporal_dim)
+                h_cond = h_cond.view(b * temporal_dim, *h_cond.shape[2:])
+            else:
+                h_cond = None
             for block in blocks:
                 h = block(torch.cat([h, outs.pop()], dim=1), temporal_dim, emb, cond=h_cond)
             h = upsample(h)
