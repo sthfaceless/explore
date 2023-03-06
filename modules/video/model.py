@@ -57,11 +57,11 @@ class PseudoConv3d(torch.nn.Conv1d):
     def forward(self, x, t=1):
         bt, c, h, w = x.shape
         # bt c h w -> b t c hw -> b hw c t -> bhw c t
-        h = x.reshape(bt // t, t, c, h * w).transpose(-1, -3).reshape(bt // t * h * w, c, t)
-        h = super().forward(h)
+        x = x.reshape(bt // t, t, c, h * w).transpose(-1, -3).reshape(bt // t * h * w, c, t)
+        x = super().forward(x)
         # bhw c t -> b hw c t -> b t c hw -> bt c h w
-        h = h.reshape(bt // t, h * w, c, t).transpose(-1, -3).reshape(bt, c, h, w)
-        return h
+        x = x.reshape(bt // t, h * w, c, t).transpose(-1, -3).reshape(bt, c, h, w)
+        return x
 
 
 class TemporalCondResBlock2d(torch.nn.Module):
