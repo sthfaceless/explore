@@ -270,4 +270,8 @@ class TemporalUNetDenoiser(torch.nn.Module):
         h = nonlinear(self.out_norm(h))
         out = self.out_mapper(h)
 
-        return out.view(b, temporal_dim, in_channels, height, width)
+        out = out.view(b, temporal_dim, in_channels, height, width)
+        if self.cond == 'concat':
+            out = out[:, 1:]
+
+        return out
