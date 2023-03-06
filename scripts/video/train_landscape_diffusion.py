@@ -44,6 +44,8 @@ def get_parser():
     parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
     parser.add_argument("--clf_weight", default=3.0, type=float, help="Classifier free guidance weight sampling")
+    parser.add_argument("--extra_upsample_blocks", default=1, type=int,
+                        help="Add extra blocks to each width for upsampling improving")
 
     # Meta settings
     parser.add_argument("--out_model_name", default="landscape_diffusion", help="Name of output model path")
@@ -77,6 +79,7 @@ if __name__ == "__main__":
                                local_attn_patch=args.local_attention_patch, cond=args.cond,
                                attention_dim=args.attention_dim, frames=args.frames, gap=args.gap,
                                unet_hiddens=args.hidden_dims, dropout=args.dropout,
+                               extra_upsample_blocks=args.extra_upsample_blocks,
                                classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
                                diffusion_steps=args.diffusion_steps, log_samples=args.samples_epoch,
                                learning_rate=learning_rate, clf_weight=args.clf_weight,

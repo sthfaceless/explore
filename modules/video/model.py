@@ -117,7 +117,7 @@ class TemporalUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
                  num_groups=32, dropout=0.0, num_heads=4, embed_features=512, cond='cross',
-                 local_attn_dim=64, local_attn_patch=8, extra_upsample_blocks=0):
+                 local_attn_dim=64, local_attn_patch=8, extra_upsample_blocks=1):
         super(TemporalUNetDenoiser, self).__init__()
         features, h, w = shape
         self.features = features
