@@ -54,7 +54,7 @@ class LandscapeDiffusion(Diffusion):
             eps = (1 + self.clf_weight) * eps_cond - self.clf_weight * eps_uncond
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, eps=eps)
             if self.debug and sample_iter % self.log_every == 0:
-                videos_frames = prepare_torch_images(torch.cat([cond, x], dim=1))
+                videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
                 for video_id in range(len(videos_frames)):
                     self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
                                                f'step_{sample_iter}_{video_id}', self.tempdir,
@@ -86,7 +86,7 @@ class LandscapeDiffusion(Diffusion):
             with torch.no_grad():
                 cond = batch['frames'][:, 0].to(self.device)
                 x = self.sample(self.batch_size, cond=cond)
-            videos_frames = prepare_torch_images(torch.cat([cond, x], dim=1))
+            videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
             for video_id in range(len(videos_frames)):
                 self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
                                            f'sample_{generated + video_id}', self.tempdir, epoch=self.current_epoch)
