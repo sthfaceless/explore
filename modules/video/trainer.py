@@ -14,7 +14,7 @@ class LandscapeDiffusion(Diffusion):
                  kl_weight=1e-3, beta_schedule='cos', debug=True, num_heads=2, use_ema=True,
                  tempdir=None, gap=300, frames=8, classifier_free=0.1, clf_weight=12.0,
                  local_attn_dim=64, local_attn_patch=8, cond='cross',
-                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=20):
+                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=32):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = TemporalUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
                                      attention_dim=attention_dim, num_heads=num_heads, dropout=dropout,
@@ -94,6 +94,8 @@ class LandscapeDiffusion(Diffusion):
 
         # log current lr
         if self.debug:
+            self.custom_logger.log_gif(tensor2list(prepare_torch_images(batch['frames'][0])), self.gap,
+                                       f'train_example', self.tempdir, epoch=self.current_epoch)
             self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
