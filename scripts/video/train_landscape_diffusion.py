@@ -34,6 +34,9 @@ def get_parser():
     parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 384, 384, 512, 512], nargs='+', type=int,
                         help="Hidden dims for decoder")
     parser.add_argument("--attention_dim", default=32, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--local_attention_dim", default=64, type=int,
+                        help="Width till the one local attention would be done")
+    parser.add_argument("--local_attention_patch", default=8, type=int, help="Local attention patch size")
     parser.add_argument("--diffusion_steps", default=4000, type=int, help="Steps to do diffusion")
     parser.add_argument("--sample_steps", default=128, type=int, help="Steps for sampling")
     parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
@@ -68,7 +71,8 @@ if __name__ == "__main__":
     dataset = LandscapeAnimation(root=args.dataset, w=args.w, h=args.h, frames=args.frames + 1, step=args.gap)
     learning_rate = min(args.base_lr * args.batch_size * args.acc_grads * args.frames, 1e-4)
     model = LandscapeDiffusion(clearml=logger, shape=(3, args.h, args.w), dataset=dataset,
-                               tempdir=args.tmp,
+                               tempdir=args.tmp, local_attn_dim=args.local_attention_dim,
+                               local_attn_patch=args.local_attention_patch,
                                attention_dim=args.attention_dim, frames=args.frames, gap=args.gap,
                                unet_hiddens=args.hidden_dims, dropout=args.dropout,
                                classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
