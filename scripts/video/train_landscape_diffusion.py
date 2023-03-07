@@ -33,17 +33,17 @@ def get_parser():
     parser.add_argument("--h", default=128, type=int, help="frame height ")
 
     # Model settings
-    parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 384, 384, 512, 512], nargs='+', type=int,
-                        help="Hidden dims for decoder")
-    parser.add_argument("--attention_dim", default=32, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--hidden_dims", default=[64, 64, 64, 128, 128, 128, 256, 256, 256, 384, 384, 384, 512, 512],
+                        nargs='+', type=int, help="Hidden dims for decoder")
+    parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
     parser.add_argument("--local_attention_dim", default=64, type=int,
                         help="Width till the one local attention would be done")
     parser.add_argument("--local_attention_patch", default=8, type=int, help="Local attention patch size")
     parser.add_argument("--diffusion_steps", default=4000, type=int, help="Steps to do diffusion")
     parser.add_argument("--sample_steps", default=128, type=int, help="Steps for sampling")
-    parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
+    parser.add_argument("--dropout", default=0.0, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
-    parser.add_argument("--clf_weight", default=3.0, type=float, help="Classifier free guidance weight sampling")
+    parser.add_argument("--clf_weight", default=12.5, type=float, help="Classifier free guidance weight sampling")
     parser.add_argument("--extra_upsample_blocks", default=1, type=int,
                         help="Add extra blocks to each width for upsampling improving")
 

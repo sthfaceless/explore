@@ -10,8 +10,8 @@ class LandscapeDiffusion(Diffusion):
     def __init__(self, unet_hiddens=(64, 64, 64, 128, 128, 128, 256, 256, 256, 384, 384, 384, 512, 512),
                  dataset=None, shape=(3, 128, 256),
                  features_dim=0, steps=10000, learning_rate=1e-4, batch_size=1, dropout=0.0,
-                 min_lr_rate=0.01, attention_dim=32, epochs=30, diffusion_steps=1000, sample_steps=64,
-                 kl_weight=1e-3, beta_schedule='cos', debug=True, num_heads=2, use_ema=False,
+                 min_lr_rate=0.01, attention_dim=32, epochs=30, diffusion_steps=4000, sample_steps=128,
+                 kl_weight=1e-3, beta_schedule='cos', debug=True, num_heads=4, use_ema=False,
                  tempdir=None, gap=300, frames=8, classifier_free=0.1, clf_weight=12.0,
                  local_attn_dim=64, local_attn_patch=8, cond='cross', extra_upsample_blocks=1,
                  min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=32):
