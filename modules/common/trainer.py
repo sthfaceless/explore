@@ -2,6 +2,7 @@ import os
 from copy import deepcopy
 
 import cv2
+import imageio
 import lovely_tensors as lt
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -134,3 +135,17 @@ class SimpleLogger:
     def log_videos(self, videos_frames, gap, name, tempdir, epoch=0):
         for video_id, frames in enumerate(videos_frames):
             self.log_video(frames, gap, f'{name}_{video_id}', tempdir, epoch)
+
+    def log_gif(self, frames, gap, name, tempdir, epoch=0):
+        if tempdir:
+            path = os.path.join(tempdir, f'{name}_{epoch}.gif')
+        else:
+            path = f'{name}_{epoch}.gif'
+        frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
+        imageio.mimsave(path, frames, fps=int(1 / (gap / 1000)))
+        if self.clearml:
+            self.clearml.report_media('gifs', name, iteration=epoch, local_path=path)
+
+    def log_gifs(self, frames_list, gap, name, tempdir, epoch=0):
+        for idx, frames in enumerate(frames_list):
+            self.log_gif(frames, gap, f'{name}_{idx}', tempdir, epoch)

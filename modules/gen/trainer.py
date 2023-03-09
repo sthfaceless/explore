@@ -6,7 +6,7 @@ from modules.common.trainer import *
 class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, use_ema=False, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
-                 diffusion_steps=1000, sample_steps=128, steps=10000, epochs=100, clip_denoised=True,
+                 diffusion_steps=1000, sample_steps=64, steps=10000, epochs=100, clip_denoised=True,
                  min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3):
         super(Diffusion, self).__init__()
 

@@ -7,19 +7,23 @@ from modules.video.model import *
 
 class LandscapeDiffusion(Diffusion):
 
-    def __init__(self, unet_hiddens=(128, 128, 256, 256, 384, 384, 512, 512), dataset=None, shape=(3, 128, 256),
+    def __init__(self, unet_hiddens=(64, 64, 64, 128, 128, 128, 256, 256, 256, 384, 384, 384, 512, 512),
+                 dataset=None, shape=(3, 128, 256),
                  features_dim=0, steps=10000, learning_rate=1e-4, batch_size=1, dropout=0.0,
                  min_lr_rate=0.01, attention_dim=32, epochs=30, diffusion_steps=4000, sample_steps=128,
-                 kl_weight=1e-3, beta_schedule='cos', debug=False, num_heads=None,
-                 tempdir=None, gap=300, frames=8, classifier_free=0.1, clf_weight=3.0,
-                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=20):
+                 kl_weight=1e-3, beta_schedule='cos', debug=True, num_heads=None, use_ema=False,
+                 tempdir=None, gap=300, frames=8, classifier_free=0.1, clf_weight=12.5,
+                 local_attn_dim=64, local_attn_patch=8, cond='cross', extra_upsample_blocks=1,
+                 min_beta=1e-4, max_beta=2e-2, clearml=None, log_samples=5, log_every=32):
         self.save_hyperparameters(ignore=['clearml', 'dataset'])
         model = TemporalUNetDenoiser(shape=shape, steps=diffusion_steps, hidden_dims=unet_hiddens,
-                                     attention_dim=attention_dim, num_heads=num_heads, dropout=dropout)
+                                     attention_dim=attention_dim, num_heads=num_heads, dropout=dropout,
+                                     extra_upsample_blocks=extra_upsample_blocks,
+                                     local_attn_dim=local_attn_dim, local_attn_patch=local_attn_patch, cond=cond)
         super(LandscapeDiffusion, self).__init__(dataset=dataset, model=model, diffusion_steps=diffusion_steps,
                                                  learning_rate=learning_rate, min_lr_rate=min_lr_rate,
                                                  sample_steps=sample_steps, batch_size=batch_size, min_beta=min_beta,
-                                                 max_beta=max_beta, kl_weight=kl_weight,
+                                                 max_beta=max_beta, kl_weight=kl_weight, use_ema=use_ema,
                                                  beta_schedule=beta_schedule, steps=steps, epochs=epochs)
 
         self.shape = shape
@@ -51,11 +55,11 @@ class LandscapeDiffusion(Diffusion):
             eps = (1 + self.clf_weight) * eps_cond - self.clf_weight * eps_uncond
             x = self.p_sample_stride(x, ones * t_prev, ones * t_curr, eps=eps)
             if self.debug and sample_iter % self.log_every == 0:
-                videos_frames = prepare_torch_images(x)
+                videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
                 for video_id in range(len(videos_frames)):
-                    self.custom_logger.log_video(tensor2list(videos_frames[video_id]), self.gap,
-                                                 f'step_{sample_iter}_{video_id}', self.tempdir,
-                                                 epoch=self.current_epoch)
+                    self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
+                                               f'step_{sample_iter}_{video_id}', self.tempdir,
+                                               epoch=self.current_epoch)
 
         return x
 
@@ -81,15 +85,18 @@ class LandscapeDiffusion(Diffusion):
         while generated < self.log_samples:
             batch = next(data_iter)
             with torch.no_grad():
-                x = self.sample(self.batch_size, cond=batch['frames'][:, 0].to(self.device))
-            videos_frames = prepare_torch_images(x)
+                cond = batch['frames'][:, 0].to(self.device)
+                x = self.sample(self.batch_size, cond=cond)
+            videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
             for video_id in range(len(videos_frames)):
-                self.custom_logger.log_video(tensor2list(videos_frames[video_id]), self.gap,
-                                             f'sample_{generated + video_id}', self.tempdir, epoch=self.current_epoch)
+                self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
+                                           f'sample_{generated + video_id}', self.tempdir, epoch=self.current_epoch)
             generated += self.batch_size
 
         # log current lr
         if self.debug:
+            self.custom_logger.log_gif(tensor2list(prepare_torch_images(batch['frames'][0])), self.gap,
+                                       f'train_example', self.tempdir, epoch=self.current_epoch)
             self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
@@ -117,7 +124,6 @@ class FrameInterpolation(pl.LightningModule):
         return {}
 
     def loss(self, out, gts):
-
         return {}
 
     def training_step(self, batch):

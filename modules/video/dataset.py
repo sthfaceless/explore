@@ -66,7 +66,7 @@ class LandscapeAnimation(torch.utils.data.IterableDataset):
                 start_h = int((h - true_h) / 2)
                 frame = frame[start_h: start_h + true_h]
             frame = (cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_AREA).astype(
-                np.float32) / 255.0 - 1.0) * 2
+                np.float32) / 255.0 - 0.5) * 2
             frames.append(np.moveaxis(frame, -1, 0))
         video.release()
 

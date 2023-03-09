@@ -61,6 +61,66 @@ class TemporalAttention2d(torch.nn.Module):
         return (out + q_in) / 2 ** (1 / 2)
 
 
+# class TemporalAttention2d(MHAAttention2D):
+#     def forward(self, q, t=1, v=None):
+#         q_in = q
+#         q = self.q_norm(q)
+#         if v is None:
+#             v = q
+#         else:
+#             v = self.v_norm(v)
+#         q, k, v = self.q(q), self.k(v), self.v(v)
+#
+#         # compute attention
+#         bt, c, h, w = q.shape
+#         # b*t, c, h, w -> b, t, n, d, hw -> b, t, n, hw, d -> b, hw, n, t, d
+#         q, k, v = map(lambda e: e.reshape(bt // t, t, self.num_heads, self.head_dim, h * w) \
+#                       .transpose(-1, -2).transpose(-2, -4), [q, k, v])
+#         # b, hw, n, t, t
+#         attn_weights = torch.nn.functional.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale, dim=-1)
+#
+#         # attend to values (b hw n t d)
+#         out = torch.matmul(attn_weights, v)
+#         # b hw n t d -> b t n hw d -> b t n d hw -> b*t n*d, h, w
+#         out = out.transpose(-2, -4).transpose(-1, -2).reshape(bt, self.dim, h, w)
+#         out = self.out(out)
+#
+#         if self.q_dim != self.dim:
+#             q_in = self.q_skip(q_in)
+#         return (out + q_in) / 2 ** (1 / 2)
+
+
+class LocalSparseCausalAttention2d(LocalMHAAttention2D):
+    def forward(self, h, v=None, t=1):
+        bt, c, hh, ww = h.shape
+        ht = h.reshape(bt // t, t, c, hh, ww)
+        kv1 = repeat_dim(ht[:, :1], 1, t)  # first frame of each batch
+        kv2 = torch.cat([ht[:, :1], ht[:, :-1]], dim=1)  # previous frame for each one
+        kv = torch.cat([kv1, kv2], dim=2).reshape(bt, 2 * c, hh, ww)
+        return super().forward(q=h, v=kv)
+
+
+class SparseCausalAttention2d(MHAAttention2D):
+    def forward(self, h, v=None, t=1):
+        bt, c, hh, ww = h.shape
+        ht = h.reshape(bt // t, t, c, hh, ww)
+        kv1 = repeat_dim(ht[:, :1], 1, t)  # first frame of each batch
+        kv2 = torch.cat([ht[:, :1], ht[:, :-1]], dim=1)  # previous frame for each one
+        kv = torch.cat([kv1, kv2], dim=2).reshape(bt, 2 * c, hh, ww)
+        return super().forward(q=h, v=kv)
+
+
+class PseudoConv3d(torch.nn.Conv1d):
+    def forward(self, x, t=1):
+        bt, c, h, w = x.shape
+        # bt c h w -> b t c hw -> b hw c t -> bhw c t
+        x = x.reshape(bt // t, t, c, h * w).transpose(-1, -3).reshape(bt // t * h * w, c, t)
+        x = super().forward(x)
+        # bhw c t -> b hw c t -> b t c hw -> bt c h w
+        x = x.reshape(bt // t, h * w, c, t).transpose(-1, -3).reshape(bt, c, h, w)
+        return x
+
+
 class TemporalCondResBlock2d(torch.nn.Module):
     def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, cross_cond=False,
                  dropout=0.0, num_heads=4):
@@ -108,7 +168,7 @@ class TemporalUNetDenoiser(torch.nn.Module):
 
     def __init__(self, shape, steps, kernel_size=3, hidden_dims=(128, 256, 256, 512), attention_dim=32,
                  num_groups=32, dropout=0.0, num_heads=4, embed_features=512, cond='cross',
-                 extra_upsample_blocks=0):
+                 local_attn_dim=64, local_attn_patch=8, extra_upsample_blocks=1):
         super(TemporalUNetDenoiser, self).__init__()
         features, h, w = shape
         self.features = features

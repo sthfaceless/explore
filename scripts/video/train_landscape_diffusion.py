@@ -15,6 +15,8 @@ def get_parser():
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
+    parser.add_argument("--cond", default="concat", choices=['cross', 'concat'],
+                        help="Kind of condition on frame to use")
 
     # Training settings
     parser.add_argument("--base_lr", default=1e-6, type=float, help="Learning rate for decoder and nerf")
@@ -31,14 +33,19 @@ def get_parser():
     parser.add_argument("--h", default=128, type=int, help="frame height ")
 
     # Model settings
-    parser.add_argument("--hidden_dims", default=[128, 128, 256, 256, 384, 384, 512, 512], nargs='+', type=int,
-                        help="Hidden dims for decoder")
-    parser.add_argument("--attention_dim", default=32, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--hidden_dims", default=[64, 64, 64, 128, 128, 128, 256, 256, 256, 384, 384, 384, 512, 512],
+                        nargs='+', type=int, help="Hidden dims for decoder")
+    parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
+    parser.add_argument("--local_attention_dim", default=64, type=int,
+                        help="Width till the one local attention would be done")
+    parser.add_argument("--local_attention_patch", default=8, type=int, help="Local attention patch size")
     parser.add_argument("--diffusion_steps", default=4000, type=int, help="Steps to do diffusion")
-    parser.add_argument("--sample_steps", default=128, type=int, help="Steps for sampling")
-    parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
+    parser.add_argument("--sample_steps", default=64, type=int, help="Steps for sampling")
+    parser.add_argument("--dropout", default=0.0, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
     parser.add_argument("--clf_weight", default=3.0, type=float, help="Classifier free guidance weight sampling")
+    parser.add_argument("--extra_upsample_blocks", default=0, type=int,
+                        help="Add extra blocks to each width for upsampling improving")
 
     # Meta settings
     parser.add_argument("--out_model_name", default="landscape_diffusion", help="Name of output model path")
@@ -68,16 +75,18 @@ if __name__ == "__main__":
     dataset = LandscapeAnimation(root=args.dataset, w=args.w, h=args.h, frames=args.frames + 1, step=args.gap)
     learning_rate = min(args.base_lr * args.batch_size * args.acc_grads * args.frames, 1e-4)
     model = LandscapeDiffusion(clearml=logger, shape=(3, args.h, args.w), dataset=dataset,
-                               tempdir=args.tmp,
+                               tempdir=args.tmp, local_attn_dim=args.local_attention_dim,
+                               local_attn_patch=args.local_attention_patch, cond=args.cond,
                                attention_dim=args.attention_dim, frames=args.frames, gap=args.gap,
                                unet_hiddens=args.hidden_dims, dropout=args.dropout,
+                               extra_upsample_blocks=args.extra_upsample_blocks,
                                classifier_free=args.clf_free, batch_size=args.batch_size, min_lr_rate=args.min_lr_rate,
                                diffusion_steps=args.diffusion_steps, log_samples=args.samples_epoch,
                                learning_rate=learning_rate, clf_weight=args.clf_weight,
                                sample_steps=args.sample_steps, steps=args.steps, epochs=args.epochs)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=args.steps // 1000,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=False),
+                      strategy=DDPStrategy(find_unused_parameters=True),
                       accumulate_grad_batches=args.acc_grads,
                       accelerator='gpu', devices=1, callbacks=[checkpoint_callback])
     trainer.fit(model)
