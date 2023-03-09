@@ -3,9 +3,37 @@ import torch.nn
 from modules.common.model import *
 
 
-class TemporalAttention2d(MHAAttention2D):
+class TemporalAttention2d(torch.nn.Module):
+    def __init__(self, dim, q_dim=-1, k_dim=-1, num_heads=None, head_channel=32, dropout=0.0, num_groups=32):
+        super().__init__()
+        self.dim = dim
+        if num_heads:
+            self.num_heads = num_heads
+            self.head_dim = dim // self.num_heads
+        else:
+            self.num_heads = dim // head_channel
+            self.head_dim = head_channel
+        self.scale = self.head_dim ** (-0.5)
+        self.dropout = dropout
 
-    def forward(self, q, v=None, t=1):
+        if q_dim == -1:
+            q_dim = dim
+        self.q_dim = q_dim
+        if q_dim != dim:
+            self.q_skip = torch.nn.Conv2d(q_dim, dim, kernel_size=1)
+
+        if k_dim == -1:
+            k_dim = dim
+        self.k_dim = k_dim
+
+        self.q_norm = norm(q_dim, num_groups)
+        self.v_norm = norm(k_dim, num_groups)
+        self.q = torch.nn.Conv2d(q_dim, dim, kernel_size=1)
+        self.k = torch.nn.Conv2d(k_dim, dim, kernel_size=1)
+        self.v = torch.nn.Conv2d(k_dim, dim, kernel_size=1)
+        self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
+
+    def forward(self, q, t, v=None):
         q_in = q
         q = self.q_norm(q)
         if v is None:
@@ -87,8 +115,7 @@ class TemporalCondResBlock2d(torch.nn.Module):
 
         self.need_attn = attn or local_attn
         if attn:
-            self.sc_attn = SparseCausalAttention2d(hidden_dim, k_dim=hidden_dim * 2, num_groups=num_groups,
-                                                   num_heads=num_heads)
+            self.sc_attn = MHAAttention2D(hidden_dim, k_dim=hidden_dim * 2, num_groups=num_groups, num_heads=num_heads)
             self.cross_attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads)
         elif local_attn:
             self.sc_attn = LocalSparseCausalAttention2d(hidden_dim, k_dim=hidden_dim * 2, num_groups=num_groups,
@@ -106,7 +133,12 @@ class TemporalCondResBlock2d(torch.nn.Module):
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
         h = (h + skip) / 2 ** (1 / 2)
         if self.need_attn:
-            h = self.sc_attn(h, t=t)
+            bt, c, hh, ww = h.shape
+            ht = h.reshape(bt // t, t, c, hh, ww)
+            kv1 = repeat_dim(ht[:, :1], 1, t)  # first frame of each batch
+            kv2 = torch.cat([ht[:, :1], ht[:, :-1]], dim=1)  # previous frame for each one
+            kv = torch.cat([kv1, kv2], dim=2).reshape(bt, 2*c, hh, ww)
+            h = self.sc_attn(h, v=kv)
             if cond is not None:
                 h = self.cross_attn(q=h, v=cond)
         h = self.temp_attn(h, t=t)
