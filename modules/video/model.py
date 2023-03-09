@@ -160,7 +160,7 @@ class TemporalCondResBlock2d(torch.nn.Module):
             h = self.sc_attn(h, t=t)
             if cond is not None:
                 h = self.cross_attn(q=h, v=cond)
-        h = self.temp_attn(h, t=t)
+            h = self.temp_attn(h, t=t)
         return h
 
 
