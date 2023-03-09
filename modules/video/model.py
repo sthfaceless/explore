@@ -135,9 +135,11 @@ class TemporalCondResBlock2d(torch.nn.Module):
 
         self.ln_1 = norm(in_dim, num_groups)
         self.layer_1 = torch.nn.Conv2d(in_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.tlayer_1 = PseudoConv3d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
         self.conditional_norm = ConditionalNorm2D(hidden_dim, embed_dim, num_groups)
         self.dropout = torch.nn.Dropout2d(p=dropout)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.tlayer_2 = PseudoConv3d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
         self.temp_attn = TemporalAttention2d(hidden_dim, num_groups=num_groups, num_heads=num_heads)
         self.need_attn = attn or local_attn
@@ -152,8 +154,10 @@ class TemporalCondResBlock2d(torch.nn.Module):
 
     def forward(self, x, t, emb, cond=None):
         h = self.layer_1(nonlinear(self.ln_1(x)))
+        h = self.tlayer_1(h)
         h = self.conditional_norm(h, emb)
         h = self.layer_2(self.dropout(nonlinear(h)))
+        h = self.tlayer_2(h)
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
         h = (h + skip) / 2 ** (1 / 2)
         if self.need_attn:
