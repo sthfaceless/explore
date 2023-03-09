@@ -19,7 +19,8 @@ def get_parser():
                         help="Kind of condition on frame to use")
 
     # Training settings
-    parser.add_argument("--base_lr", default=1e-6, type=float, help="Learning rate for decoder and nerf")
+    parser.add_argument("--base_lr", default=1e-6, type=float, help="Learning rate for diffusion")
+    parser.add_argument("--max_lr", default=1e-4, type=float, help="Max learning rate")
     parser.add_argument("--min_lr_rate", default=0.5, type=float, help="Minimal learning rate ratio")
     parser.add_argument("--epochs", default=30, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=10000, type=int, help="Epochs in training")
@@ -41,10 +42,10 @@ def get_parser():
     parser.add_argument("--local_attention_patch", default=8, type=int, help="Local attention patch size")
     parser.add_argument("--diffusion_steps", default=4000, type=int, help="Steps to do diffusion")
     parser.add_argument("--sample_steps", default=64, type=int, help="Steps for sampling")
-    parser.add_argument("--dropout", default=0.0, type=float, help="Dropout regularization for model")
+    parser.add_argument("--dropout", default=0.1, type=float, help="Dropout regularization for model")
     parser.add_argument("--clf_free", default=0.1, type=float, help="Classifier free guidance rate")
-    parser.add_argument("--clf_weight", default=3.0, type=float, help="Classifier free guidance weight sampling")
-    parser.add_argument("--extra_upsample_blocks", default=0, type=int,
+    parser.add_argument("--clf_weight", default=12.5, type=float, help="Classifier free guidance weight sampling")
+    parser.add_argument("--extra_upsample_blocks", default=1, type=int,
                         help="Add extra blocks to each width for upsampling improving")
 
     # Meta settings
@@ -73,7 +74,7 @@ if __name__ == "__main__":
                                                        filename=os.path.basename(args.out_model_name))
 
     dataset = LandscapeAnimation(root=args.dataset, w=args.w, h=args.h, frames=args.frames + 1, step=args.gap)
-    learning_rate = min(args.base_lr * args.batch_size * args.acc_grads * args.frames, 1e-4)
+    learning_rate = min(args.base_lr * args.batch_size * args.acc_grads, args.max_lr)
     model = LandscapeDiffusion(clearml=logger, shape=(3, args.h, args.w), dataset=dataset,
                                tempdir=args.tmp, local_attn_dim=args.local_attention_dim,
                                local_attn_patch=args.local_attention_patch, cond=args.cond,

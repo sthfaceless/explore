@@ -1,66 +1,6 @@
 import torch.nn
 
 from modules.common.model import *
-
-
-# class TemporalAttention2d(torch.nn.Module):
-#     def __init__(self, dim, q_dim=-1, k_dim=-1, num_heads=None, head_channel=32, dropout=0.0, num_groups=32):
-#         super().__init__()
-#         self.dim = dim
-#         if num_heads:
-#             self.num_heads = num_heads
-#             self.head_dim = dim // self.num_heads
-#         else:
-#             self.num_heads = dim // head_channel
-#             self.head_dim = head_channel
-#         self.scale = self.head_dim ** (-0.5)
-#         self.dropout = dropout
-#
-#         if q_dim == -1:
-#             q_dim = dim
-#         self.q_dim = q_dim
-#         if q_dim != dim:
-#             self.q_skip = torch.nn.Conv2d(q_dim, dim, kernel_size=1)
-#
-#         if k_dim == -1:
-#             k_dim = dim
-#         self.k_dim = k_dim
-#
-#         self.q_norm = norm(q_dim, num_groups)
-#         self.v_norm = norm(k_dim, num_groups)
-#         self.q = torch.nn.Conv2d(q_dim, dim, kernel_size=1)
-#         self.k = torch.nn.Conv2d(k_dim, dim, kernel_size=1)
-#         self.v = torch.nn.Conv2d(k_dim, dim, kernel_size=1)
-#         self.out = torch.nn.Conv2d(dim, dim, kernel_size=1)
-#
-#     def forward(self, q, t, v=None):
-#         q_in = q
-#         q = self.q_norm(q)
-#         if v is None:
-#             v = q
-#         else:
-#             v = self.v_norm(v)
-#         q, k, v = self.q(q), self.k(v), self.v(v)
-#
-#         # compute attention
-#         bt, c, h, w = q.shape
-#         # b*t, c, h, w -> b, t, n, d, hw -> b, t, n, hw, d -> b, hw, n, t, d
-#         q, k, v = map(lambda e: e.reshape(bt // t, t, self.num_heads, self.head_dim, h * w) \
-#                       .transpose(-1, -2).transpose(-2, -4), [q, k, v])
-#         # b, hw, n, t, t
-#         attn_weights = torch.nn.functional.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale, dim=-1)
-#
-#         # attend to values (b hw n t d)
-#         out = torch.matmul(attn_weights, v)
-#         # b hw n t d -> b t n hw d -> b t n d hw -> b*t n*d, h, w
-#         out = out.transpose(-2, -4).transpose(-1, -2).reshape(bt, self.dim, h, w)
-#         out = self.out(out)
-#
-#         if self.q_dim != self.dim:
-#             q_in = self.q_skip(q_in)
-#         return (out + q_in) / 2 ** (1 / 2)
-#
-
 class TemporalAttention2d(MHAAttention2D):
     def forward(self, q, t=1, v=None):
         q_in = q
