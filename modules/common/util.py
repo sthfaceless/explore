@@ -77,7 +77,7 @@ def normalize_image(image):
 
 
 def denormalize_image(image):
-    return (image * 127.5 + 255).astype(np.uint8)
+    return (image * 127.5 + 127.5).astype(np.uint8)
 
 
 def get_timestep_encoding(t, dim, steps):
