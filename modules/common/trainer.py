@@ -40,15 +40,18 @@ class EMA(torch.nn.Module):
 
 class SimpleLogger:
 
-    def __init__(self, clearml=None, run_async=False):
+    def __init__(self, clearml=None, run_async=False, tmpdir=''):
         self.clearml = clearml
         self.run_async = run_async
+        self.tmpdir = tmpdir
+        if not os.path.exists(tmpdir):
+            os.makedirs(tmpdir, exist_ok=True)
 
     def log_image(self, image, name, epoch=0):
         if self.clearml:
             self.clearml.report_image('valid', f"{name}", iteration=epoch, image=image)
         else:
-            Image.fromarray(image).save(f"{name}.png")
+            Image.fromarray(image).save(f"{self.tmpdir}/{name}.png")
 
     def log_images(self, images, prefix, epoch=0):
         for image_id, image in enumerate(images):
@@ -64,7 +67,7 @@ class SimpleLogger:
         if self.clearml:
             self.clearml.report_matplotlib_figure(title=name, series="valid", iteration=epoch, figure=plt)
         else:
-            plt.savefig(f"{name}_{epoch}.png")
+            plt.savefig(f"{self.tmpdir}/{name}_{epoch}.png")
         plt.close()
 
     def log_distribution(self, values, name, epoch=0):
@@ -115,11 +118,9 @@ class SimpleLogger:
         else:
             self._log_mesh(vertices, faces, name, epoch=epoch)
 
-    def log_video(self, frames, gap, name, tempdir, epoch=0):
-        if tempdir:
-            path = os.path.join(tempdir, f'{name}_{epoch}.mp4')
-        else:
-            path = f'{name}_{epoch}.mp4'
+    def log_video(self, frames, gap, name, epoch=0):
+
+        path = f'{self.tmpdir}/{name}_{epoch}.mp4'
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         w, h = frames[0].shape[1], frames[0].shape[0]
@@ -136,11 +137,9 @@ class SimpleLogger:
         for video_id, frames in enumerate(videos_frames):
             self.log_video(frames, gap, f'{name}_{video_id}', tempdir, epoch)
 
-    def log_gif(self, frames, gap, name, tempdir, epoch=0):
-        if tempdir:
-            path = os.path.join(tempdir, f'{name}_{epoch}.gif')
-        else:
-            path = f'{name}_{epoch}.gif'
+    def log_gif(self, frames, gap, name, epoch=0):
+        path = f'{self.tmpdir}/{name}_{epoch}.gif'
+
         frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
         imageio.mimsave(path, frames, fps=int(1 / (gap / 1000)))
         if self.clearml:
@@ -149,3 +148,66 @@ class SimpleLogger:
     def log_gifs(self, frames_list, gap, name, tempdir, epoch=0):
         for idx, frames in enumerate(frames_list):
             self.log_gif(frames, gap, f'{name}_{idx}', tempdir, epoch)
+
+
+class Lion(torch.optim.Optimizer):
+
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0):
+        """Initialize the hyperparameters.
+        Args:
+          params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+          lr (float, optional): learning rate (default: 1e-4)
+          betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square (default: (0.9, 0.99))
+          weight_decay (float, optional): weight decay coefficient (default: 0)
+        """
+
+        if not 0.0 <= lr:
+            raise ValueError('Invalid learning rate: {}'.format(lr))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError('Invalid beta parameter at index 0: {}'.format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError('Invalid beta parameter at index 1: {}'.format(betas[1]))
+        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step.
+        Args:
+          closure (callable, optional): A closure that reevaluates the model
+            and returns the loss.
+        Returns:
+          the loss.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                # Perform stepweight decay
+                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+
+                grad = p.grad
+                state = self.state[p]
+                # State initialization
+                if len(state) == 0:
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(p)
+
+                exp_avg = state['exp_avg']
+                beta1, beta2 = group['betas']
+
+                # Weight update
+                update = exp_avg * beta1 + grad * (1 - beta1)
+                p.add_(torch.sign(update), alpha=-group['lr'])
+                # Decay the momentum running average coefficient
+                exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+
+        return loss

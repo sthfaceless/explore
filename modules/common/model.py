@@ -1,4 +1,5 @@
 import torch.nn
+from einops import rearrange, einsum
 
 from modules.common.util import *
 
@@ -7,7 +8,8 @@ def nonlinear(x):
     return torch.nn.functional.silu(x)
 
 
-def norm(dims, num_groups=32):
+def norm(dims, num_groups=32, min_channels_group=4):
+    num_groups = min(num_groups, dims // min_channels_group)
     while dims % num_groups != 0:
         num_groups -= 1
     return torch.nn.GroupNorm(num_channels=dims, num_groups=num_groups, eps=1e-6)
@@ -58,7 +60,7 @@ class DownSample2d(torch.nn.Module):
 
 class Attention(torch.nn.Module):
 
-    def __init__(self, input_dim, embed_dim, num_heads=8, head_dim=None, dropout=0., bias=False):
+    def __init__(self, input_dim, embed_dim, num_heads=8, head_dim=32, dropout=0., bias=False):
         super().__init__()
         if head_dim is not None:
             self.head_dim = head_dim
@@ -68,7 +70,7 @@ class Attention(torch.nn.Module):
             self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
 
-        self.norm = torch.nn.LayerNorm(embed_dim)
+        self.norm = torch.nn.LayerNorm(input_dim)
         self.to_q = torch.nn.Linear(input_dim, embed_dim, bias=bias)
         self.to_kv = torch.nn.Linear(input_dim, embed_dim * 2, bias=bias)
         self.to_out = torch.nn.Sequential(
@@ -76,8 +78,9 @@ class Attention(torch.nn.Module):
             torch.nn.Dropout(dropout)
         )
 
-    def forward(self, q, v=None, mask=None):
+    def forward(self, q, v=None, mask=None, **kwargs):
         # normalize inputs
+        q_in = q
         q = self.norm(q)
         if v is None:
             v = q
@@ -88,23 +91,72 @@ class Attention(torch.nn.Module):
         q = self.to_q(q)
         k, v = self.to_kv(v).chunk(2, dim=-1)
 
-        # b n (h d) -> b h n d
         b, n, dim = q.shape
-        q, k, v = map(lambda t: t.view(b, n, self.num_heads, self.head_dim).transpose(1, 2), [q, k, v])
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', d=self.head_dim), [q, k, v])
+        q = q * self.scale
 
-        # b h n n
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        dots = einsum('b h i d, b h j d -> b h i j', q, k)
         if mask is not None:
-            dots = torch.where(mask.view(b, 1, 1, n), dots, torch.ones_like(dots) * float('-inf'))
+            if len(mask.shape) == 2:
+                # masking paddings
+                mask = mask.view(b, 1, 1, n)
+            elif len(mask.shape) == 3:
+                # masking sequence interconnections
+                mask = mask.view(b, 1, n, n)
+            dots = torch.where(mask, dots, torch.ones_like(dots) * float('-inf'))
         attn = torch.nn.functional.softmax(dots, dim=-1)
-        # (b h n n) * (b h n d)
         out = torch.matmul(attn, v)
 
-        # b h n d -> b n (h d)
-        out = out.transpose(1, 2).reshape(b, n, self.num_heads * self.head_dim)
+        out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
 
-        return out
+        return out + q_in
+
+
+class LinearAttention(torch.nn.Module):
+
+    def __init__(self, input_dim, embed_dim, num_heads=8, head_dim=32, dropout=0.):
+        super().__init__()
+        if head_dim is not None:
+            self.head_dim = head_dim
+            self.num_heads = embed_dim // head_dim
+        else:
+            self.num_heads = num_heads
+            self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.norm = norm(input_dim)
+        self.to_q = torch.nn.Conv1d(input_dim, embed_dim, kernel_size=1)
+        self.to_kv = torch.nn.Conv1d(input_dim, embed_dim * 2, kernel_size=1)
+        self.to_out = torch.nn.Sequential(
+            torch.nn.Conv1d(embed_dim, input_dim, kernel_size=1),
+            torch.nn.Dropout(dropout)
+        )
+
+    def forward(self, q, v=None, **kwargs):
+        # normalize inputs
+        q_in = q
+        q = self.norm(q)
+        if v is None:
+            v = q
+        else:
+            v = self.norm(v)
+
+        # map inputs
+        q = self.to_q(q)
+        k, v = self.to_kv(v).chunk(2, dim=1)
+
+        q, k, v = map(lambda t: rearrange(t, 'b (h d) n -> b h d n', d=self.head_dim), [q, k, v])
+        q = q * self.scale
+
+        dots = einsum('b h i d, b h j d -> b h i j', q, k)
+        attn = torch.nn.functional.softmax(dots, dim=-1)
+        out = torch.matmul(attn, v)
+
+        out = rearrange(out, 'b h d n -> b (h d) n')
+        out = self.to_out(out)
+
+        return out + q_in
 
 
 class Attention2D(torch.nn.Module):
@@ -282,7 +334,7 @@ class ResBlock2d(torch.nn.Module):
     def forward(self, input):
         x = self.layer_1(nonlinear(self.ln_1(input)))
         skip = input if self.in_dim == self.hidden_dim else self.input_mapper(input)
-        x = (self.layer_2(nonlinear(self.ln_2(x))) + skip) / 2 ** (1 / 2)
+        x = (self.layer_2(nonlinear(self.ln_2(x))) + skip) / 2 ** 0.5
         return x
 
 
@@ -330,9 +382,28 @@ class ConditionalNorm2D(torch.nn.Module):
         return self.norm(h) * (1.0 + gamma) + beta
 
 
+class EinopsToAndFrom(torch.nn.Module):
+    def __init__(self, from_einops, to_einops, fn, dup=None):
+        super().__init__()
+        self.from_einops = from_einops
+        self.to_einops = to_einops
+        self.fn = fn
+        self.dup = dup
+
+    def forward(self, x, **kwargs):
+        shape = x.shape
+        reconstitute_kwargs = dict(tuple(zip(self.from_einops.split(' '), shape)))
+        x = rearrange(x, f'{self.from_einops} -> {self.to_einops}')
+        if self.dup:  # for cross attention
+            kwargs[self.dup] = rearrange(kwargs[self.dup], f'{self.from_einops} -> {self.to_einops}')
+        x = self.fn(x, **kwargs)
+        x = rearrange(x, f'{self.to_einops} -> {self.from_einops}', **reconstitute_kwargs)
+        return x
+
+
 class ConditionalNormResBlock2D(torch.nn.Module):
-    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, local_attn=False,
-                 local_attn_kernel=8, dropout=0.0, num_heads=4):
+    def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, linear_attn=False,
+                 dropout=0.0, num_heads=4, head_dim=32):
         super(ConditionalNormResBlock2D, self).__init__()
 
         if in_dim == -1:
@@ -348,19 +419,16 @@ class ConditionalNormResBlock2D(torch.nn.Module):
         self.dropout = torch.nn.Dropout2d(p=dropout)
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
-        self.need_attn = attn or local_attn
+        self.need_attn = attn or linear_attn
         if attn:
-            self.attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads)
-        elif local_attn:
-            self.attn = LocalMHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads,
-                                            patch_size=local_attn_kernel)
+            self.attn = MHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads, head_channel=head_dim)
 
     def forward(self, x, emb):
         h = self.layer_1(nonlinear(self.ln_1(x)))
         h = self.conditional_norm(h, emb)
         h = self.layer_2(self.dropout(nonlinear(h)))
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
-        h = (h + skip) / 2 ** (1 / 2)
+        h = (h + skip) / 2 ** 0.5
         if self.need_attn:
             h = self.attn(h)
         return h

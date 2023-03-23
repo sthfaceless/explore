@@ -73,11 +73,11 @@ def save_best(history, model, model_name, monitor='test', metric='loss'):
 
 
 def normalize_image(image):
-    return image.astype(np.float32) / (255 / 2) - 1.0
+    return image.astype(np.float32) / 127.5 - 1.0
 
 
 def denormalize_image(image):
-    return ((image + 1.0) / 2 * 255).astype(np.uint8)
+    return (image * 127.5 + 255).astype(np.uint8)
 
 
 def get_timestep_encoding(t, dim, steps):
@@ -184,3 +184,38 @@ def prepare_torch_images(images):
 
 def tensor2list(tensor):
     return [tensor[idx] for idx in range(len(tensor))]
+
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
+
+
+def num_to_groups(num, divisor):
+    groups = num // divisor
+    remainder = num % divisor
+    return groups, remainder
+
+
+def prob_mask_like(shape, prob, device):
+    if prob == 1:
+        return torch.ones(shape, device=device, dtype=torch.bool)
+    elif prob == 0:
+        return torch.zeros(shape, device=device, dtype=torch.bool)
+    else:
+        return torch.zeros(shape, device=device).float().uniform_(0, 1) < prob
+
+
+def add_last_dims(orig, like):
+    dest_shape = orig.shape
+    for _ in range(len(like.shape) - len(orig.shape)):
+        dest_shape.append(1)
+    return orig.reshape(dest_shape)
+
+
+def cases(tps):
+    for tp in tps[:-1]:
+        if tp[0]:
+            return tp[1]
+    return tps[-1]

@@ -58,7 +58,7 @@ class LandscapeDiffusion(Diffusion):
             #     videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
             #     for video_id in range(len(videos_frames)):
             #         self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
-            #                                    f'step_{sample_iter}_{video_id}', self.tempdir,
+            #                                    f'step_{sample_iter}_{video_id}',
             #                                    epoch=self.current_epoch)
 
         return x
@@ -90,13 +90,13 @@ class LandscapeDiffusion(Diffusion):
             videos_frames = prepare_torch_images(torch.cat([cond.unsqueeze(1), x], dim=1))
             for video_id in range(len(videos_frames)):
                 self.custom_logger.log_gif(tensor2list(videos_frames[video_id]), self.gap,
-                                           f'sample_{generated + video_id}', self.tempdir, epoch=self.current_epoch)
+                                           f'sample_{generated + video_id}', epoch=self.current_epoch)
             generated += self.batch_size
 
         # log current lr
         if self.debug:
             self.custom_logger.log_gif(tensor2list(prepare_torch_images(batch['frames'][0])), self.gap,
-                                       f'train_example', self.tempdir, epoch=self.current_epoch)
+                                       f'train_example', epoch=self.current_epoch)
             self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
