@@ -7,7 +7,7 @@ class Diffusion(pl.LightningModule):
 
     def __init__(self, dataset=None, model=None, use_ema=False, learning_rate=1e-4, batch_size=128, min_lr_rate=0.1,
                  diffusion_steps=1000, sample_steps=64, steps=10000, epochs=100, clip_denoised=True,
-                 min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=0.0):
+                 min_beta=1e-4, max_beta=0.02, beta_schedule='cos', kl_weight=1e-3):
         super(Diffusion, self).__init__()
 
         self.dataset = dataset
@@ -225,7 +225,7 @@ class Diffusion(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
-                                                        pct_start=1 / self.epochs, div_factor=2.0,
+                                                        pct_start=3 / self.epochs, div_factor=2.0,
                                                         final_div_factor=1 / (2.0 * self.min_lr_rate),
                                                         epochs=self.epochs, steps_per_epoch=self.steps)
         scheduler = {

@@ -1,8 +1,6 @@
 import torch.nn
 
 from modules.common.model import *
-
-
 class TemporalAttention2d(MHAAttention2D):
     def forward(self, q, t=1, v=None):
         q_in = q
@@ -65,8 +63,7 @@ class PseudoConv3d(torch.nn.Conv1d):
 
 class TemporalCondResBlock2d(torch.nn.Module):
     def __init__(self, hidden_dim, embed_dim, kernel_size=3, num_groups=32, in_dim=-1, attn=False, local_attn=False,
-                 local_attn_patch=8,
-                 dropout=0.0, num_heads=4):
+                 local_attn_patch=8, dropout=0.0, num_heads=4):
         super(TemporalCondResBlock2d, self).__init__()
 
         if in_dim == -1:
@@ -84,6 +81,7 @@ class TemporalCondResBlock2d(torch.nn.Module):
         self.layer_2 = torch.nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
         self.tlayer_2 = PseudoConv3d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
+        self.temp_attn = TemporalAttention2d(hidden_dim, num_groups=num_groups, num_heads=num_heads)
         self.need_attn = attn or local_attn
         if attn:
             self.sc_attn = SparseCausalAttention2d(hidden_dim, k_dim=hidden_dim * 2, num_groups=num_groups, num_heads=num_heads)
@@ -93,7 +91,6 @@ class TemporalCondResBlock2d(torch.nn.Module):
                                                         num_heads=num_heads)
             self.cross_attn = LocalMHAAttention2D(hidden_dim, num_groups=num_groups, num_heads=num_heads,
                                                   patch_size=local_attn_patch)
-        self.temp_attn = TemporalAttention2d(hidden_dim, num_groups=num_groups, num_heads=num_heads)
 
     def forward(self, x, t, emb, cond=None):
         h = self.layer_1(nonlinear(self.ln_1(x)))
@@ -104,10 +101,10 @@ class TemporalCondResBlock2d(torch.nn.Module):
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
         h = (h + skip) / 2 ** (1 / 2)
         if self.need_attn:
-            h = self.sc_attn(h)
+            h = self.sc_attn(h, t=t)
             if cond is not None:
                 h = self.cross_attn(q=h, v=cond)
-        h = self.temp_attn(h, t=t)
+            h = self.temp_attn(h, t=t)
         return h
 
 
