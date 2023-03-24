@@ -922,7 +922,7 @@ if __name__ == "__main__":
                                    diffusion_steps=args.diffusion_steps, base_noise=args.base_noise)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=True), precision='16-mixed',
+                      strategy=DDPStrategy(find_unused_parameters=True), precision=16,
                       profiler=args.profile,
                       accumulate_grad_batches=args.acc_grads,
                       accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])
