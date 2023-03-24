@@ -638,14 +638,13 @@ class AnimationDiffusion(pl.LightningModule):
     def forward(self, x, sigma, train=True, **kwargs):
 
         x = x.to(torch.float32)
-        sigma = sigma.to(torch.float32)
+        sigma = add_last_dims(sigma.to(torch.float32), x)
 
         model = cases([
             (self.use_ema and (not train or not self.training), self.ema_model.module),
             self.model
         ])
 
-        sigma = add_last_dims(sigma, x)
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
@@ -682,6 +681,7 @@ class AnimationDiffusion(pl.LightningModule):
 
         # sample noise schedule
         sigma = (torch.randn(len(x), ) * self.logsigma_std + self.logsigma_mean).exp().type_as(x)
+        sigma = add_last_dims(sigma, x)
 
         # apply classifier free guidance
         if train and self.clf_free > 0:
@@ -696,7 +696,6 @@ class AnimationDiffusion(pl.LightningModule):
 
     def get_losses(self, x, x_denoised, sigma):
 
-        sigma = add_last_dims(sigma, x)
         loss_weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         loss = loss_weight * ((x_denoised - x) ** 2)
 
@@ -834,9 +833,9 @@ def get_parser():
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--cond", default="concat", choices=['cross', 'concat'], help="Image condition type")
-    parser.add_argument("--vae", default="stabilityai/stable-diffusion-2-1",
+    parser.add_argument("--vae", default="stabilityai/stable-diffusion-2",
                         help="name of stability pipeline for autoencoder")
-    parser.add_argument("--vae_device", default="other", choices=["same", "other"],
+    parser.add_argument("--vae_device", default="same", choices=["same", "other"],
                         help="whether use pretrained model on the same device")
 
     # Training settings
@@ -913,7 +912,7 @@ if __name__ == "__main__":
                          embed_features=args.embed_dim, cond=args.cond,
                          attn_scale=actual_h // args.attention_dim,
                          linear_attn_scale=actual_h // args.linear_attention_dim)
-    diffusion = AnimationDiffusion(model, dataset=args.dataset, tmpdir=args.tmp, clearml=clearml, vae=vae,
+    diffusion = AnimationDiffusion(model, dataset=dataset, tmpdir=args.tmp, clearml=clearml, vae=vae,
                                    vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
                                    num_frames=args.frames + 1, gap=args.gap, data_latent=True,
                                    learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
