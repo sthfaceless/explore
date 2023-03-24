@@ -452,6 +452,42 @@ class LandscapeAnimation(torch.utils.data.IterableDataset):
                 print(e)
 
 
+class LandscapeLatents(torch.utils.data.IterableDataset):
+
+    def __init__(self, folder, num_frames=1 + 8, step=4):  # each step is 64 ms
+        super(LandscapeLatents, self).__init__()
+        self.frames = num_frames
+        self.step = step
+        self.folder = folder
+        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
+                      os.path.splitext(file)[1] == '.lt']
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
+                      os.path.splitext(file)[1] == '.lt']
+        while True:
+            try:
+
+                file = choice(self.files)
+                tensor = torch.load(file)
+
+                idx = random.randint(0, len(tensor) - self.frames * self.step - 1)
+                frames = []
+                for _ in range(self.frames):
+                    frames.append(tensor[idx])
+                    idx += self.step
+
+                frames = torch.stack(frames, dim=1).to(torch.float32)
+                return frames
+
+            except Exception as e:
+                print(e)
+                continue
+
+
 class AnimationDiffusion(pl.LightningModule):
 
     def __init__(self,
@@ -858,7 +894,8 @@ if __name__ == "__main__":
     checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                        filename=os.path.basename(args.out_model_name))
 
-    dataset = LandscapeAnimation(folder=args.dataset, w=args.w, h=args.h, num_frames=args.frames + 1, step=args.gap)
+    # dataset = LandscapeAnimation(folder=args.dataset, w=args.w, h=args.h, num_frames=args.frames + 1, step=args.gap)
+    dataset = LandscapeLatents(folder=args.dataset, num_frames=args.frames + 1, step=2)
 
     vae = AutoencoderKL.from_pretrained(args.vae, subfolder='vae', torch_dtype=torch.float16) if args.vae else None
     assert exists(vae) or args.vae_device == 'same' or torch.cuda.device_count() > 1, \
