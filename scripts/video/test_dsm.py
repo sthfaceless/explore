@@ -301,7 +301,7 @@ class TemporalUNet(torch.nn.Module):
         b, in_channels, temporal_dim, height, width = x.shape
 
         # concat to each frame condition
-        x = torch.cat([cond.unsqueeze(2), x], dim=1) if self.cond == 'concat' else x
+        x = torch.cat([repeat_dim(cond.unsqueeze(2), 2, temporal_dim), x], dim=1) if self.cond == 'concat' else x
 
         # map time to embeddings
         h_noise = get_timestep_encoding(sigma, self.emb_features // 4, self.steps)
