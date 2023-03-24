@@ -310,7 +310,7 @@ class TemporalUNet(torch.nn.Module):
         # map frame embedding
         h_temporal = get_timestep_encoding(torch.arange(temporal_dim).type_as(sigma), self.emb_features // 4,
                                            temporal_dim)
-        h_temporal = self.frame_layers[1](nonlinear(self.frame_layers[0](h_temporal))).transpose(1, 2)
+        h_temporal = self.frame_layers[1](nonlinear(self.frame_layers[0](h_temporal))).transpose(0, 1)
         h_temporal = torch.where(time_mask, torch.zeros_like(h_temporal[None, :, :]), h_temporal[None, :, :])
         h_time = h_noise[:, :, None] + h_temporal
 
