@@ -208,7 +208,7 @@ def prob_mask_like(shape, prob, device):
 
 
 def add_last_dims(orig, like):
-    dest_shape = orig.shape
+    dest_shape = list(orig.shape)
     for _ in range(len(like.shape) - len(orig.shape)):
         dest_shape.append(1)
     return orig.reshape(dest_shape)
