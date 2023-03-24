@@ -78,8 +78,8 @@ class TemporalCondResBlock(torch.nn.Module):
         self.time_layer_1 = torch.nn.Conv3d(hidden_dim, hidden_dim, kernel_size=(kernel_size, 1, 1),
                                             padding=(kernel_size // 2, 0, 0))
         self.conditional_norm = ConditionalNorm(hidden_dim, embed_dim, num_groups)
-        self.dropout = torch.nn.Dropout2d(p=dropout)
-        self.layer_2 = torch.nn.Conv3d(in_dim, hidden_dim, kernel_size=(1, kernel_size, kernel_size),
+        self.dropout = torch.nn.Dropout3d(p=dropout)
+        self.layer_2 = torch.nn.Conv3d(hidden_dim, hidden_dim, kernel_size=(1, kernel_size, kernel_size),
                                        padding=(0, kernel_size // 2, kernel_size // 2))
         self.time_layer_2 = torch.nn.Conv3d(hidden_dim, hidden_dim, kernel_size=(kernel_size, 1, 1),
                                             padding=(kernel_size // 2, 0, 0))
@@ -91,11 +91,11 @@ class TemporalCondResBlock(torch.nn.Module):
         time_mask = add_last_dims(time_mask, x)
 
         h = self.layer_1(nonlinear(self.ln_1(x)))
-        h = torch.where(time_mask, h, h + self.tlayer_1(h))
+        h = torch.where(time_mask, h, h + self.time_layer_1(h))
 
         h = self.conditional_norm(h, emb)
         h = self.layer_2(self.dropout(nonlinear(h)))
-        h = torch.where(time_mask, h, h + self.tlayer_2(h))
+        h = torch.where(time_mask, h, h + self.time_layer_2(h))
 
         skip = x if self.in_dim == self.hidden_dim else self.res_mapper(x)
         return (h + skip) / 2 ** (1 / 2)
@@ -130,6 +130,11 @@ def linear_attn(dim, head_dim=64):
                            LinearAttention(input_dim=dim, embed_dim=dim, head_dim=head_dim))
 
 
+def linear_attn2d(dim, head_dim=64):
+    return EinopsToAndFrom('b c h w', 'b c (h w)',
+                           LinearAttention(input_dim=dim, embed_dim=dim, head_dim=head_dim))
+
+
 def cross_linear_attn(dim, head_dim=64):
     return EinopsToAndFrom('b c n h w', '(b n) c (h w)',
                            LinearAttention(input_dim=dim, embed_dim=dim, head_dim=head_dim), dup='v')
@@ -152,7 +157,7 @@ class SparseCausalAttention(torch.nn.Module):
         kv2 = torch.cat([x[:, :, :1], x[:, :, :-1]], dim=2)  # previous frame for each one
         kv = torch.cat([kv1, kv2], dim=1)
         kv = torch.where(time_mask, x, self.reduce(kv))
-        return self.attn(x, kv)
+        return self.attn(x, v=kv)
 
 
 class TemporalUNet(torch.nn.Module):
@@ -160,7 +165,9 @@ class TemporalUNet(torch.nn.Module):
     def __init__(self,
                  channels=3,
                  kernel_size=3,
-                 hidden_dims=(128, 128, 256, 256, 512, 512),
+                 base_ch=192,
+                 res_blocks=[3],
+                 ch_mults=[1, 2, 3, 4],
                  embed_features=512,
                  attn_scale=2,
                  linear_attn_scale=2,
@@ -175,9 +182,10 @@ class TemporalUNet(torch.nn.Module):
         self.cond = cond
         self.steps = steps
         # Input mapping
-        self.input_mapper = torch.nn.Conv3d(channels, hidden_dims[0], kernel_size=(1, kernel_size, kernel_size),
+        self.input_mapper = torch.nn.Conv3d(2 * channels if cond == 'concat' else channels, base_ch * ch_mults[0],
+                                            kernel_size=(1, kernel_size, kernel_size),
                                             padding=(0, kernel_size // 2, kernel_size // 2))
-        self.input_temporal = TemporalAttn(hidden_dims[0], head_dim)
+        self.input_temporal = TemporalAttn(base_ch * ch_mults[0], head_dim)
 
         # Time embeddings
         self.emb_features = embed_features
@@ -194,101 +202,103 @@ class TemporalUNet(torch.nn.Module):
 
         # Conditional image embeddings
         if cond == 'cross':
-            self.cond_input = torch.nn.Conv2d(channels, hidden_dims[0], kernel_size=kernel_size,
+            self.cond_input = torch.nn.Conv2d(channels, base_ch * ch_mults[0], kernel_size=kernel_size,
                                               padding=kernel_size // 2)
-            self.cond_layers = torch.nn.ModuleList([torch.nn.ModuleList([])])
+            self.cond_layers = torch.nn.ModuleList([])
             self.cond_downsample = torch.nn.ModuleList([])
             current_scale = 1
-            for prev_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
-                if prev_dim != dim:
-                    self.cond_layers[-1].append(linear_attn(prev_dim, head_dim))
-                    self.cond_layers.append(torch.nn.ModuleList([]))
-                    current_scale *= 2
-                    self.cond_downsample.append(DownSample2d(prev_dim, dim, kernel_size=kernel_size))
-                block = ResBlock2d(hidden_dim=dim, num_groups=num_groups, kernel_size=kernel_size)
-                self.cond_layers[-1].append(block)
-            self.cond_downsample.append(torch.nn.Identity())
+            for ch_id, ch_mult in enumerate(ch_mults):
+                dim = base_ch * ch_mult
+                blocks = res_blocks[0] if len(res_blocks) == 1 else res_blocks[ch_id]
+                self.cond_layers.append(torch.nn.ModuleList(
+                    [ResBlock2d(hidden_dim=dim, num_groups=num_groups, kernel_size=kernel_size) for _ in range(blocks)]
+                    + [linear_attn2d(dim, head_dim)]))
+                self.cond_downsample.append(
+                    DownSample2d(dim, base_ch * ch_mults[ch_id + 1] if ch_id < len(ch_mults) - 1 else None,
+                                 kernel_size=kernel_size) if ch_id != len(ch_mults) - 1 else torch.nn.Identity())
+                current_scale = current_scale * 2 if ch_id != len(ch_mults) - 1 else current_scale
 
         # prepare encoder containers
-        self.encoder = torch.nn.ModuleList([torch.nn.ModuleList([])])
+        self.encoder = torch.nn.ModuleList([])
         self.downs = torch.nn.ModuleList([])
         self.encoder_spatial = torch.nn.ModuleList([])
         self.encoder_temporal = torch.nn.ModuleList([])
         self.encoder_cross = torch.nn.ModuleList([])
 
         current_scale = 1
-        for p_dim, dim in zip([hidden_dims[0]] + list(hidden_dims), hidden_dims):
-            if p_dim != dim:
-                self.encoder_spatial.append(cases([
-                    (current_scale >= attn_scale, SparseCausalAttention(spatial_attn(p_dim, head_dim), p_dim)),
-                    (current_scale >= linear_attn_scale, linear_attn(p_dim, head_dim)),
-                    torch.nn.Identity
-                ]))
-                self.encoder_cross.append(cases([
-                    (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(p_dim, head_dim)),
-                    (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(p_dim, head_dim)),
-                    Identity()
-                ]))
-                self.encoder_temporal.append(TemporalAttn(p_dim, head_dim))
-                self.downs.append(DownSample(p_dim, dim))
-                self.encoder.append(torch.nn.ModuleList([]))
-                current_scale *= 2
-            self.encoder[-1].append(TemporalCondResBlock(dim, embed_dim=self.emb_features, kernel_size=kernel_size,
-                                                         num_groups=num_groups, dropout=dropout))
-        self.downs.append(torch.nn.Identity())
+        for ch_id, ch_mult in enumerate(ch_mults):
+            dim = base_ch * ch_mult
+            blocks = res_blocks[0] if len(res_blocks) == 1 else res_blocks[ch_id]
+            self.encoder.append(torch.nn.ModuleList([
+                TemporalCondResBlock(dim, embed_dim=self.emb_features, kernel_size=kernel_size,
+                                     num_groups=num_groups, dropout=dropout) for _ in range(blocks)]))
+            self.encoder_spatial.append(cases([
+                (current_scale >= attn_scale, SparseCausalAttention(cross_spatial_attn(dim, head_dim), dim)),
+                (current_scale >= linear_attn_scale, linear_attn(dim, head_dim)),
+                torch.nn.Identity
+            ]))
+            self.encoder_cross.append(cases([
+                (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(dim, head_dim)),
+                (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(dim, head_dim)),
+                Identity()
+            ]))
+            self.encoder_temporal.append(TemporalAttn(dim, head_dim))
+            self.downs.append(DownSample(dim, base_ch * ch_mults[ch_id + 1] if ch_id < len(ch_mults) - 1 else None)
+                              if ch_id < len(ch_mults) - 1 else torch.nn.Identity())
+            current_scale = current_scale * 2 if ch_id != len(ch_mults) - 1 else current_scale
 
         # mid-block construction
+        last_dim = base_ch * ch_mults[-1]
         self.mid_layers = torch.nn.Module()
-        self.mid_layers.block_1 = TemporalCondResBlock(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
+        self.mid_layers.block_1 = TemporalCondResBlock(hidden_dim=last_dim, embed_dim=self.emb_features,
                                                        num_groups=num_groups, kernel_size=kernel_size, dropout=dropout)
         self.mid_layers.spatial = cases([
             (current_scale >= attn_scale,
-             SparseCausalAttention(spatial_attn(hidden_dims[-1], head_dim), hidden_dims[-1])),
-            (current_scale >= linear_attn_scale, linear_attn(hidden_dims[-1], head_dim)),
+             SparseCausalAttention(cross_spatial_attn(last_dim, head_dim), last_dim)),
+            (current_scale >= linear_attn_scale, linear_attn(last_dim, head_dim)),
             torch.nn.Identity()
         ])
         self.mid_layers.cross = cases([
-            (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(hidden_dims[-1], head_dim)),
-            (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(hidden_dims[-1], head_dim)),
+            (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(last_dim, head_dim)),
+            (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(last_dim, head_dim)),
             Identity()
         ])
-        self.mid_layers.temporal = TemporalAttn(hidden_dims[-1], head_dim)
-        self.mid_layers.block_2 = TemporalCondResBlock(hidden_dim=hidden_dims[-1], embed_dim=self.emb_features,
+        self.mid_layers.temporal = TemporalAttn(last_dim, head_dim)
+        self.mid_layers.block_2 = TemporalCondResBlock(hidden_dim=last_dim, embed_dim=self.emb_features,
                                                        num_groups=num_groups, kernel_size=kernel_size, dropout=dropout)
 
         # prepare decoder containers
-        self.decoder = torch.nn.ModuleList([torch.nn.ModuleList([])])
+        self.decoder = torch.nn.ModuleList([])
         self.ups = torch.nn.ModuleList([])
         self.decoder_spatial = torch.nn.ModuleList([])
         self.decoder_temporal = torch.nn.ModuleList([])
         self.decoder_cross = torch.nn.ModuleList([])
 
-        # add all blocks in inversed order
-        inverse_dims = hidden_dims[::-1]
-        for p_dim, dim in zip([inverse_dims[0]] + list(inverse_dims), inverse_dims):
-            if p_dim != dim:
-                self.decoder_spatial.append(cases([
-                    (current_scale >= attn_scale, SparseCausalAttention(spatial_attn(p_dim, head_dim), p_dim)),
-                    (current_scale >= linear_attn_scale, linear_attn(p_dim, head_dim)),
-                    torch.nn.Identity
-                ]))
-                self.decoder_cross.append(cases([
-                    (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(p_dim, head_dim)),
-                    (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(p_dim, head_dim)),
-                    Identity()
-                ]))
-                self.decoder_temporal.append(TemporalAttn(p_dim, head_dim))
-                self.ups.append(UpSample(p_dim, dim))
-                self.decoder.append(torch.nn.ModuleList([]))
-                current_scale //= 2
-            self.decoder[-1].append(TemporalCondResBlock(dim, in_dim=2 * dim, embed_dim=self.emb_features,
-                                                         kernel_size=kernel_size, num_groups=num_groups,
-                                                         dropout=dropout))
-        self.ups.append(torch.nn.Identity())
+        for ch_id, ch_mult in enumerate(reversed(ch_mults)):
+            dim = base_ch * ch_mult
+            blocks = res_blocks[0] if len(res_blocks) == 1 else res_blocks[- (ch_id + 1)]
+            self.decoder.append(torch.nn.ModuleList([
+                TemporalCondResBlock(dim, in_dim=2 * dim, embed_dim=self.emb_features,
+                                     kernel_size=kernel_size, num_groups=num_groups,
+                                     dropout=dropout) for _ in range(blocks)]))
+            self.decoder_spatial.append(cases([
+                (current_scale >= attn_scale, SparseCausalAttention(cross_spatial_attn(dim, head_dim), dim)),
+                (current_scale >= linear_attn_scale, linear_attn(dim, head_dim)),
+                torch.nn.Identity
+            ]))
+            self.decoder_cross.append(cases([
+                (self.cond == 'cross' and current_scale >= attn_scale, cross_spatial_attn(dim, head_dim)),
+                (self.cond == 'cross' and current_scale >= linear_attn_scale, cross_linear_attn(dim, head_dim)),
+                Identity()
+            ]))
+            self.decoder_temporal.append(TemporalAttn(dim, head_dim))
+            self.ups.append(UpSample(dim, base_ch * ch_mults[-(ch_id + 2)] if ch_id < len(ch_mults) - 1 else None)
+                            if ch_id != len(ch_mults) - 1 else torch.nn.Identity())
+            current_scale = current_scale // 2 if ch_id != len(ch_mults) - 1 else current_scale
 
         # Out latent prediction
-        self.out_norm = norm(hidden_dims[0], num_groups=num_groups)
-        self.out_mapper = torch.nn.Conv3d(hidden_dims[0], channels, kernel_size=(1, kernel_size, kernel_size),
+        self.out_norm = norm(base_ch, num_groups=num_groups)
+        self.out_mapper = torch.nn.Conv3d(base_ch, channels, kernel_size=(1, kernel_size, kernel_size),
                                           padding=(0, kernel_size // 2, kernel_size // 2))
 
     def forward(self, x, sigma, cond=None, time_mask=None):
@@ -311,7 +321,8 @@ class TemporalUNet(torch.nn.Module):
         h_temporal = get_timestep_encoding(torch.arange(temporal_dim).type_as(sigma), self.emb_features // 4,
                                            temporal_dim)
         h_temporal = self.frame_layers[1](nonlinear(self.frame_layers[0](h_temporal))).transpose(0, 1)
-        h_temporal = torch.where(time_mask, torch.zeros_like(h_temporal[None, :, :]), h_temporal[None, :, :])
+        h_temporal = torch.where(time_mask[:, :, :, 0, 0], torch.zeros_like(h_temporal[None, :, :]),
+                                 h_temporal[None, :, :])
         h_time = h_noise[:, :, None] + h_temporal
 
         # map input image to latent space
@@ -601,6 +612,7 @@ class AnimationDiffusion(pl.LightningModule):
 
         # stochastic sampling
         x_next = latents.to(torch.float64) * t_steps[0]
+        ones = torch.ones(num_samples).type_as(latents)
         for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):  # 0, ..., N-1
 
             # increase noise
@@ -610,12 +622,12 @@ class AnimationDiffusion(pl.LightningModule):
             x_noised = x_next + (t_hat ** 2 - t_cur ** 2).sqrt() * self.get_noise(x_next, self.sample_noise)
 
             # euler ode solver
-            x_denoised = self.forward(x_noised, t_hat, train=False, cond=cond, **kwargs).to(torch.float64)
+            x_denoised = self.forward(x_noised, t_hat * ones, train=False, cond=cond, **kwargs).to(torch.float64)
             d_cur = (x_denoised - x_noised) / t_hat
 
             # correct score with classifier free guidance
             if clf_weight:
-                x_uncond = self.forward(x_noised, t_hat, train=False, cond=self.get_empty_cond(cond),
+                x_uncond = self.forward(x_noised, t_hat * ones, train=False, cond=self.get_empty_cond(cond),
                                         **kwargs).to(torch.float64)
                 d_uncond = (x_uncond - x_noised) / t_hat
                 d_cur = d_cur * (1 + clf_weight) - d_uncond * clf_weight
@@ -623,11 +635,11 @@ class AnimationDiffusion(pl.LightningModule):
 
             # heun ode correction
             if i < num_steps - 1:
-                x_denoised = self.forward(x_tmp, t_next, train=False, cond=cond, **kwargs).to(torch.float64)
+                x_denoised = self.forward(x_tmp, t_next * ones, train=False, cond=cond, **kwargs).to(torch.float64)
                 d_next = (x_denoised - x_tmp) / t_next
                 # correct score with classifier free guidance
                 if clf_weight:
-                    x_uncond = self.forward(x_tmp, t_next, train=False, cond=self.get_empty_cond(cond),
+                    x_uncond = self.forward(x_tmp, t_next * ones, train=False, cond=self.get_empty_cond(cond),
                                             **kwargs).to(torch.float64)
                     d_uncond = (x_uncond - x_tmp) / t_next
                     d_next = d_next * (1 + clf_weight) - d_uncond * clf_weight
@@ -638,7 +650,7 @@ class AnimationDiffusion(pl.LightningModule):
     def forward(self, x, sigma, train=True, **kwargs):
 
         x = x.to(torch.float32)
-        sigma = add_last_dims(sigma.to(torch.float32), x)
+        sigma = sigma.to(torch.float32)
 
         model = cases([
             (self.use_ema and (not train or not self.training), self.ema_model.module),
@@ -650,8 +662,8 @@ class AnimationDiffusion(pl.LightningModule):
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
 
-        x_correction = model(c_in * x, c_noise, **kwargs)
-        x_denoised = c_skip * x + c_out * x_correction
+        x_correction = model(add_last_dims(c_in, x) * x, c_noise, **kwargs)
+        x_denoised = add_last_dims(c_skip, x) * x + add_last_dims(c_out, x) * x_correction
 
         return x_denoised
 
@@ -681,7 +693,6 @@ class AnimationDiffusion(pl.LightningModule):
 
         # sample noise schedule
         sigma = (torch.randn(len(x), ) * self.logsigma_std + self.logsigma_mean).exp().type_as(x)
-        sigma = add_last_dims(sigma, x)
 
         # apply classifier free guidance
         if train and self.clf_free > 0:
@@ -690,17 +701,17 @@ class AnimationDiffusion(pl.LightningModule):
             cond = torch.where(mask, self.get_empty_cond(cond), cond)
 
         # noise input and predict original
-        x_denoised = self.forward(x + self.get_noise(x, sigma), sigma, cond=cond, train=train)
+        x_denoised = self.forward(x + self.get_noise(x, add_last_dims(sigma, x)), sigma, cond=cond, train=train)
 
-        return self.get_losses(x, x_denoised, sigma)
+        return self.get_losses(x, x_denoised, add_last_dims(sigma, x))
 
     def get_losses(self, x, x_denoised, sigma):
 
         loss_weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
-        loss = loss_weight * ((x_denoised - x) ** 2)
+        loss = loss_weight * (x_denoised - x) ** 2
 
         return {
-            'loss': loss
+            'loss': loss.sum()
         }
 
     def encode_data(self, batch, move_vae=True):
@@ -720,24 +731,28 @@ class AnimationDiffusion(pl.LightningModule):
 
                 if len(batch.shape) == 5:
                     tensor = rearrange(tensor, '(b n) c h w -> b c n h w', n=batch.shape[2])
-                mini_batches.append(tensor.to(device='cpu', dtype=torch.float32) * self.vae_scale)
+                mini_batches.append(tensor.to(device='cpu', dtype=torch.float32))
                 del tensor
+                gc.collect()
+                torch.cuda.empty_cache()
 
             batch = torch.cat(mini_batches, dim=0)
 
             if move_vae:
                 vae.to('cpu')
+        if self.vae:
+            batch = batch * self.vae_scale
 
         return batch
 
     def decode_data(self, batch, move_vae=True):
         if self.vae:
-
+            batch = batch / self.vae_scale
             vae = self.vae[0].to(self.vae_device) if move_vae else self.vae[0]
             mini_batches = []
             for tensor in torch.split(batch, self.batch_vae, dim=0):
 
-                tensor = (tensor * self.vae_scale).to(device=self.vae_device, dtype=torch.float16)
+                tensor = tensor.to(device=self.vae_device, dtype=torch.float16)
                 if len(batch.shape) == 5:
                     tensor = rearrange(tensor, 'b c n h w -> (b n) c h w')
 
@@ -748,6 +763,8 @@ class AnimationDiffusion(pl.LightningModule):
                     tensor = rearrange(tensor, '(b n) c h w -> b c n h w', n=batch.shape[2])
                 mini_batches.append(tensor.to(device='cpu', dtype=torch.float32))
                 del tensor
+                gc.collect()
+                torch.cuda.empty_cache()
 
             batch = torch.cat(mini_batches, dim=0)
 
@@ -773,6 +790,9 @@ class AnimationDiffusion(pl.LightningModule):
                                 clf_weight=self.clf_weight).to(device='cpu', dtype=torch.float32)
             latents.append(torch.cat([cond.unsqueeze(2).to('cpu'), x], dim=2))
             del x
+        del conds
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # decode latents back to frames
         latents = torch.cat(latents, dim=0)
@@ -806,6 +826,7 @@ class AnimationDiffusion(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=self.model.parameters(), betas=(0.9, 0.99))
+        # optimizer = Lion(lr=self.learning_rate, params=self.model.parameters(), betas=(0.95, 0.98))
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
                                                         pct_start=3 / self.epochs, div_factor=1 / self.initial_lr_rate,
                                                         final_div_factor=self.initial_lr_rate / self.min_lr_rate,
@@ -833,7 +854,7 @@ def get_parser():
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--cond", default="concat", choices=['cross', 'concat'], help="Image condition type")
-    parser.add_argument("--vae", default="stabilityai/stable-diffusion-2",
+    parser.add_argument("--vae", default="stabilityai/stable-diffusion-2-1",
                         help="name of stability pipeline for autoencoder")
     parser.add_argument("--vae_device", default="same", choices=["same", "other"],
                         help="whether use pretrained model on the same device")
@@ -844,9 +865,9 @@ def get_parser():
     parser.add_argument("--min_lr_rate", default=1.0, type=float, help="Minimal LR ratio to decay")
     parser.add_argument("--initial_lr_rate", default=0.1, type=float, help="Initial LR ratio")
     parser.add_argument("--epochs", default=300, type=int, help="Epochs in training")
-    parser.add_argument("--steps", default=1000, type=int, help="Steps in training")
+    parser.add_argument("--steps", default=5000, type=int, help="Steps in training")
     parser.add_argument("--batch_size", default=4, type=int, help="Batch size in training")
-    parser.add_argument("--acc_grads", default=4, type=int,
+    parser.add_argument("--acc_grads", default=16, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
     parser.add_argument("--samples_epoch", default=5, type=int, help="Samples of generator in one epoch")
     parser.add_argument("--frames", default=7, type=int, help="number of frames per batch to generate")
@@ -855,8 +876,9 @@ def get_parser():
     parser.add_argument("--h", default=256, type=int, help="frame height ")
 
     # Model settings
-    parser.add_argument("--hidden_dims", default=[192, 192, 192, 384, 384, 384, 576, 576, 576, 768, 768, 768],
-                        nargs='+', type=int, help="Hidden dims for decoder")
+    parser.add_argument("--ch_mults", default=[1, 2, 3, 4], nargs='+', type=int, help="Multipliers for base channel")
+    parser.add_argument("--res_blocks", default=[3], nargs='+', type=int, help="blocks per channel")
+    parser.add_argument("--base_ch", default=192, type=int, help="Base attention channel")
     parser.add_argument("--attention_dim", default=16, type=int, help="Width till the one attention would be done")
     parser.add_argument("--linear_attention_dim", default=64, type=int,
                         help="Width till the one attention would be done")
@@ -884,7 +906,8 @@ if __name__ == "__main__":
 
     if args.clearml:
         print("Initializing ClearML")
-        task = clearml.Task.init(project_name='animation', task_name=args.task_name, reuse_last_task_id=True)
+        task = clearml.Task.init(project_name='animation', task_name=args.task_name, reuse_last_task_id=True,
+                                 auto_connect_frameworks=False)
         task.connect(args, name='config')
         logger = task.get_logger()
     else:
@@ -907,12 +930,12 @@ if __name__ == "__main__":
     actual_h = args.h // 8 if exists(vae) else args.h
     actual_w = args.w // 8 if exists(vae) else args.w
     channels = 4 if exists(vae) else 3
-    model = TemporalUNet(channels=channels, hidden_dims=args.hidden_dims,
+    model = TemporalUNet(channels=channels, base_ch=args.base_ch, ch_mults=args.ch_mults, res_blocks=args.res_blocks,
                          head_dim=args.head_dim, dropout=args.dropout, steps=args.diffusion_steps,
                          embed_features=args.embed_dim, cond=args.cond,
                          attn_scale=actual_h // args.attention_dim,
                          linear_attn_scale=actual_h // args.linear_attention_dim)
-    diffusion = AnimationDiffusion(model, dataset=dataset, tmpdir=args.tmp, clearml=clearml, vae=vae,
+    diffusion = AnimationDiffusion(model, dataset=dataset, tmpdir=args.tmp, clearml=logger, vae=vae,
                                    vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
                                    num_frames=args.frames + 1, gap=args.gap, data_latent=True,
                                    learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
@@ -922,7 +945,7 @@ if __name__ == "__main__":
                                    diffusion_steps=args.diffusion_steps, base_noise=args.base_noise)
     trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=10,
                       enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=True), precision=16,
+                      strategy=DDPStrategy(find_unused_parameters=False), precision=16,
                       profiler=args.profile,
                       accumulate_grad_batches=args.acc_grads,
                       accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])

@@ -95,7 +95,7 @@ class Attention(torch.nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', d=self.head_dim), [q, k, v])
         q = q * self.scale
 
-        dots = einsum('b h i d, b h j d -> b h i j', q, k)
+        dots = einsum(q, k, 'b h i d, b h j d -> b h i j')
         if mask is not None:
             if len(mask.shape) == 2:
                 # masking paddings
@@ -149,7 +149,7 @@ class LinearAttention(torch.nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b (h d) n -> b h d n', d=self.head_dim), [q, k, v])
         q = q * self.scale
 
-        dots = einsum('b h i d, b h j d -> b h i j', q, k)
+        dots = einsum(q, k, 'b h i d, b h j d -> b h i j')
         attn = torch.nn.functional.softmax(dots, dim=-1)
         out = torch.matmul(attn, v)
 

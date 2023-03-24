@@ -190,7 +190,7 @@ class Lion(torch.optim.Optimizer):
             for p in group['params']:
                 if p.grad is None:
                     continue
-
+                torch.nan_to_num(p.grad, nan=0, posinf=1e5, neginf=-1e5, out=p.grad)
                 # Perform stepweight decay
                 p.data.mul_(1 - group['lr'] * group['weight_decay'])
 
