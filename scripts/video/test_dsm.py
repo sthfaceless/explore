@@ -915,7 +915,7 @@ if __name__ == "__main__":
                          linear_attn_scale=actual_h // args.linear_attention_dim)
     diffusion = AnimationDiffusion(model, dataset=args.dataset, tmpdir=args.tmp, clearml=clearml, vae=vae,
                                    vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
-                                   num_frames=args.frames + 1, gap=args.gap,
+                                   num_frames=args.frames + 1, gap=args.gap, data_latent=True,
                                    learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
                                    epochs=args.epochs, steps=args.steps, ema_weight=args.ema,
                                    clf_free=args.clf_free, clf_weight=args.clf_weight,
