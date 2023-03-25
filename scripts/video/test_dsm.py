@@ -720,7 +720,7 @@ class AnimationDiffusion(pl.LightningModule):
         loss = loss_weight * (x_denoised - x) ** 2
 
         return {
-            'loss': loss.sum()
+            'loss': loss.sum(dim=0).mean()
         }
 
     def encode_data(self, batch, move_vae=True):
