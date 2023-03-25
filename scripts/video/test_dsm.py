@@ -233,7 +233,7 @@ class TemporalUNet(torch.nn.Module):
                 TemporalCondResBlock(dim, embed_dim=self.emb_features, kernel_size=kernel_size,
                                      num_groups=num_groups, dropout=dropout) for _ in range(blocks)]))
             self.encoder_spatial.append(cases([
-                (current_scale >= attn_scale, SparseCausalAttention(cross_spatial_attn(dim, head_dim), dim)),
+                (current_scale >= attn_scale, spatial_attn(dim, head_dim)),
                 (current_scale >= linear_attn_scale, linear_attn(dim, head_dim)),
                 torch.nn.Identity
             ]))
@@ -253,8 +253,7 @@ class TemporalUNet(torch.nn.Module):
         self.mid_layers.block_1 = TemporalCondResBlock(hidden_dim=last_dim, embed_dim=self.emb_features,
                                                        num_groups=num_groups, kernel_size=kernel_size, dropout=dropout)
         self.mid_layers.spatial = cases([
-            (current_scale >= attn_scale,
-             SparseCausalAttention(cross_spatial_attn(last_dim, head_dim), last_dim)),
+            (current_scale >= attn_scale, spatial_attn(last_dim, head_dim)),
             (current_scale >= linear_attn_scale, linear_attn(last_dim, head_dim)),
             torch.nn.Identity()
         ])
@@ -282,7 +281,7 @@ class TemporalUNet(torch.nn.Module):
                                      kernel_size=kernel_size, num_groups=num_groups,
                                      dropout=dropout) for _ in range(blocks)]))
             self.decoder_spatial.append(cases([
-                (current_scale >= attn_scale, SparseCausalAttention(cross_spatial_attn(dim, head_dim), dim)),
+                (current_scale >= attn_scale, spatial_attn(dim, head_dim)),
                 (current_scale >= linear_attn_scale, linear_attn(dim, head_dim)),
                 torch.nn.Identity
             ]))
@@ -465,11 +464,12 @@ class LandscapeAnimation(torch.utils.data.IterableDataset):
 
 class LandscapeLatents(torch.utils.data.IterableDataset):
 
-    def __init__(self, folder, num_frames=1 + 8, step=4):  # each step is 64 ms
+    def __init__(self, folder, num_frames=1 + 8, step=4, scale_delta=0.1):  # each step is 64 ms
         super(LandscapeLatents, self).__init__()
         self.frames = num_frames
         self.step = step
         self.folder = folder
+        self.scale_delta = scale_delta
         self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
                       os.path.splitext(file)[1] == '.lt']
 
@@ -491,7 +491,9 @@ class LandscapeLatents(torch.utils.data.IterableDataset):
                     frames.append(tensor[idx])
                     idx += self.step
 
+                # c n h w
                 frames = torch.stack(frames, dim=1).to(torch.float32)
+                frames *= (1 - torch.rand(frames[0]) * self.scale_delta)[:, None, None, None]
                 return frames
 
             except Exception as e:
@@ -627,7 +629,7 @@ class AnimationDiffusion(pl.LightningModule):
 
             # correct score with classifier free guidance
             if clf_weight:
-                x_uncond = self.forward(x_noised, t_hat * ones, train=False, cond=self.get_empty_cond(cond),
+                x_uncond = self.forward(x_noised, t_hat * ones, train=False, cond=self.get_noisy_cond(cond),
                                         **kwargs).to(torch.float64)
                 d_uncond = (x_uncond - x_noised) / t_hat
                 d_cur = d_cur * (1 + clf_weight) - d_uncond * clf_weight
@@ -639,7 +641,7 @@ class AnimationDiffusion(pl.LightningModule):
                 d_next = (x_denoised - x_tmp) / t_next
                 # correct score with classifier free guidance
                 if clf_weight:
-                    x_uncond = self.forward(x_tmp, t_next * ones, train=False, cond=self.get_empty_cond(cond),
+                    x_uncond = self.forward(x_tmp, t_next * ones, train=False, cond=self.get_noisy_cond(cond),
                                             **kwargs).to(torch.float64)
                     d_uncond = (x_uncond - x_tmp) / t_next
                     d_next = d_next * (1 + clf_weight) - d_uncond * clf_weight
@@ -667,9 +669,11 @@ class AnimationDiffusion(pl.LightningModule):
 
         return x_denoised
 
-    def get_empty_cond(self, cond):
-        scale = 1 / (self.sigma_data ** 2 + self.sigma_max ** 2) ** 0.5
-        cond = (cond + torch.randn_like(cond) * self.sigma_max) * scale
+    def get_noisy_cond(self, cond, sigma=None):
+        if sigma is None:
+            sigma = self.sigma_max
+        scale = 1 / (self.sigma_data ** 2 + sigma ** 2) ** 0.5
+        cond = (cond + torch.randn_like(cond) * sigma) * scale
         return cond
 
     def get_noise(self, x, sigma):
@@ -694,11 +698,16 @@ class AnimationDiffusion(pl.LightningModule):
         # sample noise schedule
         sigma = (torch.randn(len(x), ) * self.logsigma_std + self.logsigma_mean).exp().type_as(x)
 
+        # add small noise to cond frame for augmentation
+        if train:
+            cond_sigma = torch.rand(len(cond)).type_as(cond) * np.exp(self.logsigma_mean - self.logsigma_std)
+            cond = self.get_noisy_cond(cond, add_last_dims(cond_sigma, cond))
+
         # apply classifier free guidance
         if train and self.clf_free > 0:
             mask = torch.rand(len(cond), ).type_as(cond) < self.clf_free
             mask = add_last_dims(mask, cond)
-            cond = torch.where(mask, self.get_empty_cond(cond), cond)
+            cond = torch.where(mask, self.get_noisy_cond(cond), cond)
 
         # noise input and predict original
         x_denoised = self.forward(x + self.get_noise(x, add_last_dims(sigma, x)), sigma, cond=cond, train=train)
@@ -732,6 +741,7 @@ class AnimationDiffusion(pl.LightningModule):
                 if len(batch.shape) == 5:
                     tensor = rearrange(tensor, '(b n) c h w -> b c n h w', n=batch.shape[2])
                 mini_batches.append(tensor.to(device='cpu', dtype=torch.float32))
+                # free mem
                 del tensor
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -762,6 +772,7 @@ class AnimationDiffusion(pl.LightningModule):
                 if len(batch.shape) == 5:
                     tensor = rearrange(tensor, '(b n) c h w -> b c n h w', n=batch.shape[2])
                 mini_batches.append(tensor.to(device='cpu', dtype=torch.float32))
+                # free mem
                 del tensor
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -778,9 +789,10 @@ class AnimationDiffusion(pl.LightningModule):
         data_iter = iter(self.trainer.val_dataloaders[0])
 
         # load conditional frames
-        conds = [next(data_iter)[:, :, 0] for _ in range(self.samples_epoch // self.batch_size
-                                                         + int(self.samples_epoch % self.batch_size != 0))]
-        conds = self.encode_data(torch.cat(conds, dim=0))
+        data = [next(data_iter) for _ in range(self.samples_epoch // self.batch_size
+                                               + int(self.samples_epoch % self.batch_size != 0))]
+        data = torch.cat(data, dim=0)
+        conds = self.encode_data(data[:, :, 0])
 
         # sample latents based on conditional frames
         latents = []
@@ -799,10 +811,16 @@ class AnimationDiffusion(pl.LightningModule):
         videos = self.decode_data(latents)
         videos = prepare_torch_images(rearrange(videos, 'b c n h w -> b n c h w'))
 
+        # prepare train examples for log
+        train_videos = self.decode_data(data) if self.data_latent else data
+        train_videos = prepare_torch_images(rearrange(train_videos, 'b c n h w -> b n c h w'))
+
         # log all videos separately
         for video_id in range(len(videos)):
             self.custom_logger.log_gif(tensor2list(videos[video_id]), self.gap,
                                        f'sample_{video_id}', epoch=self.current_epoch)
+            self.custom_logger.log_gif(tensor2list(train_videos[video_id]), self.gap,
+                                       f'orig_{video_id}', epoch=self.current_epoch)
 
         # log current lr
         if self.debug:
