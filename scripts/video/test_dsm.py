@@ -493,7 +493,7 @@ class LandscapeLatents(torch.utils.data.IterableDataset):
 
                 # c n h w
                 frames = torch.stack(frames, dim=1).to(torch.float32)
-                frames *= (1 - torch.rand(frames[0]) * self.scale_delta)[:, None, None, None]
+                frames *= (1 - torch.rand(frames.shape[0]) * self.scale_delta)[:, None, None, None]
                 return frames
 
             except Exception as e:
@@ -720,7 +720,7 @@ class AnimationDiffusion(pl.LightningModule):
         loss = loss_weight * (x_denoised - x) ** 2
 
         return {
-            'loss': loss.sum(dim=0).mean()
+            'loss': loss.mean()
         }
 
     def encode_data(self, batch, move_vae=True):
@@ -812,7 +812,7 @@ class AnimationDiffusion(pl.LightningModule):
         videos = prepare_torch_images(rearrange(videos, 'b c n h w -> b n c h w'))
 
         # prepare train examples for log
-        train_videos = self.decode_data(data) if self.data_latent else data
+        train_videos = self.decode_data(data * self.vae_scale) if self.data_latent else data
         train_videos = prepare_torch_images(rearrange(train_videos, 'b c n h w -> b n c h w'))
 
         # log all videos separately
