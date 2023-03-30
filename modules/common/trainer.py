@@ -140,7 +140,6 @@ class SimpleLogger:
     def log_gif(self, frames, gap, name, epoch=0):
         path = f'{self.tmpdir}/{name}_{epoch}.gif'
 
-        frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
         imageio.mimsave(path, frames, fps=int(1 / (gap / 1000)))
         if self.clearml:
             self.clearml.report_media('gifs', name, iteration=epoch, local_path=path)

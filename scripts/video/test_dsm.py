@@ -301,7 +301,9 @@ class TemporalUNet(torch.nn.Module):
                                           padding=(0, kernel_size // 2, kernel_size // 2))
 
     def forward(self, x, sigma, cond=None, time_mask=None):
-
+        # funny checkpoint loading problem
+        if type(x) is not torch.Tensor:
+            return x
         # expand time mask to latents dim
         if not exists(time_mask):
             time_mask = torch.zeros((len(x),)).type_as(x).bool()
@@ -462,9 +464,49 @@ class LandscapeAnimation(torch.utils.data.IterableDataset):
                 print(e)
 
 
+class LandscapeImages(torch.utils.data.IterableDataset):
+
+    def __init__(self, folder, w=512, h=256):
+        super(LandscapeImages, self).__init__()
+        self.w, self.h = w, h
+        self.frame_ratio = w / h
+        self.folder = folder
+        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
+                      os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # update list in case of new files
+        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
+                      os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
+
+        file = choice(self.files)
+
+        frame = cv2.imread(file)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        h, w = frame.shape[:2]
+        frame_ratio = w / h
+        if frame_ratio > self.frame_ratio:
+            # width is bigger so let's crop it
+            true_w = int(h * self.frame_ratio)
+            start_w = int((w - true_w) / 2)
+            frame = frame[:, start_w: start_w + true_w]
+        else:
+            # height is bigger
+            true_h = int(w / self.frame_ratio)
+            start_h = int((h - true_h) / 2)
+            frame = frame[start_h: start_h + true_h]
+        frame = cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_AREA)
+        frame = normalize_image(frame)
+        return torch.tensor(frame).movedim(-1, 0)
+
+
 class LandscapeLatents(torch.utils.data.IterableDataset):
 
-    def __init__(self, folder, num_frames=1 + 8, step=4, scale_delta=0.1):  # each step is 64 ms
+    def __init__(self, folder, num_frames=1 + 8, step=4, scale_delta=0.05):  # each step is 64 ms
         super(LandscapeLatents, self).__init__()
         self.frames = num_frames
         self.step = step
@@ -484,8 +526,11 @@ class LandscapeLatents(torch.utils.data.IterableDataset):
 
                 file = choice(self.files)
                 tensor = torch.load(file)
+                if len(tensor) < self.frames * self.step:
+                    del tensor
+                    continue
 
-                idx = random.randint(0, len(tensor) - self.frames * self.step - 1)
+                idx = random.randint(0, len(tensor) - self.frames * self.step)
                 frames = []
                 for _ in range(self.frames):
                     frames.append(tensor[idx])
@@ -504,8 +549,9 @@ class LandscapeLatents(torch.utils.data.IterableDataset):
 class AnimationDiffusion(pl.LightningModule):
 
     def __init__(self,
-                 model,
+                 model=None,
                  dataset=None,
+                 images=None,
                  data_latent=False,
                  tmpdir='tmp',
                  test_dataset=None,
@@ -545,7 +591,8 @@ class AnimationDiffusion(pl.LightningModule):
                  debug=True):
         super(AnimationDiffusion, self).__init__()
 
-        self.save_hyperparameters(ignore=['model', 'dataset', 'test_dataset', 'clearml', 'tmpdir', 'vae', 'vae_device'])
+        self.save_hyperparameters(
+            ignore=['model', 'dataset', 'images', 'test_dataset', 'clearml', 'tmpdir', 'vae', 'vae_device'])
 
         self.h = h
         self.w = w
@@ -555,6 +602,7 @@ class AnimationDiffusion(pl.LightningModule):
 
         self.dataset = dataset
         self.test_dataset = test_dataset if exists(test_dataset) else dataset
+        self.images = images
         self.tmpdir = tmpdir
         self.data_latent = data_latent
 
@@ -650,7 +698,6 @@ class AnimationDiffusion(pl.LightningModule):
         return x_next
 
     def forward(self, x, sigma, train=True, **kwargs):
-
         x = x.to(torch.float32)
         sigma = sigma.to(torch.float32)
 
@@ -690,7 +737,7 @@ class AnimationDiffusion(pl.LightningModule):
     def step(self, batch, train=True):
 
         # apply vae if needed
-        batch = self.encode_data(batch)
+        batch = self.encode_data(batch) if not self.data_latent else batch * self.vae_scale
 
         x = batch[:, :, 1:]
         cond = batch[:, :, 0]
@@ -700,7 +747,7 @@ class AnimationDiffusion(pl.LightningModule):
 
         # add small noise to cond frame for augmentation
         if train:
-            cond_sigma = torch.rand(len(cond)).type_as(cond) * np.exp(self.logsigma_mean - self.logsigma_std)
+            cond_sigma = torch.rand(len(cond)).type_as(cond) * np.exp(self.logsigma_mean - 2 * self.logsigma_std)
             cond = self.get_noisy_cond(cond, add_last_dims(cond_sigma, cond))
 
         # apply classifier free guidance
@@ -723,11 +770,25 @@ class AnimationDiffusion(pl.LightningModule):
             'loss': loss.mean()
         }
 
+    def load_vae(self, move_vae=True):
+        if move_vae:
+            self.vae[0] = self.vae[0].to(self.vae_device)
+            self.model = self.model.to('cpu')
+            self.ema_model = self.ema_model.to('cpu')
+        return self.vae[0]
+
+    def unload_vae(self, move_vae=True):
+        if move_vae:
+            self.vae[0] = self.vae[0].to('cpu')
+            self.model = self.model.to(self.device)
+            self.ema_model = self.ema_model.to(self.device)
+        return self.vae[0]
+
     def encode_data(self, batch, move_vae=True):
 
-        if self.vae and not self.data_latent:
+        if self.vae:
 
-            vae = self.vae[0].to(self.vae_device) if move_vae else self.vae[0]
+            vae = self.load_vae(move_vae)
             mini_batches = []
             for tensor in torch.split(batch, self.batch_vae, dim=0):
 
@@ -748,9 +809,8 @@ class AnimationDiffusion(pl.LightningModule):
 
             batch = torch.cat(mini_batches, dim=0)
 
-            if move_vae:
-                vae.to('cpu')
-        if self.vae:
+            self.unload_vae(move_vae)
+
             batch = batch * self.vae_scale
 
         return batch
@@ -758,7 +818,8 @@ class AnimationDiffusion(pl.LightningModule):
     def decode_data(self, batch, move_vae=True):
         if self.vae:
             batch = batch / self.vae_scale
-            vae = self.vae[0].to(self.vae_device) if move_vae else self.vae[0]
+            vae = self.load_vae(move_vae)
+
             mini_batches = []
             for tensor in torch.split(batch, self.batch_vae, dim=0):
 
@@ -779,44 +840,55 @@ class AnimationDiffusion(pl.LightningModule):
 
             batch = torch.cat(mini_batches, dim=0)
 
-            if move_vae:
-                vae.to('cpu')
+            self.unload_vae(move_vae)
 
         return batch
 
-    def on_validation_epoch_end(self):
+    def sample_from_images(self, conds, latent=False):
 
-        data_iter = iter(self.trainer.val_dataloaders[0])
-
-        # load conditional frames
-        data = [next(data_iter) for _ in range(self.samples_epoch // self.batch_size
-                                               + int(self.samples_epoch % self.batch_size != 0))]
-        data = torch.cat(data, dim=0)
-        conds = self.encode_data(data[:, :, 0])
-
+        conds = self.encode_data(conds) if not latent else conds
         # sample latents based on conditional frames
         latents = []
         for cond in torch.split(conds, self.batch_size, dim=0):
             with torch.no_grad():
-                x = self.sample(num_samples=self.batch_size, cond=cond.to(self.device),
+                x = self.sample(num_samples=len(cond), cond=cond.to(self.device),
                                 clf_weight=self.clf_weight).to(device='cpu', dtype=torch.float32)
             latents.append(torch.cat([cond.unsqueeze(2).to('cpu'), x], dim=2))
-            del x
-        del conds
+            del x, cond
         gc.collect()
         torch.cuda.empty_cache()
-
         # decode latents back to frames
         latents = torch.cat(latents, dim=0)
         videos = self.decode_data(latents)
-        videos = prepare_torch_images(rearrange(videos, 'b c n h w -> b n c h w'))
+        return rearrange(videos, 'b c n h w -> b n c h w')
+
+    def on_validation_epoch_end(self):
+
+        # animate predefined images
+        if self.images:
+            images = torch.stack([next(self.images) for _ in range(self.samples_epoch)], dim=0)
+            animations = prepare_torch_images(self.sample_from_images(images, latent=False))
+            for video_id in range(len(animations)):
+                self.custom_logger.log_gif(tensor2list(animations[video_id]), self.gap,
+                                           f'animation_{video_id}', epoch=self.current_epoch)
+
+        data_iter = iter(self.trainer.val_dataloaders[0])
+
+        # load conditional frames from data
+        data = [next(data_iter) for _ in range(self.samples_epoch // self.batch_size
+                                               + int(self.samples_epoch % self.batch_size != 0))]
+        data = torch.cat(data, dim=0)
+
+        cond = data[:, :, 0] if not self.data_latent else data[:, :, 0] * self.vae_scale
+        videos = self.sample_from_images(cond, latent=self.data_latent)
+        videos = prepare_torch_images(videos)
 
         # prepare train examples for log
         train_videos = self.decode_data(data * self.vae_scale) if self.data_latent else data
         train_videos = prepare_torch_images(rearrange(train_videos, 'b c n h w -> b n c h w'))
 
         # log all videos separately
-        for video_id in range(len(videos)):
+        for video_id in range(len(train_videos)):
             self.custom_logger.log_gif(tensor2list(videos[video_id]), self.gap,
                                        f'sample_{video_id}', epoch=self.current_epoch)
             self.custom_logger.log_gif(tensor2list(train_videos[video_id]), self.gap,
@@ -870,6 +942,7 @@ def get_parser():
     parser = ArgumentParser(description="Training diffusion model")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
+    parser.add_argument("--images", default=None, help="Path to debug images")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--cond", default="concat", choices=['cross', 'concat'], help="Image condition type")
     parser.add_argument("--vae", default="stabilityai/stable-diffusion-2-1",
@@ -935,7 +1008,10 @@ if __name__ == "__main__":
                                                        filename=os.path.basename(args.out_model_name))
 
     # dataset = LandscapeAnimation(folder=args.dataset, w=args.w, h=args.h, num_frames=args.frames + 1, step=args.gap)
-    dataset = LandscapeLatents(folder=args.dataset, num_frames=args.frames + 1, step=2)
+    dataset = LandscapeLatents(folder=args.dataset, num_frames=args.frames + 1, step=4)
+    images = args.images
+    if images:
+        images = iter(LandscapeImages(folder=images, w=args.w, h=args.h))
 
     vae = AutoencoderKL.from_pretrained(args.vae, subfolder='vae', torch_dtype=torch.float16) if args.vae else None
     assert exists(vae) or args.vae_device == 'same' or torch.cuda.device_count() > 1, \
@@ -953,7 +1029,8 @@ if __name__ == "__main__":
                          embed_features=args.embed_dim, cond=args.cond,
                          attn_scale=actual_h // args.attention_dim,
                          linear_attn_scale=actual_h // args.linear_attention_dim)
-    diffusion = AnimationDiffusion(model, dataset=dataset, tmpdir=args.tmp, clearml=logger, vae=vae,
+    diffusion = AnimationDiffusion(model=model, dataset=dataset, images=images, tmpdir=args.tmp, clearml=logger,
+                                   vae=vae,
                                    vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
                                    num_frames=args.frames + 1, gap=args.gap, data_latent=True,
                                    learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
