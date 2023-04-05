@@ -474,16 +474,7 @@ class LandscapeImages(torch.utils.data.IterableDataset):
         self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
                       os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        # update list in case of new files
-        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
-                      os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
-
-        file = choice(self.files)
-
+    def load_file(self, file):
         frame = cv2.imread(file)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -502,6 +493,20 @@ class LandscapeImages(torch.utils.data.IterableDataset):
         frame = cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_AREA)
         frame = normalize_image(frame)
         return torch.tensor(frame).movedim(-1, 0)
+
+    def load_images(self):
+        return [self.load_file(file) for file in self.files]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # update list in case of new files
+        self.files = [os.path.join(self.folder, file) for file in os.listdir(self.folder) if
+                      os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
+
+        file = choice(self.files)
+        return self.load_file(file)
 
 
 class LandscapeLatents(torch.utils.data.IterableDataset):
@@ -602,7 +607,7 @@ class AnimationDiffusion(pl.LightningModule):
 
         self.dataset = dataset
         self.test_dataset = test_dataset if exists(test_dataset) else dataset
-        self.images = images
+        self.images = iter(images) if images else None
         self.tmpdir = tmpdir
         self.data_latent = data_latent
 
@@ -942,6 +947,7 @@ def get_parser():
     parser = ArgumentParser(description="Training diffusion model")
     # Input data settings
     parser.add_argument("--dataset", default="", help="Path to folder with videos")
+    parser.add_argument("--sample", default=None, help="Path to checkpoint model")
     parser.add_argument("--images", default=None, help="Path to debug images")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--cond", default="concat", choices=['cross', 'concat'], help="Image condition type")
@@ -1008,10 +1014,10 @@ if __name__ == "__main__":
                                                        filename=os.path.basename(args.out_model_name))
 
     # dataset = LandscapeAnimation(folder=args.dataset, w=args.w, h=args.h, num_frames=args.frames + 1, step=args.gap)
-    dataset = LandscapeLatents(folder=args.dataset, num_frames=args.frames + 1, step=4)
+    dataset = LandscapeLatents(folder=args.dataset, num_frames=args.frames + 1, step=4) if not args.sample else None
     images = args.images
-    if images:
-        images = iter(LandscapeImages(folder=images, w=args.w, h=args.h))
+    if images or args.sample:
+        images = LandscapeImages(folder=images, w=args.w, h=args.h)
 
     vae = AutoencoderKL.from_pretrained(args.vae, subfolder='vae', torch_dtype=torch.float16) if args.vae else None
     assert exists(vae) or args.vae_device == 'same' or torch.cuda.device_count() > 1, \
@@ -1029,19 +1035,43 @@ if __name__ == "__main__":
                          embed_features=args.embed_dim, cond=args.cond,
                          attn_scale=actual_h // args.attention_dim,
                          linear_attn_scale=actual_h // args.linear_attention_dim)
-    diffusion = AnimationDiffusion(model=model, dataset=dataset, images=images, tmpdir=args.tmp, clearml=logger,
-                                   vae=vae,
-                                   vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
-                                   num_frames=args.frames + 1, gap=args.gap, data_latent=True,
-                                   learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
-                                   epochs=args.epochs, steps=args.steps, ema_weight=args.ema,
-                                   clf_free=args.clf_free, clf_weight=args.clf_weight,
-                                   sample_steps=args.sample_steps, samples_epoch=args.samples_epoch,
-                                   diffusion_steps=args.diffusion_steps, base_noise=args.base_noise)
-    trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=10,
-                      enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                      strategy=DDPStrategy(find_unused_parameters=False), precision=16,
-                      profiler=args.profile,
-                      accumulate_grad_batches=args.acc_grads,
-                      accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])
-    trainer.fit(diffusion)
+
+    if args.sample:
+        diffusion = AnimationDiffusion.load_from_checkpoint(args.sample, model=model, dataset=dataset, images=images,
+                                                            tmpdir=args.tmp, clearml=logger, vae=vae,
+                                                            vae_device=vae_device, h=actual_h, w=actual_w,
+                                                            channels=channels,
+                                                            num_frames=args.frames + 1, gap=args.gap, data_latent=True,
+                                                            learning_rate=args.lr, min_lr_rate=args.min_lr_rate,
+                                                            batch_size=args.batch_size,
+                                                            epochs=args.epochs, steps=args.steps, ema_weight=args.ema,
+                                                            clf_free=args.clf_free, clf_weight=args.clf_weight,
+                                                            sample_steps=args.sample_steps,
+                                                            samples_epoch=args.samples_epoch,
+                                                            diffusion_steps=args.diffusion_steps,
+                                                            base_noise=args.base_noise)
+        diffusion.to(f'cuda:{devices[0]}')
+        frames = torch.stack(images.load_images(), dim=0).to(diffusion.device)
+        videos = prepare_torch_images(diffusion.sample_from_images(frames))
+
+        # log all videos separately
+        for video_id in range(len(videos)):
+            diffusion.custom_logger.log_gif(tensor2list(videos[video_id]), args.gap,
+                                            f'sample_{video_id}', epoch=0)
+    else:
+        diffusion = AnimationDiffusion(model=model, dataset=dataset, images=images, tmpdir=args.tmp, clearml=logger,
+                                       vae=vae,
+                                       vae_device=vae_device, h=actual_h, w=actual_w, channels=channels,
+                                       num_frames=args.frames + 1, gap=args.gap, data_latent=True,
+                                       learning_rate=args.lr, min_lr_rate=args.min_lr_rate, batch_size=args.batch_size,
+                                       epochs=args.epochs, steps=args.steps, ema_weight=args.ema,
+                                       clf_free=args.clf_free, clf_weight=args.clf_weight,
+                                       sample_steps=args.sample_steps, samples_epoch=args.samples_epoch,
+                                       diffusion_steps=args.diffusion_steps, base_noise=args.base_noise)
+        trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=10,
+                          enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
+                          strategy=DDPStrategy(find_unused_parameters=False), precision=16,
+                          profiler=args.profile,
+                          accumulate_grad_batches=args.acc_grads,
+                          accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])
+        trainer.fit(diffusion)
