@@ -123,9 +123,9 @@ class RandomBinaryFilter(torch.nn.Module):
 
 class FeatureBlock(torch.nn.Module):
 
-    def __init__(self, dim, in_dim=-1, kernel_size=3, group=4):
+    def __init__(self, dim, in_dim=-1, kernel_size=3, group=4, fft=False):
         super(FeatureBlock, self).__init__()
-
+        self.fft = fft
         self.in_dim = in_dim if in_dim > 0 else dim
 
         self.conv1 = torch.nn.Conv2d(in_dim, dim, kernel_size=kernel_size, padding=1, groups=self.in_dim // group)
@@ -136,9 +136,11 @@ class FeatureBlock(torch.nn.Module):
 
     def forward(self, x):
         h = self.conv1_linear(self.conv1(nonlinear(x)))
-        # h = torch.fft.fft2(x, norm='ortho').real
+        if self.fft:
+            h = torch.fft.fft2(x, norm='ortho').real
         h = self.conv2_linear(self.conv2(nonlinear(h)))
-        # h = torch.fft.fft2(x, norm='ortho').real
+        if self.fft:
+            h = torch.fft.fft2(x, norm='ortho').real
 
         return (h + x) / 2 ** 0.5
 
@@ -175,13 +177,13 @@ class PatchDiscriminator(torch.nn.Module):
 
 class PatchEnhancer(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=4, scale=2):
+    def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=4, scale=2, fft=False):
         super(PatchEnhancer, self).__init__()
         self.in_channels = in_channels
         self.tile_pad = tile_pad
         self.scale = scale
         self.input_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
-        self.blocks = torch.nn.ModuleList([FeatureBlock(dim, dim) for _ in range(n_blocks)])
+        self.blocks = torch.nn.ModuleList([FeatureBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
@@ -593,6 +595,8 @@ def get_parser():
     parser.add_argument("--in_channels", default=1, type=int, choices=[1, 3], help="1 or 3 use only Luma or Cb Cr too")
     parser.add_argument("--n_blocks", default=4, type=int, help="Feature extraction blocks")
     parser.add_argument("--random_filters", default=64, type=int, help="Binary filters for loss")
+    parser.add_argument("--fft", action='store_true')
+    parser.set_defaults(fft=False)
 
     # Meta settings
     parser.add_argument("--out_model_name", default="patch_upscaler", help="Name of output model path")
@@ -600,6 +604,7 @@ def get_parser():
     parser.add_argument("--task_name", default="Patch upscaling", help="ClearML task name")
     parser.add_argument("--clearml", action='store_true')
     parser.set_defaults(clearml=False)
+
     return parser
 
 
@@ -647,7 +652,7 @@ if __name__ == "__main__":
     images = SRImages(folder=args.dataset, w=args.w, h=args.h)
 
     model = PatchEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
-                          tile_pad=args.tile_pad)
+                          tile_pad=args.tile_pad, fft=args.fft)
 
     devices = list(range(torch.cuda.device_count()))
     if args.sample:
@@ -678,7 +683,7 @@ if __name__ == "__main__":
                                  tile=args.tile, tile_pad=args.tile_pad)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps, limit_val_batches=10,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                          strategy=DDPStrategy(find_unused_parameters=False), precision=16,
+                          strategy=DDPStrategy(find_unused_parameters=True), precision=16,
                           profiler=args.profile,
                           accumulate_grad_batches=args.acc_grads,
                           accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])
