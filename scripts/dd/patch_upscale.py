@@ -162,8 +162,9 @@ class SRTiles(torch.utils.data.IterableDataset):
         shuffle(cache_files)
         cache_files = cache_files[:self.cache_size]
 
-        with ProcessPoolExecutor() as executor:
-            self.cache = executor.map(self.load_file, cache_files)
+        # with ProcessPoolExecutor() as executor:
+        #     self.cache = executor.map(self.load_file, cache_files)
+        self.cache = [self.load_file(file) for file in cache_files]
         gc.collect()
 
     def load_file(self, file):
