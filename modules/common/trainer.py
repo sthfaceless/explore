@@ -11,6 +11,9 @@ from mpl_toolkits.mplot3d import art3d
 
 from modules.common.util import *
 
+import torch
+import numpy as np
+
 
 class EMA(torch.nn.Module):
     def __init__(self, model, decay=0.9999, device=None):
@@ -40,7 +43,7 @@ class EMA(torch.nn.Module):
 
 class SimpleLogger:
 
-    def __init__(self, clearml=None, run_async=False, tmpdir=''):
+    def __init__(self, clearml=None, run_async=False, tmpdir='.'):
         self.clearml = clearml
         self.run_async = run_async
         self.tmpdir = tmpdir
@@ -56,6 +59,24 @@ class SimpleLogger:
     def log_images(self, images, prefix, epoch=0):
         for image_id, image in enumerate(images):
             self.log_image(image, f'{prefix}_{image_id}', epoch)
+
+    def log_image_compare(self, images, texts, epoch, name='compare'):
+        gallery = []
+        for img, text in zip(images, texts):
+            cv2.rectangle(img, pt1=(0, img.shape[0] // 30), pt2=(img.shape[1] // 90 * len(text), 0), color=0,
+                          thickness=-1)
+            cv2.putText(img, text=text, org=(0, img.shape[0] // 40), fontFace=cv2.FONT_HERSHEY_PLAIN, fontScale=3.0,
+                        color=(255, 255, 255), thickness=3)
+            gallery.append(img)
+        gallery = np.concatenate(gallery, axis=1)
+        if self.clearml:
+            self.clearml.report_image('valid', name, iteration=epoch, image=gallery)
+        else:
+            Image.fromarray(gallery).save(f"{self.tmpdir}/{name}.png")
+
+    def log_images_compare(self, images, texts, epoch, name='compare'):
+        for idx, batch in enumerate(zip(*images)):
+            self.log_image_compare(batch, texts, epoch=epoch, name=f'{name}_{idx}')
 
     def log_tensor(self, tensor, name='', depth=0):
         if tensor.numel() > 0:
