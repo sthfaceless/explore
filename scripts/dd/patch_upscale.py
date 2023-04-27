@@ -90,18 +90,19 @@ def to_image(tensor, yuv=True):
 
 
 def multiscale_loss(x1, x2, scales=(1, 2), eps=1e-6):
-    loss = torch.zeros_like(x1)
+    loss = 0
     for scale in scales:
         __x1 = torch.nn.functional.interpolate(x1, scale_factor=1 / scale, mode='bicubic')
         __x2 = torch.nn.functional.interpolate(x2, scale_factor=1 / scale, mode='bicubic')
-        loss += torch.sqrt((__x1 - __x2) ** 2 + eps ** 2)
-    return loss.mean()
+        loss += torch.sqrt((__x1 - __x2) ** 2 + eps ** 2).mean()
+    return loss / len(scales)
 
 
 class RandomBinaryFilter(torch.nn.Module):
 
     def __init__(self, in_channels=1, filters=64):
         super(RandomBinaryFilter, self).__init__()
+        self.in_channels = in_channels
         self.conv = torch.nn.Conv2d(
             in_channels=in_channels,
             out_channels=filters,
@@ -117,7 +118,7 @@ class RandomBinaryFilter(torch.nn.Module):
         self.conv.weight.requires_grad_(False)
 
     def forward(self, x):
-        return self.conv(x)
+        return self.conv(x[:, :self.in_channels])
 
 
 class FeatureBlock(torch.nn.Module):
@@ -130,7 +131,7 @@ class FeatureBlock(torch.nn.Module):
         self.conv1 = torch.nn.Conv2d(in_dim, dim, kernel_size=kernel_size, padding=1, groups=self.in_dim // group)
         self.conv1_linear = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
-        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=1, groups=self.dim // group)
+        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=1, groups=dim // group)
         self.conv2_linear = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, x):
@@ -140,6 +141,36 @@ class FeatureBlock(torch.nn.Module):
         # h = torch.fft.fft2(x, norm='ortho').real
 
         return (h + x) / 2 ** 0.5
+
+
+class PatchDiscriminator(torch.nn.Module):
+
+    def __init__(self, in_channels=1, dim=128):
+        super(PatchDiscriminator, self).__init__()
+        self.feature_extractor = torch.nn.Sequential(
+            norm(in_channels * 2),
+            torch.nn.SiLU(),
+            torch.nn.Conv2d(in_channels * 2, dim, kernel_size=3, padding=1),
+            norm(dim),
+            torch.nn.SiLU(),
+            torch.nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+        )
+        self.classifier = torch.nn.Sequential(
+            norm(dim),
+            torch.nn.LeakyReLU(0.2),
+            torch.nn.Conv2d(dim, dim * 2, kernel_size=3, padding=1),
+            norm(dim * 2),
+            torch.nn.LeakyReLU(0.2),
+            torch.nn.Conv2d(dim * 2, 1, kernel_size=3, padding=1),
+            torch.nn.AdaptiveAvgPool2d(1),
+            torch.nn.Sigmoid()
+        )
+
+    def forward(self, x1, x2):
+        h = torch.cat([x1, x2], dim=1)
+        features = self.feature_extractor(h)
+        probs = self.classifier(features)
+        return probs
 
 
 class PatchEnhancer(torch.nn.Module):
@@ -621,7 +652,7 @@ if __name__ == "__main__":
     devices = list(range(torch.cuda.device_count()))
     if args.sample:
         enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset,
-                                                      test_dataset=test_dataset,
+                                                      test_dataset=test_dataset, in_channels=args.in_channels,
                                                       test_images=images, clearml=logger, teacher=teacher,
                                                       teacher_rate=args.teacher_rate, ema_weight=args.ema,
                                                       learning_rate=args.lr,
