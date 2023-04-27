@@ -475,6 +475,7 @@ class ImageEnhancer(pl.LightningModule):
                                            pin_memory=True, prefetch_factor=2)
 
     def val_dataloader(self):
+        self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False,
                                            num_workers=2 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
@@ -524,22 +525,6 @@ if __name__ == "__main__":
     parser = get_parser()
     args = parser.parse_args()
 
-    if args.clearml:
-        print("Initializing ClearML")
-        task = clearml.Task.init(project_name='upscaling', task_name=args.task_name, reuse_last_task_id=True,
-                                 auto_connect_frameworks=False)
-        task.connect(args, name='config')
-        logger = task.get_logger()
-    else:
-        logger = None
-
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
-                                                       filename=os.path.basename(args.out_model_name))
-
-    dataset = SRTiles(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
-                      cache_size=args.cache_size)
-    images = SRImages(folder=args.dataset, w=args.w, h=args.h)
-
     # load pretrained upscaler
     teacher = None
     if args.teacher:
@@ -558,6 +543,23 @@ if __name__ == "__main__":
         model.load_state_dict(sd, strict=True)
         model.eval()
         teacher = model
+
+    if args.clearml:
+        print("Initializing ClearML")
+        task = clearml.Task.init(project_name='upscaling', task_name=args.task_name, reuse_last_task_id=True,
+                                 auto_connect_frameworks=False)
+        task.connect(args, name='config')
+        logger = task.get_logger()
+    else:
+        logger = None
+
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
+                                                       filename=os.path.basename(args.out_model_name))
+
+    dataset = SRTiles(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
+                      cache_size=args.cache_size)
+    images = SRImages(folder=args.dataset, w=args.w, h=args.h)
+
 
     model = PatchEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
                           tile_pad=args.tile_pad * args.scale)
