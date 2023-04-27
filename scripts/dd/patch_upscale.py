@@ -82,40 +82,80 @@ def to_tensor(image, yuv=True):
 
 
 def to_image(tensor, yuv=True):
-    image = np.clip((tensor.movedim(-3, -1) * 0.5 + 0.5).detach().cpu().numpy(), 0, 1)
+    image = (tensor.movedim(-3, -1) * 0.5 + 0.5).detach().cpu().numpy()
     if yuv:
         image = convert_YUV2RGB(image)
-    image = (image * 255).astype(np.uint8)
+    image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
     return image
+
+
+def multiscale_loss(x1, x2, scales=(1, 2), eps=1e-6):
+    loss = torch.zeros_like(x1)
+    for scale in scales:
+        __x1 = torch.nn.functional.interpolate(x1, scale_factor=1 / scale, mode='bicubic')
+        __x2 = torch.nn.functional.interpolate(x2, scale_factor=1 / scale, mode='bicubic')
+        loss += torch.sqrt((__x1 - __x2) ** 2 + eps ** 2)
+    return loss.mean()
+
+
+class RandomBinaryFilter(torch.nn.Module):
+
+    def __init__(self, in_channels=1, filters=64):
+        super(RandomBinaryFilter, self).__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=filters,
+            kernel_size=3,
+            padding=1,
+            groups=in_channels,
+            bias=False)
+
+        filters = torch.bernoulli(torch.torch.full(self.conv.weight.data.shape, 0.5)) * 2 - 1
+        filters[torch.rand(filters.shape) > 0.9] = 0
+
+        self.conv.weight.data.copy_(filters)
+        self.conv.weight.requires_grad_(False)
+
+    def forward(self, x):
+        return self.conv(x)
 
 
 class FeatureBlock(torch.nn.Module):
 
-    def __init__(self, dim, in_dim=-1, kernel_size=3):
+    def __init__(self, dim, in_dim=-1, kernel_size=3, group=4):
         super(FeatureBlock, self).__init__()
 
         self.in_dim = in_dim if in_dim > 0 else dim
 
-        self.conv1 = torch.nn.Conv2d(in_dim, dim, kernel_size=kernel_size, padding=1)
-        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=1)
+        self.conv1 = torch.nn.Conv2d(in_dim, dim, kernel_size=kernel_size, padding=1, groups=self.in_dim // group)
+        self.conv1_linear = torch.nn.Conv2d(dim, dim, kernel_size=1)
+
+        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=1, groups=self.dim // group)
+        self.conv2_linear = torch.nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, x):
-        h = self.conv1(nonlinear(x))
-        h = self.conv2(nonlinear(h))
+        h = self.conv1_linear(self.conv1(nonlinear(x)))
+        # h = torch.fft.fft2(x, norm='ortho').real
+        h = self.conv2_linear(self.conv2(nonlinear(h)))
+        # h = torch.fft.fft2(x, norm='ortho').real
+
         return (h + x) / 2 ** 0.5
 
 
 class PatchEnhancer(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=4):
+    def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=4, scale=2):
         super(PatchEnhancer, self).__init__()
         self.in_channels = in_channels
         self.tile_pad = tile_pad
+        self.scale = scale
         self.input_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
         self.blocks = torch.nn.ModuleList([FeatureBlock(dim, dim) for _ in range(n_blocks)])
-        self.out = torch.nn.Conv2d(dim, in_channels, kernel_size=3, padding=1)
+        self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bilinear')
+
         # extract channels
         h = x[:, :self.in_channels]
 
@@ -126,19 +166,22 @@ class PatchEnhancer(torch.nn.Module):
         for block in self.blocks:
             h = block(h)
 
+        h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.scale)
         # output conv
         h = self.out(nonlinear(h))
 
         # get updated and remained part
-        updated = x[:, :self.in_channels, self.tile_pad: -self.tile_pad, self.tile_pad: -self.tile_pad]
-        remained = x[:, self.in_channels:, self.tile_pad: -self.tile_pad, self.tile_pad: -self.tile_pad]
+        updated = upscaled[:, :self.in_channels, self.tile_pad * self.scale: -self.tile_pad * self.scale,
+                  self.tile_pad * self.scale: -self.tile_pad * self.scale]
+        remained = upscaled[:, self.in_channels:, self.tile_pad * self.scale: -self.tile_pad * self.scale,
+                   self.tile_pad * self.scale: -self.tile_pad * self.scale]
 
         return torch.cat((updated + h, remained), dim=-3)
 
 
 class SRTiles(torch.utils.data.IterableDataset):
 
-    def __init__(self, folder, tile=16, tile_pad=1, scale=2, cache_size=512):
+    def __init__(self, folder, tile=16, tile_pad=2, scale=2, cache_size=512):
         super(SRTiles, self).__init__()
         self.tile = tile
         self.tile_pad = tile_pad
@@ -251,6 +294,7 @@ class ImageEnhancer(pl.LightningModule):
                  test_dataset=None,
                  test_images=None,
                  clearml=None,
+                 in_channels=1,
                  teacher=None,
                  teacher_rate=1.0,
                  ema_weight=0.995,
@@ -265,6 +309,7 @@ class ImageEnhancer(pl.LightningModule):
                  tile=16,
                  tile_pad=2,
                  debug=True,
+                 random_filters=64,
                  ):
         super(ImageEnhancer, self).__init__()
 
@@ -283,6 +328,8 @@ class ImageEnhancer(pl.LightningModule):
 
         self.teacher = teacher if exists(teacher) else None
         self.teacher_rate = teacher_rate
+
+        self.random_filter = RandomBinaryFilter(in_channels=in_channels, filters=random_filters)
 
         self.model = model
         self.use_ema = ema_weight is not None
@@ -342,12 +389,9 @@ class ImageEnhancer(pl.LightningModule):
 
     def step(self, batch, train=True):
 
-        # imitate low resolution
+        # imitate low resolution and enhance it
         down_sampled = torch.nn.functional.interpolate(batch, scale_factor=1 / self.scale, mode='bicubic')
-
-        # upsample patch and enhance it
-        up_sampled = torch.nn.functional.interpolate(down_sampled, scale_factor=self.scale, mode='bicubic')
-        upscaled = self.forward(up_sampled, train=train)
+        upscaled = self.forward(down_sampled, train=train)
 
         # get ground truth either from real SR or from teacher
         sr = self.get_sr(orig=batch, down_sampled=down_sampled)
@@ -355,12 +399,19 @@ class ImageEnhancer(pl.LightningModule):
         # return loss on real SR
         return self.get_losses(upscaled, sr)
 
+    def base_metrics(self, x, sr):
+        x_normalized = torch_convert_YUV2RGB(x * 0.5 + 0.5).clip(0, 1)
+        sr_normalized = torch_convert_YUV2RGB(sr * 0.5 + 0.5).clip(0, 1)
+        return {
+            'psnr': torchmetrics.functional.peak_signal_noise_ratio(x_normalized, sr_normalized, data_range=1.0),
+            'ssim': torchmetrics.functional.structural_similarity_index_measure(
+                x_normalized, sr_normalized, data_range=1.0)
+        }
+
     def get_losses(self, x, sr):
 
         # loss on downsampled images to reduce artifacts
-        x_ds = torch.nn.functional.interpolate(x, scale_factor=1 / self.scale, mode='bicubic')
-        sr_ds = torch.nn.functional.interpolate(sr, scale_factor=1 / self.scale, mode='bicubic')
-        aux_loss = torch.nn.functional.l1_loss(x_ds, sr_ds)
+        aux_loss = multiscale_loss(self.random_filter(x), self.random_filter(sr))
 
         # loss on high frequency details compared with gaussian blurred
         x_details = x - torchvision.transforms.functional.gaussian_blur(x, kernel_size=(5, 5))
@@ -368,18 +419,13 @@ class ImageEnhancer(pl.LightningModule):
         high_freq_loss = torch.nn.functional.l1_loss(x_details, sr_details)
 
         # calculate common metrics
-        x_normalized = torch_convert_YUV2RGB((x * 0.5 + 0.5).clip(0, 1))
-        sr_normalized = torch_convert_YUV2RGB((sr * 0.5 + 0.5).clip(0, 1))
-        psnr = torchmetrics.functional.peak_signal_noise_ratio(x_normalized, sr_normalized, data_range=1.0)
-        ssim = torchmetrics.functional.structural_similarity_index_measure(
-            x_normalized, sr_normalized, data_range=1.0)
+        base_metrics = self.base_metrics(x, sr)
 
         return {
             'aux_loss': aux_loss,
             'high_freq': high_freq_loss,
-            'psnr': psnr,
-            'ssim': ssim,
-            'loss': aux_loss + high_freq_loss
+            'loss': aux_loss + high_freq_loss,
+            **base_metrics
         }
 
     @torch.inference_mode()
@@ -409,10 +455,9 @@ class ImageEnhancer(pl.LightningModule):
 
         upscaled = []
         for __tiles in torch.split(tiles, self.batch_size, dim=0):
-            upsampled_tiles = torch.nn.functional.interpolate(__tiles, scale_factor=self.scale, mode='bicubic')
-            upscaled.append(self.forward(upsampled_tiles.to(self.device), train=False).cpu())
+            upscaled.append(self.forward(__tiles.to(self.device), train=False).cpu())
 
-            del __tiles, upsampled_tiles
+            del __tiles
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -431,14 +476,16 @@ class ImageEnhancer(pl.LightningModule):
         upscaled_images = self.upscale_images(down_sampled)
 
         # log images
-        self.custom_logger.log_images_compare([tensor2list(to_image(orig_images)),
-                                               tensor2list(to_image(upscaled_images))],
-                                              texts=['orig', 'upscaled'],
-                                              name='orig_upscaled', epoch=self.current_epoch)
+        self.custom_logger.log_images(tensor2list(to_image(orig_images)), prefix='orig', epoch=self.current_epoch)
+        self.custom_logger.log_images(tensor2list(to_image(upscaled_images)), prefix='upscaled',
+                                      epoch=self.current_epoch)
 
         # log current lr
         if self.debug:
             self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
+            base_metrics = self.base_metrics(orig_images, upscaled_images)
+            for k, v in base_metrics.items():
+                self.log(f'val_full_{k}', v, prog_bar=True)
 
     def training_step(self, batch, batch_idx):
         loss = self.step(batch)
@@ -486,6 +533,7 @@ def get_parser():
     parser = ArgumentParser(description="Training patch upscaler model")
     # Input data settings
     parser.add_argument("--dataset", default=[], nargs='+', help="Path to folders with SR images")
+    parser.add_argument("--test_dataset", default=[], nargs='+', help="Path to folders with test images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default="Swin2SR_Lightweight_X2_64", help="name of SwinSR checkpoint")
@@ -498,7 +546,7 @@ def get_parser():
     parser.add_argument("--min_lr_rate", default=0.01, type=float, help="Minimal LR ratio to decay")
     parser.add_argument("--initial_lr_rate", default=0.1, type=float, help="Initial LR ratio")
     parser.add_argument("--epochs", default=300, type=int, help="Epochs in training")
-    parser.add_argument("--steps", default=1000, type=int, help="Steps in training")
+    parser.add_argument("--steps", default=5000, type=int, help="Steps in training")
     parser.add_argument("--batch_size", default=512, type=int, help="Batch size in training")
     parser.add_argument("--acc_grads", default=1, type=int,
                         help="Steps to accumulate gradients to emulate larger batch size")
@@ -506,13 +554,15 @@ def get_parser():
     parser.add_argument("--w", default=2560, type=int, help="SR width")
     parser.add_argument("--h", default=1440, type=int, help="SR height")
     parser.add_argument("--tile", default=16, type=int, help="Tile size after downscale")
-    parser.add_argument("--tile_pad", default=1, type=int, help="Tile overlap after downscale")
+    parser.add_argument("--tile_pad", default=2, type=int, help="Tile overlap after downscale")
     parser.add_argument("--scale", default=2, type=int, help="How much down scale SR patches")
 
     # Model settings
     parser.add_argument("--dim", default=32, type=int, help="Base channel")
     parser.add_argument("--in_channels", default=1, type=int, choices=[1, 3], help="1 or 3 use only Luma or Cb Cr too")
     parser.add_argument("--n_blocks", default=4, type=int, help="Feature extraction blocks")
+    parser.add_argument("--random_filters", default=64, type=int, help="Binary filters for loss")
+
     # Meta settings
     parser.add_argument("--out_model_name", default="patch_upscaler", help="Name of output model path")
     parser.add_argument("--profile", default=None, choices=['simple', 'advanced'], help="Whether to use profiling")
@@ -525,6 +575,15 @@ def get_parser():
 if __name__ == "__main__":
     parser = get_parser()
     args = parser.parse_args()
+
+    if args.clearml:
+        print("Initializing ClearML")
+        task = clearml.Task.init(project_name='upscaling', task_name=args.task_name, reuse_last_task_id=True,
+                                 auto_connect_frameworks=False)
+        task.connect(args, name='config')
+        logger = task.get_logger()
+    else:
+        logger = None
 
     # load pretrained upscaler
     teacher = None
@@ -545,30 +604,25 @@ if __name__ == "__main__":
         model.eval()
         teacher = model
 
-    if args.clearml:
-        print("Initializing ClearML")
-        task = clearml.Task.init(project_name='upscaling', task_name=args.task_name, reuse_last_task_id=True,
-                                 auto_connect_frameworks=False)
-        task.connect(args, name='config')
-        logger = task.get_logger()
-    else:
-        logger = None
-
     checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                        filename=os.path.basename(args.out_model_name))
 
     dataset = SRTiles(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
                       cache_size=args.cache_size)
+    test_dataset = dataset
+    if args.test_dataset:
+        test_dataset = SRTiles(folder=args.test_dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
+                               cache_size=args.cache_size)
     images = SRImages(folder=args.dataset, w=args.w, h=args.h)
 
-
     model = PatchEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
-                          tile_pad=args.tile_pad * args.scale)
+                          tile_pad=args.tile_pad)
 
     devices = list(range(torch.cuda.device_count()))
     if args.sample:
-        enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset, test_images=images,
-                                                      clearml=logger, teacher=teacher,
+        enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset,
+                                                      test_dataset=test_dataset,
+                                                      test_images=images, clearml=logger, teacher=teacher,
                                                       teacher_rate=args.teacher_rate, ema_weight=args.ema,
                                                       learning_rate=args.lr,
                                                       initial_lr_rate=args.initial_lr_rate,
@@ -584,7 +638,8 @@ if __name__ == "__main__":
         enhancer.custom_logger.log_images_compare(images=[
             tensor2list(to_image(orig_images)), tensor2list(to_image(sr_images))], texts=['orig', 'upscaled'], epoch=0)
     else:
-        enhancer = ImageEnhancer(model=model, dataset=dataset, test_images=images, clearml=logger, teacher=teacher,
+        enhancer = ImageEnhancer(model=model, dataset=dataset, test_images=images, clearml=logger,
+                                 in_channels=args.in_channels, random_filters=args.random_filters, teacher=teacher,
                                  teacher_rate=args.teacher_rate, ema_weight=args.ema, learning_rate=args.lr,
                                  initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate,
                                  batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
