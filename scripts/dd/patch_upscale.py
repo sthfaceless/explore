@@ -472,13 +472,13 @@ class ImageEnhancer(pl.LightningModule):
     def train_dataloader(self):
         self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=2 * torch.cuda.device_count(),
+                                           num_workers=4 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
 
     def val_dataloader(self):
         self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False,
-                                           num_workers=2 * torch.cuda.device_count(),
+                                           num_workers=4 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
 
 
