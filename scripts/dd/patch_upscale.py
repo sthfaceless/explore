@@ -483,7 +483,7 @@ class ImageEnhancer(pl.LightningModule):
 def get_parser():
     parser = ArgumentParser(description="Training patch upscaler model")
     # Input data settings
-    parser.add_argument("--dataset", default=[], help="Path to folders with SR images")
+    parser.add_argument("--dataset", default=[], nargs='+', help="Path to folders with SR images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default="Swin2SR_Lightweight_X2_64", help="name of SwinSR checkpoint")
@@ -547,7 +547,8 @@ if __name__ == "__main__":
 
         if not os.path.exists(model_path):
             url = f'https://github.com/mv-lab/swin2sr/releases/download/v0.0.1/{args.teacher}.pth'
-            r = requests.get(url, allow_redirects=True)
+            r = requests.get(url, allow_redirects=True, verify=False)
+            os.makedirs(model_path, exist_ok=True)
             open(model_path, 'wb').write(r.content)
 
         model = Swin2SR(upscale=2, in_chans=3, img_size=64, window_size=8,
