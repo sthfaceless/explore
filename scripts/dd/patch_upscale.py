@@ -106,7 +106,7 @@ def gram_loss(features1, features2):
 
 class RandomBinaryFilter(torch.nn.Module):
 
-    def __init__(self, in_channels=1, filters=64, kernel_size=5):
+    def __init__(self, in_channels=1, filters=48, kernel_size=5):
         super(RandomBinaryFilter, self).__init__()
         self.conv = torch.nn.Conv2d(
             in_channels=in_channels,
@@ -182,7 +182,7 @@ class PatchDiscriminator(torch.nn.Module):
         h = self.first_conv(x)
         features = self.feature_extractor(h)
         probs = self.classifier(features)
-        return probs
+        return probs.view(-1)
 
 
 class PatchEnhancer(torch.nn.Module):
@@ -302,7 +302,7 @@ class SRImagesBase:
             lr_patch += torch.randn_like(lr_patch) * 0.05
         # random blurring
         if random() < 0.5:
-            ks = randint(1, 5)
+            ks = choice([1, 3, 5])
             lr_patch = torchvision.transforms.functional.gaussian_blur(lr_patch, (ks, ks))
         # random method down sampling
         lr_patch = torch.nn.functional.interpolate(lr_patch.unsqueeze(0), scale_factor=1 / self.scale,
@@ -333,7 +333,7 @@ class FullSRImages(SRImagesBase, torch.utils.data.Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        return self.load_file(self.load_files()[idx], resize=True)
+        return self.load_file(self.find_files()[idx], resize=True)
 
 
 class ImageEnhancer(pl.LightningModule):
@@ -420,9 +420,7 @@ class ImageEnhancer(pl.LightningModule):
             self.model
         ])
 
-        upscaled = model(x, train=train, **kwargs)
-
-        return upscaled
+        return model(x, return_features=train, **kwargs)
 
     def get_sr(self, batch):
 
@@ -437,21 +435,23 @@ class ImageEnhancer(pl.LightningModule):
 
         # enhance it
         lr = batch['lr']
-        upscaled, features = self.forward(lr, return_features=True)
+        upscaled, features = self.forward(lr, train=True)
 
         # return loss on real SR
         return self.get_losses(upscaled, lr, self.get_sr(batch), features)
 
     def disc_step(self, batch):
 
-        upscaled = self.forward(batch['lr'], train=True)
+        with torch.no_grad():
+            upscaled = self.forward(batch['lr'], train=True)[0]
 
         # discriminator must learn how fake the example looks like
         preds = self.disc(torch.cat([upscaled, self.get_sr(batch)], dim=0))
         target = torch.ones_like(preds)
         target[len(upscaled):] = 0
 
-        return torch.nn.functional.binary_cross_entropy(preds, target)
+        values = target * torch.log(preds + 1e-6) + (1 - target) * torch.log(1 - preds + 1e-6)
+        return - torch.mean(torch.nan_to_num(values, nan=0, posinf=1, neginf=-1))
 
     def base_metrics(self, x, sr):
         x_normalized = torch_convert_YUV2RGB(x * 0.5 + 0.5).clip(0, 1)
@@ -511,8 +511,9 @@ class ImageEnhancer(pl.LightningModule):
             'high_freq': high_freq_loss,
             **adv_loss,
             **teacher_loss,
-            'loss': aux_loss + high_freq_loss + (adv_loss['adv_loss'] if self.disc else 0) * self.disc_w + (
-                teacher_loss['teacher_loss'] if self.teacher else 0) * self.teacher_w
+            'loss': aux_loss + high_freq_loss + (
+                    adv_loss['adv_loss'] if 'adv_loss' in adv_loss else 0) * self.disc_w + (
+                        teacher_loss['teacher_loss'] if 'teacher_loss' in teacher_loss else 0) * self.teacher_w
         }
 
     @torch.inference_mode()
@@ -579,7 +580,8 @@ class ImageEnhancer(pl.LightningModule):
     def training_step(self, batch, batch_idx):
 
         # enable first optimizer for patch upscaling
-        optimizer_upscale = self.optimizers()[0]
+        optimizers = self.optimizers()
+        optimizer_upscale = optimizers[0] if isinstance(optimizers, list) else optimizers
         self.toggle_optimizer(optimizer_upscale, optimizer_idx=0)
         optimizer_upscale.zero_grad(set_to_none=True)
 
@@ -610,7 +612,9 @@ class ImageEnhancer(pl.LightningModule):
             self.untoggle_optimizer(optimizer_idx=1)
 
         # run lr schedulers
-        for sch in self.lr_schedulers():
+        schedulers = self.lr_schedulers()
+        schedulers = schedulers if isinstance(schedulers, list) else [schedulers]
+        for sch in schedulers:
             if type(sch) is dict:
                 interval = sch['interval']
                 sch = sch['scheduler']
@@ -633,7 +637,7 @@ class ImageEnhancer(pl.LightningModule):
             self.log(f'val_{k}', v, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
-        params = self.model.parameters() + ([self.teacher_projection.parameters()] if self.teacher else [])
+        params = list(self.model.parameters()) + ([self.teacher_projection.parameters()] if self.teacher else [])
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=params, betas=(0.9, 0.99))
         optimizers = [optimizer]
 
@@ -704,7 +708,7 @@ def get_parser():
     parser.add_argument("--in_channels", default=3, type=int, choices=[1, 3], help="1 or 3 use only Luma or Cb Cr too")
     parser.add_argument("--n_blocks", default=4, type=int, help="Feature extraction blocks")
     parser.add_argument("--disc_blocks", default=2, type=int, help="Discriminator blocks")
-    parser.add_argument("--random_filters", default=64, type=int, help="Binary filters for loss")
+    parser.add_argument("--random_filters", default=48, type=int, help="Binary filters for loss")
     parser.add_argument("--random_filters_kernel", default=5, type=int, help="Binary filters kernel size")
     parser.add_argument("--fft", action='store_true')
     parser.add_argument("--disc", action='store_true')
