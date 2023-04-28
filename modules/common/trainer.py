@@ -51,10 +51,10 @@ class SimpleLogger:
             os.makedirs(tmpdir, exist_ok=True)
 
     def log_image(self, image, name, epoch=0):
+        path = f"{self.tmpdir}/{name}.png"
+        Image.fromarray(image).save(path)
         if self.clearml:
-            self.clearml.report_image('valid', f"{name}", iteration=epoch, image=image)
-        else:
-            Image.fromarray(image).save(f"{self.tmpdir}/{name}.png")
+            self.clearml.report_image('valid', f"{name}", iteration=epoch, local_path=path)
 
     def log_images(self, images, prefix, epoch=0):
         for image_id, image in enumerate(images):

@@ -922,7 +922,7 @@ class Swin2SR(nn.Module):
 
         return x
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         H, W = x.shape[2:]
         x = self.check_image_size(x)
 
@@ -964,8 +964,10 @@ class Swin2SR(nn.Module):
         elif self.upsampler == 'pixelshuffledirect':
             # for lightweight SR
             x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.upsample(x)
+            features = self.conv_after_body(self.forward_features(x)) + x
+            x = self.upsample(features)
+            if return_features:
+                return x[:, :, :H * self.upscale, :W * self.upscale] / self.img_range + self.mean, features
         elif self.upsampler == 'nearest+conv':
             # for real-world SR
             x = self.conv_first(x)
