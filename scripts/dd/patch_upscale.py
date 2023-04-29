@@ -519,8 +519,12 @@ class ImageEnhancer(pl.LightningModule):
     @torch.inference_mode()
     def upscale_images(self, images):
 
-        b, c, h, w = images.shape
-
+        b, c, h_orig, w_orig = images.shape
+        h_add = self.tile - (h_orig - h_orig // self.tile * self.tile)
+        w_add = self.tile - (w_orig - w_orig // self.tile * self.tile)
+        images = torch.cat([images, torch.zeros_like(images[:, :, :h_add])], dim=2)
+        images = torch.cat([images, torch.zeros_like(images[:, :, :, :w_add])], dim=3)
+        h, w = images.shape[-2:]
         # divide image to patches
         __tiles = rearrange(images, 'b c (n p1) (m p2) -> b c n m p1 p2', n=h // self.tile, m=w // self.tile)
 
@@ -550,6 +554,8 @@ class ImageEnhancer(pl.LightningModule):
 
         upscaled = torch.cat(upscaled, dim=0)
         upscaled = rearrange(upscaled, '(b n m) c p1 p2 -> b c (n p1) (m p2)', n=h // self.tile, m=w // self.tile)
+
+        upscaled = upscaled[:, :, :h_orig * self.scale, :w_orig * self.scale]
 
         return upscaled
 
