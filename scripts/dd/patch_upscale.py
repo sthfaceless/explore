@@ -169,6 +169,7 @@ class PatchDiscriminator(torch.nn.Module):
 
     def __init__(self, in_channels=1, dim=128, n_blocks=2):
         super(PatchDiscriminator, self).__init__()
+        self.in_channels = in_channels
         self.first_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=3, padding=1)
         self.feature_extractor = torch.nn.Sequential(*[ResBlock(dim) for _ in range(n_blocks)])
         self.classifier = torch.nn.Sequential(
@@ -179,7 +180,7 @@ class PatchDiscriminator(torch.nn.Module):
         )
 
     def forward(self, x):
-        h = self.first_conv(x)
+        h = self.first_conv(x[:, :self.in_channels])
         features = self.feature_extractor(h)
         probs = self.classifier(features)
         return probs.view(-1)
@@ -197,7 +198,7 @@ class PatchEnhancer(torch.nn.Module):
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
-        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bilinear')
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bicubic')
 
         # extract channels
         h = x[:, :self.in_channels]
@@ -230,13 +231,17 @@ class PatchEnhancer(torch.nn.Module):
 
 class SRImagesBase:
 
-    def __init__(self, folder, tile=16, tile_pad=2, scale=2, cache_size=512, w=2560, h=1440):
+    def __init__(self, folder, tile=16, tile_pad=2, scale=2, cache_size=512, w=2560, h=1440, preprocessed=False,
+                 augment=False, orig='hr'):
         super(SRImagesBase, self).__init__()
         self.w = w
         self.h = h
         self.tile = tile
         self.tile_pad = tile_pad
         self.scale = scale
+        self.preprocessed = preprocessed
+        self.augment = augment
+        self.orig = orig
         if type(folder) is not list:
             folder = [folder]
         self.folder = folder
@@ -250,7 +255,7 @@ class SRImagesBase:
                       os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
         return self.files
 
-    def load_file(self, file, resize=False):
+    def __load_file(self, file, resize=False):
         frame = cv2.imread(file)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         if resize:
@@ -269,8 +274,21 @@ class SRImagesBase:
             frame = cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_AREA)
         return to_tensor(frame)
 
-    def load_files(self, resize=True):
-        return [self.load_file(file, resize=resize) for file in self.files]
+    def load_file(self, file, resize=False):
+        if self.preprocessed:
+            root = os.path.abspath(os.path.join(os.path.dirname(file), os.pardir))
+            base = os.path.basename(file)
+            return {
+                mode: self.__load_file(os.path.join(root, mode, base), resize=False) for mode in os.listdir(root)
+                if os.path.isdir(os.path.join(root, mode))
+            }
+        else:
+            return {self.orig: self.__load_file(file, resize=resize)}
+
+    def load_files(self, resize=True, files=None):
+        if not files:
+            files = self.files
+        return [self.load_file(file, resize=resize) for file in files]
 
     def reset_cache(self):
 
@@ -284,29 +302,38 @@ class SRImagesBase:
             shuffle(folder_files)
             cache_files.extend(folder_files[:self.cache_size // len(self.folder)])
 
-        self.cache = [self.load_file(file) for file in cache_files]
+        self.cache = self.load_files(resize=False, files=cache_files)
         gc.collect()
 
-    def load_patch(self, tensor):
+    def load_patch(self, obj):
 
-        c, h, w = tensor.shape
+        sr = obj[self.orig]
+
+        c, h, w = sr.shape
 
         tile = (self.tile + self.tile_pad * 2) * self.scale
         i_start = randint(0, h - tile - 1)
         j_start = randint(0, w - tile - 1)
-        sr_patch = tensor[:, i_start:i_start + tile, j_start:j_start + tile]
+        sr_patch = sr[:, i_start:i_start + tile, j_start:j_start + tile]
 
-        lr_patch = sr_patch
-        # random noise
-        if random() < 0.5:
-            lr_patch += torch.randn_like(lr_patch) * 0.05
-        # random blurring
-        if random() < 0.5:
-            ks = choice([1, 3, 5])
-            lr_patch = torchvision.transforms.functional.gaussian_blur(lr_patch, (ks, ks))
-        # random method down sampling
-        lr_patch = torch.nn.functional.interpolate(lr_patch.unsqueeze(0), scale_factor=1 / self.scale,
-                                                   mode=choice(['bilinear', 'bicubic', 'nearest-exact', 'area']))[0]
+        if self.preprocessed:
+            lr = obj[choice([k for k in obj.keys() if k != self.orig])]
+            lr_patch = lr[:, int(i_start / self.scale):int((i_start + tile) / self.scale),
+                       int(j_start / self.scale):int((j_start + tile) / self.scale)]
+        else:
+
+            lr_patch = sr_patch
+            if self.augment:
+                # random noise
+                if random() < 0.5:
+                    lr_patch += torch.randn_like(lr_patch) * 0.05
+                # random blurring
+                if random() < 0.5:
+                    ks = choice([1, 3, 5])
+                    lr_patch = torchvision.transforms.functional.gaussian_blur(lr_patch, (ks, ks))
+            # random method down sampling
+            lr_patch = torch.nn.functional.interpolate(lr_patch.unsqueeze(0), scale_factor=1 / self.scale,
+                                                       mode=choice(['bilinear', 'bicubic', 'nearest-exact', 'area']))[0]
 
         return {
             'lr': lr_patch,
@@ -344,6 +371,8 @@ class ImageEnhancer(pl.LightningModule):
                  dataset=None,
                  test_dataset=None,
                  clearml=None,
+                 orig='hr',
+                 sample_mode='b4',
                  in_channels=1,
                  dim=16,
                  teacher=None,
@@ -385,6 +414,8 @@ class ImageEnhancer(pl.LightningModule):
 
         self.dataset = dataset
         self.test_dataset = test_dataset
+        self.orig = orig
+        self.sample_mode = sample_mode
 
         self.teacher = teacher if exists(teacher) else None
         self.teacher_rate = teacher_rate
@@ -415,10 +446,7 @@ class ImageEnhancer(pl.LightningModule):
 
     def forward(self, x, train=True, **kwargs):
 
-        model = cases([
-            (self.use_ema and (not train or not self.training), self.ema_model.module),
-            self.model
-        ])
+        model = self.ema_model.module if self.use_ema and (not train or not self.training) else self.model
 
         return model(x, return_features=train, **kwargs)
 
@@ -512,7 +540,7 @@ class ImageEnhancer(pl.LightningModule):
             **adv_loss,
             **teacher_loss,
             'loss': aux_loss + high_freq_loss + (
-                    adv_loss['adv_loss'] if 'adv_loss' in adv_loss else 0) * self.disc_w + (
+                adv_loss['adv_loss'] if 'adv_loss' in adv_loss else 0) * self.disc_w + (
                         teacher_loss['teacher_loss'] if 'teacher_loss' in teacher_loss else 0) * self.teacher_w
         }
 
@@ -559,14 +587,19 @@ class ImageEnhancer(pl.LightningModule):
 
         return upscaled
 
+    def __load_dataset_items(self, dataset, k):
+        return [dataset.load_file(file, resize=True)
+                for file in choices(dataset.find_files(), k=self.samples_epoch)]
+
     def on_validation_epoch_end(self):
 
         # get original SR images and downsample them
-        test_images = self.test_dataset.load_files()
-        train_images = [self.dataset.load_file(file, resize=True)
-                        for file in choices(self.dataset.find_files(), k=self.samples_epoch)]
-        orig_images = torch.stack(test_images + train_images, dim=0)
-        down_sampled = torch.nn.functional.interpolate(orig_images, scale_factor=1 / self.scale, mode='bilinear')
+        test_items = self.__load_dataset_items(self.test_dataset, self.samples_epoch)
+        orig_images = torch.stack([item[self.orig] for item in test_items], dim=0)
+        if self.sample_mode in test_items[0]:
+            down_sampled = torch.stack([item[self.sample_mode] for item in test_items], dim=0)
+        else:
+            down_sampled = torch.nn.functional.interpolate(orig_images, scale_factor=1 / self.scale, mode='bicubic')
 
         # upscale images with model
         upscaled_images = self.upscale_images(down_sampled)
@@ -635,8 +668,12 @@ class ImageEnhancer(pl.LightningModule):
         if self.use_ema:
             self.ema_model.update(self.model)
 
-    def validation_step(self, sr, batch_idx):
-        down_sampled = torch.nn.functional.interpolate(sr, scale_factor=1 / self.scale, mode='bilinear')
+    def validation_step(self, batch, batch_idx):
+        sr = batch[self.orig]
+        if self.sample_mode in batch:
+            down_sampled = batch[self.sample_mode]
+        else:
+            down_sampled = torch.nn.functional.interpolate(sr, scale_factor=1 / self.scale, mode='bicubic')
         upscaled = self.upscale_images(down_sampled)
         metrics = self.base_metrics(upscaled, sr)
         for k, v in metrics.items():
@@ -678,18 +715,21 @@ def get_parser():
     parser = ArgumentParser(description="Training patch upscaler model")
     # Input data settings
     parser.add_argument("--dataset", default=[], nargs='+', help="Path to folders with SR images")
+    parser.add_argument("--orig", default='hr', help="Name for original images folder")
+    parser.add_argument("--sample_mode", default='b4', help="Bitrate folder for sample")
     parser.add_argument("--test_dataset", default=[], nargs='+', help="Path to folders with test images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
-
+    parser.add_argument("--prep", action='store_true', help='whether dataset was preprocessed')
+    parser.set_defaults(prep=False)
     # Training settings
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate for model")
     parser.add_argument("--disc_lr", default=1e-4, type=float, help="Learning rate for discriminator")
     parser.add_argument("--disc_w", default=1e-3, type=float, help="Weight for adversarial loss")
     parser.add_argument("--disc_warmup", default=3, type=int, help="Discriminator warmup epochs")
-    parser.add_argument("--ema", default=0.995, type=float, help="Ema weight")
+    parser.add_argument("--ema", default=None, type=float, help="Ema weight")
     parser.add_argument("--teacher_rate", default=1.0, type=float, help="How much of teacher image to use for training")
     parser.add_argument("--teacher_w", default=1e-4, type=float, help="Weight for teacher features similarity loss")
     parser.add_argument("--teacher_dim", default=60, type=int, help="Teacher feature dimension")
@@ -766,10 +806,10 @@ if __name__ == "__main__":
                                                        filename=os.path.basename(args.out_model_name))
 
     dataset = PatchSRImages(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
-                            cache_size=args.cache_size, w=args.w, h=args.h)
+                            cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep, orig=args.orig)
     test_dataset = FullSRImages(folder=args.test_dataset if args.test_dataset else args.dataset,
-                                tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
-                                cache_size=args.cache_size, w=args.w, h=args.h)
+                                tile=args.tile, tile_pad=args.tile_pad, scale=args.scale, orig=args.orig,
+                                cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep)
 
     model = PatchEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
                           tile_pad=args.tile_pad, fft=args.fft)
@@ -786,16 +826,21 @@ if __name__ == "__main__":
                                                       teacher_rate=args.teacher_rate, ema_weight=args.ema,
                                                       learning_rate=args.lr, full_batch_size=args.full_batch_size,
                                                       initial_lr_rate=args.initial_lr_rate,
+                                                      sample_mode=args.sample_mode,
                                                       disc_warmup=args.disc_warmup, dim=args.dim,
                                                       teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                                       min_lr_rate=args.min_lr_rate, disc_w=args.disc_w,
                                                       random_filters_kernel=args.random_filters_kernel,
                                                       batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
                                                       samples_epoch=args.samples_epoch, scale=args.scale,
-                                                      tile=args.tile, tile_pad=args.tile_pad)
+                                                      tile=args.tile, tile_pad=args.tile_pad, orig=args.orig)
         enhancer.to(f'cuda:{devices[0]}')
-        orig_images = torch.stack(test_dataset.load_files(resize=True), dim=0)
-        lr_images = torch.nn.functional.interpolate(orig_images, scale_factor=1 / args.scale, mode='bicubic')
+        items = test_dataset.load_files(resize=True)
+        orig_images = torch.stack([item[args.orig] for item in items], dim=0)
+        if args.prep:
+            lr_images = torch.stack([item[args.sample_br] for item in items], dim=0)
+        else:
+            lr_images = torch.nn.functional.interpolate(orig_images, scale_factor=1 / args.scale, mode='bicubic')
         sr_images = to_image(enhancer.upscale_images(lr_images))
 
         enhancer.custom_logger.log_images(tensor2list(to_image(lr_images)), prefix='lr', epoch=0)
@@ -809,8 +854,8 @@ if __name__ == "__main__":
                                  dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                  batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
                                  disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
-                                 samples_epoch=args.samples_epoch, scale=args.scale,
-                                 random_filters_kernel=args.random_filters_kernel,
+                                 samples_epoch=args.samples_epoch, scale=args.scale, sample_mode=args.sample_mode,
+                                 random_filters_kernel=args.random_filters_kernel, orig=args.orig,
                                  tile=args.tile, tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
