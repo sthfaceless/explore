@@ -126,10 +126,10 @@ class RandomBinaryFilter(torch.nn.Module):
         return self.conv(x)
 
 
-class FeatureBlock(torch.nn.Module):
+class MobileBlock(torch.nn.Module):
 
     def __init__(self, dim, in_dim=-1, kernel_size=3, group=4, fft=False):
-        super(FeatureBlock, self).__init__()
+        super(MobileBlock, self).__init__()
         self.fft = fft
         self.in_dim = in_dim if in_dim > 0 else dim
 
@@ -147,6 +147,31 @@ class FeatureBlock(torch.nn.Module):
         if self.fft:
             h = torch.fft.fft2(x, norm='ortho').real
 
+        return (h + x) / 2 ** 0.5
+
+
+class FeatureBlock(torch.nn.Module):
+
+    def __init__(self, dim, in_dim=-1, kernel_size=3, fft=False):
+        super(FeatureBlock, self).__init__()
+        self.fft = fft
+        self.dim = dim
+        self.in_dim = in_dim if in_dim > 0 else self.dim
+
+        self.conv1 = torch.nn.Conv2d(self.in_dim, self.dim, kernel_size=kernel_size, padding=1)
+        self.conv2 = torch.nn.Conv2d(self.dim, self.dim, kernel_size=kernel_size, padding=1)
+
+        if self.in_dim != dim:
+            self.skip_conv = torch.nn.Conv2d(self.in_dim, self.dim, kernel_size=1)
+
+    def forward(self, x):
+        h = self.conv1(nonlinear(x))
+        if self.fft:
+            h = torch.fft.fft2(x, norm='ortho').real
+        h = self.conv2(nonlinear(h))
+        if self.fft:
+            h = torch.fft.fft2(x, norm='ortho').real
+        x = x if self.dim == self.in_dim else self.skip_conv(x)
         return (h + x) / 2 ** 0.5
 
 
@@ -186,15 +211,48 @@ class PatchDiscriminator(torch.nn.Module):
         return probs.view(-1)
 
 
-class PatchEnhancer(torch.nn.Module):
+class DownSample2d(torch.nn.Module):
+
+    def __init__(self, in_dim, out_dim, kernel_size=3, scale_factor=0.5, use_conv=True):
+        super(DownSample2d, self).__init__()
+        self.scale_factor = scale_factor
+        self.use_conv = use_conv
+        if self.use_conv:
+            self.conv = torch.nn.Conv2d(in_channels=in_dim, out_channels=out_dim, kernel_size=kernel_size,
+                                        padding=kernel_size // 2, stride=1)
+
+    def forward(self, x):
+        h = self.conv(x) if self.use_conv else x
+        h = torch.nn.functional.interpolate(h, scale_factor=self.scale_factor, mode='bilinear')
+        return h
+
+
+class UpSample2d(torch.nn.Module):
+
+    def __init__(self, in_dim, out_dim, kernel_size=3, scale_factor=2.0, use_conv=True):
+        super(UpSample2d, self).__init__()
+        self.scale_factor = scale_factor
+        self.use_conv = use_conv
+        if self.use_conv:
+            self.conv = torch.nn.Conv2d(in_channels=in_dim, out_channels=out_dim, kernel_size=kernel_size,
+                                        stride=1, padding=kernel_size // 2)
+
+    def forward(self, x):
+        h = torch.nn.functional.interpolate(x, scale_factor=self.scale_factor, mode='nearest')
+        h = self.conv(h) if self.use_conv else h
+        return h
+
+
+class MobilePatchEnhancer(torch.nn.Module):
 
     def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=4, scale=2, fft=False):
-        super(PatchEnhancer, self).__init__()
+        super(MobilePatchEnhancer, self).__init__()
         self.in_channels = in_channels
         self.tile_pad = tile_pad
         self.scale = scale
-        self.input_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
-        self.blocks = torch.nn.ModuleList([FeatureBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
+        self.input_conv = torch.nn.Conv2d(self.in_channels, self.dim,
+                                          kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
+        self.blocks = torch.nn.ModuleList([MobileBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
@@ -213,6 +271,75 @@ class PatchEnhancer(torch.nn.Module):
         features = h
 
         h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.scale)
+        # output conv
+        h = self.out(nonlinear(h))
+
+        # get updated and remained part
+        updated = upscaled[:, :self.in_channels, self.tile_pad * self.scale: -self.tile_pad * self.scale,
+                  self.tile_pad * self.scale: -self.tile_pad * self.scale]
+        remained = upscaled[:, self.in_channels:, self.tile_pad * self.scale: -self.tile_pad * self.scale,
+                   self.tile_pad * self.scale: -self.tile_pad * self.scale]
+
+        result = torch.cat((updated + h, remained), dim=-3)
+        if return_features:
+            return result, features
+
+        return result
+
+
+class PatchEnhancer(torch.nn.Module):
+
+    def __init__(self, in_channels=1, dim=32, tile_pad=2, n_blocks=3, scale=2, fft=False):
+        super(PatchEnhancer, self).__init__()
+        self.in_channels = in_channels
+        self.tile_pad = tile_pad
+        self.scale = scale
+        self.input_conv = torch.nn.Conv2d(self.in_channels, self.dim,
+                                          kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
+        self.down_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
+            [FeatureBlock(dim * 2 ** idx, dim * 2 ** idx, fft=fft) for _ in range(1)])
+            for idx in range(n_blocks)])
+        self.downs = torch.nn.ModuleList(
+            [DownSample2d(dim * 2 ** (idx - 1), dim * 2 ** idx) for idx in range(1, n_blocks)])
+        self.downs.append(torch.nn.Identity())
+
+        self.up_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
+            [FeatureBlock((int(block_id == 0 and idx != n_blocks - 1) + 1) * dim * 2 ** idx, dim * 2 ** idx, fft=fft)
+             for block_id in range(1)]) for idx in reversed(range(n_blocks))])
+        self.ups = torch.nn.ModuleList([UpSample2d(dim * 2 ** idx, dim * 2 ** (idx - 1)) for idx in
+                                        reversed(range(1, n_blocks))])
+        self.ups.append(torch.nn.Identity())
+        self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
+
+    def forward(self, x, return_features=False):
+        # upscale initial patch for enhancing
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bicubic')
+
+        # extract channels
+        h = self.input_conv(upscaled[:, :self.in_channels])
+        h_tile = (h.shape[-2] - x.shape[-2] * self.scale) // 2
+        w_tile = (h.shape[-1] - x.shape[-1] * self.scale) // 2
+        h = h[:, :, h_tile: -h_tile, w_tile: -w_tile]
+
+        # deep feature extraction
+        outs = []
+        for idx, (blocks, down) in enumerate(zip(self.down_blocks, self.downs)):
+            for block in blocks:
+                h = block(h)
+            if idx != len(self.blocks) - 1:
+                outs.append(h)
+            h = down(h)
+
+        for idx, (blocks, up) in enumerate(zip(self.up_blocks, self.ups)):
+            if idx != 0:
+                h = torch.cat([h, outs.pop()], dim=1)
+            for block in blocks:
+                h = block(h)
+            h = up(h)
+
+        # save features in case of teacher loss
+        features = h
+
         # output conv
         h = self.out(nonlinear(h))
 
@@ -585,8 +712,8 @@ class ImageEnhancer(pl.LightningModule):
         for __tiles in torch.split(tiles, self.batch_size, dim=0):
             upscaled.append(self.forward(__tiles.to(self.device), train=False).to(images.device))
             del __tiles
-            gc.collect()
-            torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
         upscaled = torch.cat(upscaled, dim=0)
         upscaled = rearrange(upscaled, '(b n m) c p1 p2 -> b c (n p1) (m p2)', n=h // self.tile, m=w // self.tile)
@@ -678,8 +805,8 @@ class ImageEnhancer(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         sr = batch[self.orig]
-        if self.sample_mode in batch:
-            down_sampled = batch[self.sample_mode]
+        if self.bitrate:
+            down_sampled = batch[self.bitrate]
         else:
             down_sampled = torch.nn.functional.interpolate(sr, scale_factor=1 / self.scale, mode='bicubic')
         upscaled = self.upscale_images(down_sampled)
@@ -714,7 +841,7 @@ class ImageEnhancer(pl.LightningModule):
                                            pin_memory=True, prefetch_factor=2)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.full_batch_size, shuffle=False,
+        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.full_batch_size, shuffle=True,
                                            num_workers=4 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
 
@@ -762,7 +889,7 @@ def get_parser():
     parser.add_argument("--dim", default=16, type=int, help="Base channel")
     parser.add_argument("--disc_dim", default=128, type=int, help="Discriminator base channel")
     parser.add_argument("--in_channels", default=3, type=int, choices=[1, 3], help="1 or 3 use only Luma or Cb Cr too")
-    parser.add_argument("--n_blocks", default=4, type=int, help="Feature extraction blocks")
+    parser.add_argument("--n_blocks", default=3, type=int, help="Feature extraction blocks")
     parser.add_argument("--disc_blocks", default=2, type=int, help="Discriminator blocks")
     parser.add_argument("--random_filters", default=48, type=int, help="Binary filters for loss")
     parser.add_argument("--random_filters_kernel", default=5, type=int, help="Binary filters kernel size")
@@ -835,7 +962,7 @@ if __name__ == "__main__":
                                                       teacher_rate=args.teacher_rate, ema_weight=args.ema,
                                                       learning_rate=args.lr, full_batch_size=args.full_batch_size,
                                                       initial_lr_rate=args.initial_lr_rate,
-                                                      sample_mode=args.sample_mode, bitrate=args.bitrate,
+                                                      bitrate=args.bitrate,
                                                       disc_warmup=args.disc_warmup, dim=args.dim,
                                                       teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                                       min_lr_rate=args.min_lr_rate, disc_w=args.disc_w,
@@ -868,12 +995,13 @@ if __name__ == "__main__":
                                  tile=args.tile, tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
 
         checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
-                                                           filename=os.path.basename(args.out_model_name))
+                                                           filename=os.path.basename(args.out_model_name),
+                                                           monitor='val_psnr', mode='max')
         early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=3, min_delta=1e-3)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                           strategy=DDPStrategy(find_unused_parameters=True), precision=16,
-                          profiler=args.profile, check_val_every_n_epoch=5,
+                          profiler=args.profile, check_val_every_n_epoch=5, limit_val_batches=100,
                           accumulate_grad_batches=args.acc_grads,
                           accelerator='gpu', devices=devices,
                           callbacks=[checkpoint_callback, early_stopping])
