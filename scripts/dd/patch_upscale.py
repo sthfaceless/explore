@@ -250,7 +250,7 @@ class MobilePatchEnhancer(torch.nn.Module):
         self.in_channels = in_channels
         self.tile_pad = tile_pad
         self.scale = scale
-        self.input_conv = torch.nn.Conv2d(self.in_channels, self.dim,
+        self.input_conv = torch.nn.Conv2d(self.in_channels, dim,
                                           kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
         self.blocks = torch.nn.ModuleList([MobileBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
@@ -294,22 +294,22 @@ class PatchEnhancer(torch.nn.Module):
         self.in_channels = in_channels
         self.tile_pad = tile_pad
         self.scale = scale
-        self.input_conv = torch.nn.Conv2d(self.in_channels, self.dim,
+        self.input_conv = torch.nn.Conv2d(self.in_channels, dim,
                                           kernel_size=1 + self.tile_pad * 2, padding=0, stride=1)
         self.down_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
-            [FeatureBlock(dim * 2 ** idx, dim * 2 ** idx, fft=fft) for _ in range(1)])
+            [FeatureBlock(dim * 2 ** idx, fft=fft) for _ in range(1)])
             for idx in range(n_blocks)])
         self.downs = torch.nn.ModuleList(
             [DownSample2d(dim * 2 ** (idx - 1), dim * 2 ** idx) for idx in range(1, n_blocks)])
         self.downs.append(torch.nn.Identity())
 
         self.up_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
-            [FeatureBlock((int(block_id == 0 and idx != n_blocks - 1) + 1) * dim * 2 ** idx, dim * 2 ** idx, fft=fft)
-             for block_id in range(1)]) for idx in reversed(range(n_blocks))])
+            [FeatureBlock(dim * 2 ** idx, in_dim=(int(block_id == 0 and idx != n_blocks - 1) + 1) * dim * 2 ** idx,
+                          fft=fft) for block_id in range(1)]) for idx in reversed(range(n_blocks))])
         self.ups = torch.nn.ModuleList([UpSample2d(dim * 2 ** idx, dim * 2 ** (idx - 1)) for idx in
                                         reversed(range(1, n_blocks))])
         self.ups.append(torch.nn.Identity())
-        self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
+        self.out = torch.nn.Conv2d(dim, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
         # upscale initial patch for enhancing
@@ -317,8 +317,8 @@ class PatchEnhancer(torch.nn.Module):
 
         # extract channels
         h = self.input_conv(upscaled[:, :self.in_channels])
-        h_tile = (h.shape[-2] - x.shape[-2] * self.scale) // 2
-        w_tile = (h.shape[-1] - x.shape[-1] * self.scale) // 2
+        h_tile = (h.shape[-2] - (x.shape[-2] - self.tile_pad * 2) * self.scale) // 2
+        w_tile = (h.shape[-1] - (x.shape[-1] - self.tile_pad * 2) * self.scale) // 2
         h = h[:, :, h_tile: -h_tile, w_tile: -w_tile]
 
         # deep feature extraction
@@ -326,7 +326,7 @@ class PatchEnhancer(torch.nn.Module):
         for idx, (blocks, down) in enumerate(zip(self.down_blocks, self.downs)):
             for block in blocks:
                 h = block(h)
-            if idx != len(self.blocks) - 1:
+            if idx != len(self.down_blocks) - 1:
                 outs.append(h)
             h = down(h)
 
@@ -834,6 +834,9 @@ class ImageEnhancer(pl.LightningModule):
 
         return optimizers, schedulers
 
+    def on_save_checkpoint(self, checkpoint):
+        del checkpoint['hyper_parameters']['dataset']
+        del checkpoint['hyper_parameters']['test_dataset']
     def train_dataloader(self):
         self.dataset.reset_cache()
         return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False,
