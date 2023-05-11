@@ -232,7 +232,7 @@ class PatchEnhancer(torch.nn.Module):
 class SRImagesBase:
 
     def __init__(self, folder, tile=16, tile_pad=2, scale=2, cache_size=512, w=2560, h=1440, preprocessed=False,
-                 augment=False, orig='hr'):
+                 augment=False, bitrate='b4', orig='hr'):
         super(SRImagesBase, self).__init__()
         self.w = w
         self.h = h
@@ -240,6 +240,7 @@ class SRImagesBase:
         self.tile_pad = tile_pad
         self.scale = scale
         self.preprocessed = preprocessed
+        self.bitrate = bitrate
         self.augment = augment
         self.orig = orig
         if type(folder) is not list:
@@ -280,7 +281,8 @@ class SRImagesBase:
             base = os.path.basename(file)
             return {
                 mode: self.__load_file(os.path.join(root, mode, base), resize=False) for mode in os.listdir(root)
-                if os.path.isdir(os.path.join(root, mode))
+                if
+                os.path.isdir(os.path.join(root, mode)) and (self.bitrate is None or mode in (self.bitrate, self.orig))
             }
         else:
             return {self.orig: self.__load_file(file, resize=resize)}
@@ -290,11 +292,7 @@ class SRImagesBase:
             files = self.files
         return [self.load_file(file, resize=resize) for file in files]
 
-    def reset_cache(self):
-
-        if self.cache_size <= 0:
-            raise RuntimeError('Caching is not enabled, use cache_size>0 when initializing dataset')
-
+    def __reset_cache(self):
         cache_files = []
         for folder in self.folder:
             folder_files = [os.path.join(folder, file) for file in os.listdir(folder) if
@@ -304,6 +302,17 @@ class SRImagesBase:
 
         self.cache = self.load_files(resize=False, files=cache_files)
         gc.collect()
+
+    def reset_cache(self):
+
+        if self.cache_size <= 0:
+            raise RuntimeError('Caching is not enabled, use cache_size>0 when initializing dataset')
+
+        # not block training
+        if len(self.cache) > 0:
+            run_async(self.__reset_cache)
+        else:
+            self.__reset_cache()
 
     def load_patch(self, obj):
 
@@ -317,7 +326,7 @@ class SRImagesBase:
         sr_patch = sr[:, i_start:i_start + tile, j_start:j_start + tile]
 
         if self.preprocessed:
-            lr = obj[choice([k for k in obj.keys() if k != self.orig])]
+            lr = obj[choice([k for k in obj.keys() if k != self.orig])] if self.bitrate is None else obj[self.bitrate]
             lr_patch = lr[:, int(i_start / self.scale):int((i_start + tile) / self.scale),
                        int(j_start / self.scale):int((j_start + tile) / self.scale)]
         else:
@@ -372,7 +381,7 @@ class ImageEnhancer(pl.LightningModule):
                  test_dataset=None,
                  clearml=None,
                  orig='hr',
-                 sample_mode='b4',
+                 bitrate='b4',
                  in_channels=1,
                  dim=16,
                  teacher=None,
@@ -415,7 +424,7 @@ class ImageEnhancer(pl.LightningModule):
         self.dataset = dataset
         self.test_dataset = test_dataset
         self.orig = orig
-        self.sample_mode = sample_mode
+        self.bitrate = bitrate
 
         self.teacher = teacher if exists(teacher) else None
         self.teacher_rate = teacher_rate
@@ -514,12 +523,11 @@ class ImageEnhancer(pl.LightningModule):
         teacher_loss = {}
         if self.teacher:
             sr, teacher_features = self.call_teacher(lr)
-            features = self.teacher_projection(features)
-            teacher_loss['teacher_loss'] = gram_loss(features, teacher_features)
+            teacher_loss['teacher_loss'] = gram_loss(self.teacher_projection(features), teacher_features)
 
         x = x[:, :self.in_channels]
         sr = sr[:, :self.in_channels]
-        # loss on downsampled images to reduce artifacts
+        # loss on down sampled images to reduce artifacts
         aux_loss = multiscale_loss(torch.cat([x, self.random_filter(x)], dim=1),
                                    torch.cat([sr, self.random_filter(sr)], dim=1))
 
@@ -539,9 +547,9 @@ class ImageEnhancer(pl.LightningModule):
             'high_freq': high_freq_loss,
             **adv_loss,
             **teacher_loss,
-            'loss': aux_loss + high_freq_loss + (
-                adv_loss['adv_loss'] if 'adv_loss' in adv_loss else 0) * self.disc_w + (
-                        teacher_loss['teacher_loss'] if 'teacher_loss' in teacher_loss else 0) * self.teacher_w
+            'loss': aux_loss + high_freq_loss + \
+                    (adv_loss['adv_loss'] if 'adv_loss' in adv_loss else 0) * self.disc_w + \
+                    (teacher_loss['teacher_loss'] if 'teacher_loss' in teacher_loss else 0) * self.teacher_w
         }
 
     @torch.inference_mode()
@@ -589,15 +597,15 @@ class ImageEnhancer(pl.LightningModule):
 
     def __load_dataset_items(self, dataset, k):
         return [dataset.load_file(file, resize=True)
-                for file in choices(dataset.find_files(), k=self.samples_epoch)]
+                for file in choices(dataset.find_files(), k=k)]
 
     def on_validation_epoch_end(self):
 
-        # get original SR images and downsample them
+        # get original SR images and down sample them
         test_items = self.__load_dataset_items(self.test_dataset, self.samples_epoch)
         orig_images = torch.stack([item[self.orig] for item in test_items], dim=0)
-        if self.sample_mode in test_items[0]:
-            down_sampled = torch.stack([item[self.sample_mode] for item in test_items], dim=0)
+        if self.bitrate:
+            down_sampled = torch.stack([item[self.bitrate] for item in test_items], dim=0)
         else:
             down_sampled = torch.nn.functional.interpolate(orig_images, scale_factor=1 / self.scale, mode='bicubic')
 
@@ -680,7 +688,7 @@ class ImageEnhancer(pl.LightningModule):
             self.log(f'val_{k}', v, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
-        params = list(self.model.parameters()) + ([self.teacher_projection.parameters()] if self.teacher else [])
+        params = list(self.model.parameters()) + (list(self.teacher_projection.parameters()) if self.teacher else [])
         optimizer = torch.optim.Adam(lr=self.learning_rate, params=params, betas=(0.9, 0.99))
         optimizers = [optimizer]
 
@@ -716,14 +724,16 @@ def get_parser():
     # Input data settings
     parser.add_argument("--dataset", default=[], nargs='+', help="Path to folders with SR images")
     parser.add_argument("--orig", default='hr', help="Name for original images folder")
-    parser.add_argument("--sample_mode", default='b4', help="Bitrate folder for sample")
     parser.add_argument("--test_dataset", default=[], nargs='+', help="Path to folders with test images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
+    parser.add_argument("--train_bitrate", default=None, help="Bitrate folder for train")
+    parser.add_argument("--bitrate", default='b4', help="Bitrate folder for evaluate")
     parser.add_argument("--prep", action='store_true', help='whether dataset was preprocessed')
-    parser.set_defaults(prep=False)
+    parser.add_argument("--test_prep", action='store_true', help='whether test dataset was preprocessed')
+    parser.set_defaults(prep=False, test_prep=False)
     # Training settings
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate for model")
     parser.add_argument("--disc_lr", default=1e-4, type=float, help="Learning rate for discriminator")
@@ -802,14 +812,13 @@ if __name__ == "__main__":
         model.eval()
         teacher = model
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
-                                                       filename=os.path.basename(args.out_model_name))
-
     dataset = PatchSRImages(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
-                            cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep, orig=args.orig)
+                            cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep, orig=args.orig,
+                            bitrate=args.train_bitrate)
     test_dataset = FullSRImages(folder=args.test_dataset if args.test_dataset else args.dataset,
                                 tile=args.tile, tile_pad=args.tile_pad, scale=args.scale, orig=args.orig,
-                                cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep)
+                                cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.test_prep,
+                                bitrate=args.bitrate)
 
     model = PatchEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
                           tile_pad=args.tile_pad, fft=args.fft)
@@ -826,7 +835,7 @@ if __name__ == "__main__":
                                                       teacher_rate=args.teacher_rate, ema_weight=args.ema,
                                                       learning_rate=args.lr, full_batch_size=args.full_batch_size,
                                                       initial_lr_rate=args.initial_lr_rate,
-                                                      sample_mode=args.sample_mode,
+                                                      sample_mode=args.sample_mode, bitrate=args.bitrate,
                                                       disc_warmup=args.disc_warmup, dim=args.dim,
                                                       teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                                       min_lr_rate=args.min_lr_rate, disc_w=args.disc_w,
@@ -837,8 +846,8 @@ if __name__ == "__main__":
         enhancer.to(f'cuda:{devices[0]}')
         items = test_dataset.load_files(resize=True)
         orig_images = torch.stack([item[args.orig] for item in items], dim=0)
-        if args.prep:
-            lr_images = torch.stack([item[args.sample_br] for item in items], dim=0)
+        if args.test_prep:
+            lr_images = torch.stack([item[args.bitrate] for item in items], dim=0)
         else:
             lr_images = torch.nn.functional.interpolate(orig_images, scale_factor=1 / args.scale, mode='bicubic')
         sr_images = to_image(enhancer.upscale_images(lr_images))
@@ -854,13 +863,18 @@ if __name__ == "__main__":
                                  dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                  batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
                                  disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
-                                 samples_epoch=args.samples_epoch, scale=args.scale, sample_mode=args.sample_mode,
+                                 samples_epoch=args.samples_epoch, scale=args.scale, bitrate=args.bitrate,
                                  random_filters_kernel=args.random_filters_kernel, orig=args.orig,
                                  tile=args.tile, tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
+
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
+                                                           filename=os.path.basename(args.out_model_name))
+        early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=3, min_delta=1e-3)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                           strategy=DDPStrategy(find_unused_parameters=True), precision=16,
-                          profiler=args.profile,
+                          profiler=args.profile, check_val_every_n_epoch=5,
                           accumulate_grad_batches=args.acc_grads,
-                          accelerator='gpu', devices=devices, callbacks=[checkpoint_callback])
+                          accelerator='gpu', devices=devices,
+                          callbacks=[checkpoint_callback, early_stopping])
         trainer.fit(enhancer)
