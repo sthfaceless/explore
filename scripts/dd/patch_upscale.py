@@ -789,9 +789,8 @@ class ImageEnhancer(pl.LightningModule):
         schedulers = self.lr_schedulers()
         schedulers = schedulers if isinstance(schedulers, list) else [schedulers]
         for sch in schedulers:
-            if type(sch) is dict:
-                interval = sch['interval']
-                sch = sch['scheduler']
+            if type(sch) is torch.optim.lr_scheduler.OneCycleLR:
+                interval = 'step'
             else:
                 interval = 'epoch'
             if interval == 'step':
