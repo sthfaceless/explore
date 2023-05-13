@@ -26,7 +26,7 @@ import clearml
 
 
 def nonlinear(x):
-    return torch.nn.functional.silu(x)
+    return torch.nn.functional.leaky_relu(x, negative_slope=0.3)
 
 
 def get_YUV(R, G, B):
@@ -741,8 +741,10 @@ class ImageEnhancer(pl.LightningModule):
 
         # log images
         self.custom_logger.log_images(tensor2list(to_image(orig_images)), prefix='orig', epoch=self.current_epoch)
+        self.custom_logger.log_images(tensor2list(to_image(down_sampled)), prefix='lr', epoch=self.current_epoch)
         self.custom_logger.log_images(tensor2list(to_image(upscaled_images)), prefix='upscaled',
                                       epoch=self.current_epoch)
+
 
         metrics = self.base_metrics(upscaled_images, orig_images)
         for k, v in metrics.items():
