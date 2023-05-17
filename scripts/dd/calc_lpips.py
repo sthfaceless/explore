@@ -40,7 +40,7 @@ if __name__ == "__main__":
         device = torch.device("cpu")
 
     # from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-    metric_fn = lpips.LPIPS(net='alex')
+    metric_fn = lpips.LPIPS(net='alex').to(device)
 
     agg_metrics = []
     for orig, distorted in tqdm(zip(args.videos[::2], args.videos[1::2])):
@@ -73,9 +73,11 @@ if __name__ == "__main__":
             orig_frames = (orig_frames / 127.5 - 1.0).movedim(-1, -3)
             distorted_frames = (distorted_frames / 127.5 - 1.0).movedim(-1, -3)
 
-            metrics.append(metric_fn(orig_frames, distorted_frames))
+            with torch.no_grad():
+                metrics.append(metric_fn(orig_frames, distorted_frames).mean())
 
             processed += len(orig_frames)
+            pbar.update(len(orig_frames))
         pbar.close()
 
         orig_video.release()

@@ -857,7 +857,8 @@ def get_parser():
     parser.add_argument("--orig", default='hr', help="Name for original images folder")
     parser.add_argument("--test_dataset", default=[], nargs='+', help="Path to folders with test images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
-    parser.add_argument("--videos", default=None, help="Path to videos to upscale")
+    parser.add_argument("--videos", default=None, nargs='+', help="Path to videos to upscale")
+    parser.add_argument("--video_suffix", default="upscaled", help="Suffix for upscaled videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
@@ -1001,7 +1002,7 @@ if __name__ == "__main__":
                         if not ret:
                             break
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        frame = cv2.resize(frame, (ww, hh), interpolation=cv2.INTER_AREA)
+                        # frame = cv2.resize(frame, (ww, hh), interpolation=cv2.INTER_AREA)
 
                         frames.append(to_tensor(frame))
 
