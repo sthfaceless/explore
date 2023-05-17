@@ -20,13 +20,13 @@ import matplotlib.pyplot as plt
 from einops import rearrange, reduce, repeat
 import requests
 from concurrent.futures import ProcessPoolExecutor
-
+from tqdm import tqdm
 from argparse import ArgumentParser
 import clearml
 
 
 def nonlinear(x):
-    return torch.nn.functional.leaky_relu(x, negative_slope=0.3)
+    return torch.nn.functional.silu(x)
 
 
 def get_YUV(R, G, B):
@@ -857,6 +857,7 @@ def get_parser():
     parser.add_argument("--orig", default='hr', help="Name for original images folder")
     parser.add_argument("--test_dataset", default=[], nargs='+', help="Path to folders with test images")
     parser.add_argument("--sample", default=None, help="Path to checkpoint model")
+    parser.add_argument("--videos", default=None, help="Path to videos to upscale")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
@@ -975,17 +976,56 @@ if __name__ == "__main__":
                                                       samples_epoch=args.samples_epoch, scale=args.scale,
                                                       tile=args.tile, tile_pad=args.tile_pad, orig=args.orig)
         enhancer.to(f'cuda:{devices[0]}')
-        items = test_dataset.load_files(resize=True)
-        orig_images = torch.stack([item[args.orig] for item in items], dim=0)
-        if args.test_prep:
-            lr_images = torch.stack([item[args.bitrate] for item in items], dim=0)
-        else:
-            lr_images = torch.nn.functional.interpolate(orig_images, scale_factor=1 / args.scale, mode='bicubic')
-        sr_images = to_image(enhancer.upscale_images(lr_images))
+        if args.videos:
+            for video in args.videos:
+                cap = cv2.VideoCapture(video)
+                video_fps = int(cap.get(cv2.CAP_PROP_FPS))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                nframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        enhancer.custom_logger.log_images(tensor2list(to_image(lr_images)), prefix='lr', epoch=0)
-        enhancer.custom_logger.log_images(tensor2list(to_image(orig_images)), prefix='orig', epoch=0)
-        enhancer.custom_logger.log_images(tensor2list(to_image(sr_images)), prefix='sr', epoch=0)
+                hh, ww = height * args.scale, width * args.scale
+
+                path = os.path.splitext(video)[0] + '_upscaled.avi'
+
+                # fourcc = cv2.VideoWriter_fourcc(*'FFV1')
+                writer = cv2.VideoWriter(path, apiPreference=0, fourcc=0, fps=video_fps, frameSize=(ww, hh))
+
+                processed = 0
+                pbar = tqdm(total=nframes)
+                while processed < nframes:
+                    frames = []
+                    for frame_id in range(args.full_batch_size):
+                        # cap.set(cv2.CAP_PROP_POS_FRAMES, 1000 + frame_id)
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        frame = cv2.resize(frame, (ww, hh), interpolation=cv2.INTER_AREA)
+
+                        frames.append(to_tensor(frame))
+
+                    tensor = enhancer.upscale_images(torch.stack(frames, dim=0).to(enhancer.device))
+                    for frame in tensor2list(to_image(tensor)):
+                        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    
+                    processed += len(frames)
+                    pbar.update(len(frames))
+                pbar.close()
+                cap.release()
+                writer.release()
+        else:
+            items = test_dataset.load_files(resize=True)
+            orig_images = torch.stack([item[args.orig] for item in items], dim=0)
+            if args.test_prep:
+                lr_images = torch.stack([item[args.bitrate] for item in items], dim=0)
+            else:
+                lr_images = torch.nn.functional.interpolate(orig_images, scale_factor=1 / args.scale, mode='bicubic')
+            sr_images = to_image(enhancer.upscale_images(lr_images))
+
+            enhancer.custom_logger.log_images(tensor2list(to_image(lr_images)), prefix='lr', epoch=0)
+            enhancer.custom_logger.log_images(tensor2list(to_image(orig_images)), prefix='orig', epoch=0)
+            enhancer.custom_logger.log_images(tensor2list(to_image(sr_images)), prefix='sr', epoch=0)
     else:
         enhancer = ImageEnhancer(model=model, dataset=dataset, test_dataset=test_dataset, clearml=logger, disc=disc,
                                  in_channels=args.in_channels, random_filters=args.random_filters, teacher=teacher,
