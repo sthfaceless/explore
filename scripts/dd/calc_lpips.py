@@ -88,5 +88,6 @@ if __name__ == "__main__":
         print(f'LPIPS for video {distorted}, mean --- {metrics.mean()} std --- {metrics.std()}')
         agg_metrics.append(metrics.mean())
 
+    agg_metrics = torch.stack(agg_metrics)
     print(f'LPIPS average for videos {agg_metrics.mean()}')
     print(f'LPIPS std for videos {agg_metrics.std()}')
