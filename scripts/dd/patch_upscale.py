@@ -652,13 +652,13 @@ class ImageEnhancer(pl.LightningModule):
         # discriminator must learn how fake the example looks like
         preds = self.disc(torch.cat([upscaled, self.get_sr(batch)], dim=0))
         target = torch.ones_like(preds)
-        target[len(upscaled):] = -1
+        target[len(upscaled):] = torch.rand_like(target[len(upscaled):]) * 0.1
 
-        # values = target * torch.log(preds + 1e-6) + (1 - target) * torch.log(1 - preds + 1e-6)
-        # bce_loss = - torch.mean(torch.nan_to_num(values, nan=0, posinf=1, neginf=-1))
-        hinge_loss = torch.mean(torch.maximum(torch.zeros_like(preds), 1 - target * (preds * 2 - 1.0)))
+        values = target * torch.log(preds + 1e-6) + (1 - target) * torch.log(1 - preds + 1e-6)
+        bce_loss = - torch.mean(torch.nan_to_num(values, nan=0, posinf=1, neginf=-1))
+        # hinge_loss = torch.mean(torch.maximum(torch.zeros_like(preds), 1 - target * (preds * 2 - 1.0)))
 
-        return hinge_loss
+        return bce_loss
 
     def base_metrics(self, x, sr):
         x_normalized = torch_convert_YUV2RGB(x * 0.5 + 0.5).clip(0, 1)
@@ -710,7 +710,7 @@ class ImageEnhancer(pl.LightningModule):
         # adversarial based loss
         if self.disc and self.current_epoch >= self.disc_warmup:
             # we want to minimize example falseness estimated by discriminator
-            loss['adv_loss'] = torch.mean(self.disc(x))
+            loss['adv_loss'] = - torch.mean(torch.log(1 - self.disc(x) + 1e-6))
             loss['loss'] += loss['adv_loss'] * self.disc_w
 
         if self.teacher:
@@ -868,7 +868,7 @@ class ImageEnhancer(pl.LightningModule):
 
     def configure_optimizers(self):
         params = list(self.model.parameters()) + (list(self.teacher_projection.parameters()) if self.teacher else [])
-        optimizer = torch.optim.Adam(lr=self.learning_rate, params=params, betas=(0.9, 0.99))
+        optimizer = torch.optim.AdamW(lr=self.learning_rate, params=params, betas=(0.9, 0.99), weight_decay=0.001)
         optimizers = [optimizer]
 
         scheduler = {
@@ -882,7 +882,7 @@ class ImageEnhancer(pl.LightningModule):
         schedulers = [scheduler]
 
         if self.disc:
-            optimizers += [torch.optim.Adam(lr=self.disc_lr, params=self.disc.parameters(), betas=(0.9, 0.99))]
+            optimizers += [torch.optim.SGD(lr=self.disc_lr, params=self.disc.parameters())]
 
         return optimizers, schedulers
 
