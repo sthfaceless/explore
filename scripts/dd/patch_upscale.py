@@ -95,7 +95,9 @@ def center_crop(tensor, shape):
     # cut to shape
     h_tile = tensor.shape[-2] - shape[-2]
     w_tile = tensor.shape[-1] - shape[-1]
-    tensor = tensor[:, :, h_tile // 2 + h_tile % 2: -h_tile // 2, w_tile // 2 + w_tile % 2: -w_tile // 2]
+    h_slice = slice(h_tile // 2 + h_tile % 2, -h_tile // 2) if h_tile > 0 else slice(None)
+    w_slice = slice(w_tile // 2 + w_tile % 2, -w_tile // 2) if w_tile > 0 else slice(None)
+    tensor = tensor[:, :, h_slice, w_slice]
     return tensor
 
 
@@ -531,6 +533,19 @@ class PatchSRImages(SRImagesBase, torch.utils.data.IterableDataset):
             return self.load_patch(choice(self.cache))
 
 
+class TrainSRImages(SRImagesBase, torch.utils.data.Dataset):
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        obj = self.load_file(self.find_files()[idx], resize=True)
+        return {
+            'lr': obj[self.orig],
+            'sr': obj[choice([k for k in obj.keys() if k != self.orig])] if self.bitrate is None else obj[self.bitrate]
+        }
+
+
 class FullSRImages(SRImagesBase, torch.utils.data.Dataset):
 
     def __len__(self):
@@ -774,7 +789,7 @@ class ImageEnhancer(pl.LightningModule):
         if self.patched:
             return self.patch_upscale(images)
         images_device = images.device
-        return self.forward(images.to(self.device)).to(images_device)
+        return self.forward(images.to(self.device), train=False).to(images_device)
 
     def __load_dataset_items(self, dataset, k):
         return [dataset.load_file(file, resize=True)
@@ -895,7 +910,10 @@ class ImageEnhancer(pl.LightningModule):
     def train_dataloader(self):
         if self.patched:
             self.dataset.reset_cache()
-        return torch.utils.data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=not self.patched,
+            batch_size = self.batch_size
+        else:
+            batch_size = self.full_batch_size
+        return torch.utils.data.DataLoader(self.dataset, batch_size=batch_size, shuffle=not self.patched,
                                            num_workers=4 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
 
@@ -1006,7 +1024,7 @@ if __name__ == "__main__":
                                 cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep, orig=args.orig,
                                 bitrate=args.train_bitrate)
     else:
-        dataset = FullSRImages(folder=args.dataset, scale=args.scale, orig=args.orig, w=args.w, h=args.h,
+        dataset = TrainSRImages(folder=args.dataset, scale=args.scale, orig=args.orig, w=args.w, h=args.h,
                                preprocessed=args.prep, bitrate=args.train_bitrate)
     test_dataset = FullSRImages(folder=args.test_dataset if args.test_dataset else args.dataset,
                                 scale=args.scale, orig=args.orig, w=args.w, h=args.h,
