@@ -667,7 +667,7 @@ class ImageEnhancer(pl.LightningModule):
             upscaled = self.forward(batch['lr'], train=True)[0]
 
         # discriminator must learn how fake the example looks like
-        preds = self.disc(torch.cat([upscaled, self.get_sr(batch)], dim=0))
+        preds = self.disc(torch.cat([upscaled, self.fixpad(batch['sr'])], dim=0))
         target = torch.ones_like(preds)
         target[len(upscaled):] = torch.rand_like(target[len(upscaled):]) * 0.1
 
