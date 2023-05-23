@@ -1126,8 +1126,8 @@ if __name__ == "__main__":
 
         checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                            filename=os.path.basename(args.out_model_name),
-                                                           monitor='val_loss', mode='min')
-        early_stopping = pl.callbacks.EarlyStopping(monitor="val_loss", mode="min", patience=10, min_delta=1e-4)
+                                                           monitor='val_psnr', mode='max')
+        early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=10, min_delta=1e-3)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                           strategy=DDPStrategy(find_unused_parameters=True), precision=16,
