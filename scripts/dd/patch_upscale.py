@@ -1047,14 +1047,15 @@ if __name__ == "__main__":
 
                 hh, ww = height * args.scale, width * args.scale
 
-                path = os.path.splitext(video)[0] + '_upscaled.avi'
+                path = os.path.splitext(video)[0] + f'_{args.video_suffix}.avi'
 
                 # fourcc = cv2.VideoWriter_fourcc(*'FFV1')
                 # writer = cv2.VideoWriter(path, apiPreference=0, fourcc=0, fps=video_fps, frameSize=(ww, hh))
-                writer = FFmpegWriter(path, {
+                writer = FFmpegWriter(path, outputdict={
                     '-vcodec': 'libx264',
-                    'crf': '0',
-                    'preset': 'ultrafast'
+                    '-crf': '0',
+                    '-preset': 'ultrafast',
+                    '-r': f'{video_fps}'
                 })
                 processed = 0
                 pbar = tqdm(total=nframes)
