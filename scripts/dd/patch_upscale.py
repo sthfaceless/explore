@@ -24,6 +24,8 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 import clearml
 
+from skvideo.io import FFmpegWriter
+
 
 def nonlinear(x):
     return torch.nn.functional.silu(x)
@@ -1048,8 +1050,12 @@ if __name__ == "__main__":
                 path = os.path.splitext(video)[0] + '_upscaled.avi'
 
                 # fourcc = cv2.VideoWriter_fourcc(*'FFV1')
-                writer = cv2.VideoWriter(path, apiPreference=0, fourcc=0, fps=video_fps, frameSize=(ww, hh))
-
+                # writer = cv2.VideoWriter(path, apiPreference=0, fourcc=0, fps=video_fps, frameSize=(ww, hh))
+                writer = FFmpegWriter(path, {
+                    '-vcodec': 'libx264',
+                    'crf': '0',
+                    'preset': 'ultrafast'
+                })
                 processed = 0
                 pbar = tqdm(total=nframes)
                 while processed < nframes:
@@ -1066,13 +1072,14 @@ if __name__ == "__main__":
 
                     tensor = enhancer.upscale_images(torch.stack(frames, dim=0).to(enhancer.device))
                     for frame in tensor2list(to_image(tensor)):
-                        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                        # writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                        writer.writeFrame(frame)
 
                     processed += len(frames)
                     pbar.update(len(frames))
                 pbar.close()
                 cap.release()
-                writer.release()
+                writer.close()
         else:
             items = test_dataset.load_files(resize=True)
             orig_images = torch.stack([item[args.orig] for item in items], dim=0)
