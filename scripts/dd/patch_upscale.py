@@ -525,7 +525,7 @@ class PatchSRImages(SRImagesBase, torch.utils.data.IterableDataset):
         return self
 
     def __next__(self):
-        if self.cache_size < 0:
+        if self.cache_size < 0 or len(self.cache) == 0:
             # update list in case of new files
             file = choice(self.find_files())
             return self.load_patch(self.load_file(file))
@@ -686,7 +686,7 @@ class ImageEnhancer(pl.LightningModule):
                 x_normalized, sr_normalized, data_range=1.0)
         }
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def call_teacher(self, lr, window_size=8):
         # upscale model with teacher
         patches = torch_convert_YUV2RGB(lr * 0.5 + 0.5)
@@ -784,7 +784,7 @@ class ImageEnhancer(pl.LightningModule):
 
         return upscaled
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def upscale_images(self, images):
         if self.patched:
             return self.patch_upscale(images)
@@ -795,7 +795,26 @@ class ImageEnhancer(pl.LightningModule):
         return [dataset.load_file(file, resize=True)
                 for file in choices(dataset.find_files(), k=k)]
 
+    def on_train_epoch_end(self):
+        # log model weights and grads
+        data_iter = iter(self.trainer.train_dataloader)
+        batch = {k: v.to(self.device) for k, v in next(data_iter).items()}
+        self.model.zero_grad(set_to_none=True)
+        loss = self.upscale_step(batch)
+        loss['loss'].backward()
+
+        for name, param in self.model.named_parameters():
+            if (not "weight" in name) or (param.grad is None):
+                continue
+            self.custom_logger.log_distribution(param.grad.view(-1).cpu().numpy(), f'{name}_grad', self.current_epoch)
+            self.custom_logger.log_distribution(param.detach().view(-1).cpu().numpy(), name, self.current_epoch)
+        self.model.zero_grad(set_to_none=True)
+
     def on_validation_epoch_end(self):
+
+        metrics = self.trainer.logged_metrics
+        for name, value in metrics.items():
+            self.custom_logger.log_value(value, name, epoch=self.current_epoch)
 
         # get original SR images and down sample them
         test_items = self.__load_dataset_items(self.test_dataset, self.samples_epoch)
@@ -820,6 +839,11 @@ class ImageEnhancer(pl.LightningModule):
 
         if self.debug:
             self.log('learning_rate', self.lr_schedulers().get_last_lr()[0], prog_bar=True)
+
+        # log aggregated metrics
+        metrics = self.trainer.logged_metrics
+        for name, value in metrics.items():
+            self.custom_logger.log_value(value.item(), name, self.current_epoch)
 
     def training_step(self, batch, batch_idx):
 
@@ -859,7 +883,7 @@ class ImageEnhancer(pl.LightningModule):
         schedulers = self.lr_schedulers()
         schedulers = schedulers if isinstance(schedulers, list) else [schedulers]
         for sch in schedulers:
-            if type(sch) is torch.optim.lr_scheduler.OneCycleLR:
+            if type(sch) is torch.optim.lr_scheduler.CosineAnnealingWarmRestarts:
                 interval = 'step'
             else:
                 interval = 'epoch'
@@ -883,17 +907,60 @@ class ImageEnhancer(pl.LightningModule):
         for k, v in metrics.items():
             self.log(f'val_{k}', v, prog_bar=True, sync_dist=True)
 
+    def find_lr(self, min_lr=1e-6, max_lr=1.0, steps=1000, acc_grad=1, optimizer_id=0, monitor='loss', max_factor=10.0):
+
+        # setup optimizer
+        optims, _ = self.configure_optimizers()
+        optim = optims[optimizer_id]
+
+        data_iter = iter(self.train_dataloader())
+        best_loss, best_lr = 1e9, min_lr
+        values, lrs = [], []
+        pb_steps = tqdm(range(steps), desc='Finding learning rate')
+        for step_id in pb_steps:
+
+            lr = min_lr * np.e ** (step_id / steps * np.log(max_lr / min_lr))
+            lrs.append(lr)
+            for g in optim.param_groups:
+                g['lr'] = lr
+
+            optim.zero_grad(set_to_none=True)
+
+            value = 0
+            for acc_id in range(acc_grad):
+                batch = {k: v.to(self.device) for k, v in next(data_iter).items()}
+                loss = self.upscale_step(batch)
+                (loss['loss'] / acc_grad).backward()
+                value += loss[monitor].item() / acc_grad
+
+            values.append(value)
+
+            optim.step()
+
+            if value < best_loss:
+                best_loss = value
+                best_lr = min_lr
+
+            if step_id > 0 and value > best_loss * max_factor:
+                break
+
+            pb_steps.set_description(
+                f'Step [{step_id + 1}/{steps}] [lr:{lrs[-1]:.8f}] [loss:{values[-1]:.6f}] [best_loss:{best_loss:.6f}]',
+                refresh=True)
+        pb_steps.close()
+        self.custom_logger.log_line(x=np.asarray(lrs),
+                                    y=np.clip(np.asarray(values), a_min=0.0, a_max=best_loss * max_factor),
+                                    name='learning rate')
+        return best_lr
+
     def configure_optimizers(self):
         params = list(self.model.parameters()) + (list(self.teacher_projection.parameters()) if self.teacher else [])
-        optimizer = torch.optim.AdamW(lr=self.learning_rate, params=params, betas=(0.9, 0.99), weight_decay=0.001)
+        optimizer = torch.optim.AdamW(lr=self.learning_rate * self.min_lr_rate, params=params, betas=(0.9, 0.99), weight_decay=0.001)
         optimizers = [optimizer]
 
         scheduler = {
-            'scheduler': torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate,
-                                                             pct_start=3 / self.epochs,
-                                                             div_factor=1 / self.initial_lr_rate,
-                                                             final_div_factor=self.initial_lr_rate / self.min_lr_rate,
-                                                             epochs=self.epochs, steps_per_epoch=self.steps),
+            'scheduler': torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, self.steps, T_mult=2, eta_min=self.learning_rate),
             'interval': 'step'
         }
         schedulers = [scheduler]
@@ -918,7 +985,7 @@ class ImageEnhancer(pl.LightningModule):
                                            pin_memory=True, prefetch_factor=2)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.full_batch_size, shuffle=True,
+        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.full_batch_size, shuffle=False,
                                            num_workers=4 * torch.cuda.device_count(),
                                            pin_memory=True, prefetch_factor=2)
 
@@ -937,12 +1004,13 @@ def get_parser():
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
     parser.add_argument("--train_bitrate", default=None, help="Bitrate folder for train")
     parser.add_argument("--bitrate", default='b4', help="Bitrate folder for evaluate")
+    parser.add_argument("--find_lr", action='store_true', help='whether dataset was preprocessed')
     parser.add_argument("--prep", action='store_true', help='whether dataset was preprocessed')
     parser.add_argument("--patch", action='store_true', help='whether to use patches for training')
     parser.add_argument("--test_prep", action='store_true', help='whether test dataset was preprocessed')
-    parser.set_defaults(prep=False, test_prep=False, patch=False)
+    parser.set_defaults(prep=False, test_prep=False, patch=False, find_lr=False)
     # Training settings
-    parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate for model")
+    parser.add_argument("--lr", default=2e-3, type=float, help="Learning rate for model")
     parser.add_argument("--disc_lr", default=1e-4, type=float, help="Learning rate for discriminator")
     parser.add_argument("--disc_w", default=1e-2, type=float, help="Weight for adversarial loss")
     parser.add_argument("--disc_warmup", default=3, type=int, help="Discriminator warmup epochs")
@@ -950,10 +1018,11 @@ def get_parser():
     parser.add_argument("--teacher_rate", default=1.0, type=float, help="How much of teacher image to use for training")
     parser.add_argument("--teacher_w", default=1e-4, type=float, help="Weight for teacher features similarity loss")
     parser.add_argument("--teacher_dim", default=60, type=int, help="Teacher feature dimension")
-    parser.add_argument("--min_lr_rate", default=0.01, type=float, help="Minimal LR ratio to decay")
+    parser.add_argument("--min_lr_rate", default=0.1, type=float, help="Minimal LR ratio to decay")
     parser.add_argument("--initial_lr_rate", default=0.1, type=float, help="Initial LR ratio")
     parser.add_argument("--epochs", default=100, type=int, help="Epochs in training")
     parser.add_argument("--steps", default=1000, type=int, help="Steps in training")
+    parser.add_argument("--val_steps", default=500, type=int, help="Steps in validation")
     parser.add_argument("--batch_size", default=2048, type=int, help="Batch size in training")
     parser.add_argument("--full_batch_size", default=4, type=int, help="Batch size for full images in valid")
     parser.add_argument("--acc_grads", default=1, type=int,
@@ -1131,8 +1200,13 @@ if __name__ == "__main__":
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                           strategy=DDPStrategy(find_unused_parameters=True), precision=16,
-                          profiler=args.profile, check_val_every_n_epoch=5, limit_val_batches=100,
+                          profiler=args.profile, check_val_every_n_epoch=1, limit_val_batches=args.val_steps,
                           accumulate_grad_batches=args.acc_grads,
                           accelerator='gpu', devices=devices,
                           callbacks=[checkpoint_callback, early_stopping])
-        trainer.fit(enhancer)
+        if args.find_lr:
+            enhancer.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            best_lr = enhancer.find_lr(steps=args.steps, acc_grad=args.acc_grads)
+            print(f'Best lr --- {best_lr}')
+        else:
+            trainer.fit(enhancer)

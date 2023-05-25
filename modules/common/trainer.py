@@ -50,6 +50,12 @@ class SimpleLogger:
         if not os.path.exists(tmpdir):
             os.makedirs(tmpdir, exist_ok=True)
 
+    def log_value(self, value, name, epoch=0, kind='val'):
+        if self.clearml:
+            self.clearml.report_scalar(name, kind, iteration=epoch, value=value)
+        else:
+            print(f'{name} --- {value}')
+
     def log_image(self, image, name, epoch=0):
         path = f"{self.tmpdir}/{name}.png"
         Image.fromarray(image).save(path)
@@ -86,7 +92,7 @@ class SimpleLogger:
 
     def log_plot(self, plt, name, epoch=0):
         if self.clearml:
-            self.clearml.report_matplotlib_figure(title=name, series="valid", iteration=epoch, figure=plt)
+            self.clearml.report_matplotlib_figure(title=name, series=f"valid", iteration=epoch, figure=plt)
         else:
             plt.savefig(f"{self.tmpdir}/{name}_{epoch}.png")
         plt.close()
@@ -97,6 +103,10 @@ class SimpleLogger:
 
     def log_values(self, values, name, epoch=0):
         sns.lineplot(values)
+        self.log_plot(plt, name, epoch)
+
+    def log_line(self, x, y, name, epoch=0):
+        sns.lineplot(x=x, y=y)
         self.log_plot(plt, name, epoch)
 
     def _log_scatter2d(self, x, y, name, color=None, epoch=0):
