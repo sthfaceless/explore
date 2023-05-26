@@ -8,6 +8,7 @@ import os
 import cv2
 from random import choice, randint, shuffle, choices, random
 import gc
+from itertools import chain
 
 import torch
 import torchvision
@@ -147,7 +148,10 @@ class MobileBlock(torch.nn.Module):
     def __init__(self, dim, in_dim=-1, kernel_size=3, group=4, fft=False):
         super(MobileBlock, self).__init__()
         self.fft = fft
+        self.dim = dim
         self.in_dim = in_dim if in_dim > 0 else dim
+        if self.in_dim != dim:
+            self.skip_conv = torch.nn.Conv2d(in_dim, dim, kernel_size=1)
 
         self.conv1 = torch.nn.Conv2d(in_dim, dim, kernel_size=kernel_size, padding=kernel_size // 2,
                                      groups=self.in_dim // group)
@@ -163,7 +167,7 @@ class MobileBlock(torch.nn.Module):
         h = self.conv2_linear(self.conv2(nonlinear(h)))
         if self.fft:
             h = torch.fft.fft2(x, norm='ortho').real
-
+        x = x if self.in_dim == self.dim else self.skip_conv(x)
         return (h + x) / 2 ** 0.5
 
 
@@ -262,17 +266,26 @@ class UpSample2d(torch.nn.Module):
 
 class MobileEnhancer(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=32, input_kernel=5, pad_input=False, n_blocks=4, scale=2, fft=False):
+    def __init__(self, in_channels=1, dim=32, input_kernel=5, pad_input=False, n_blocks=4, scale=2, fft=False,
+                 enhance=True, upscale_mode='nearest-exact', n_layers=1):
         super(MobileEnhancer, self).__init__()
         self.in_channels = in_channels
         self.scale = scale
+        self.enhance = enhance
+        self.upscale_mode = upscale_mode
+
         self.input_conv = torch.nn.Conv2d(self.in_channels, dim, kernel_size=input_kernel,
                                           padding=input_kernel // 2 if pad_input else 0, stride=1)
-        self.blocks = torch.nn.ModuleList([MobileBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
+        self.blocks = torch.nn.ModuleList([])
+        for block_id in range(n_blocks):
+            if block_id > 0:
+                self.blocks.append(torch.nn.Conv2d(dim * 2 ** (block_id - 1), dim * 2 ** block_id, kernel_size=1))
+            for _ in range(n_layers):
+                self.blocks.append(MobileBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft))
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
-        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bicubic')
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode=self.upscale_mode)
 
         # extract channels
         h = x[:, :self.in_channels]
@@ -292,7 +305,10 @@ class MobileEnhancer(torch.nn.Module):
 
         # get updated and remained part
         upscaled = center_crop(upscaled, h.shape)
-        result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        if self.enhance:
+            result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        else:
+            result = torch.cat((h, upscaled[:, self.in_channels:]), dim=-3)
         if return_features:
             return result, features
 
@@ -301,17 +317,25 @@ class MobileEnhancer(torch.nn.Module):
 
 class ResNetEnhancer(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=32, input_kernel=5, pad_input=False, n_blocks=4, scale=2, fft=False):
+    def __init__(self, in_channels=1, dim=32, input_kernel=5, pad_input=False, n_blocks=4, scale=2, fft=False,
+                 enhance=False, upscale_mode='nearest-exact', n_layers=1):
         super(ResNetEnhancer, self).__init__()
         self.in_channels = in_channels
         self.scale = scale
+        self.enhance = enhance
+        self.upscale_mode = upscale_mode
         self.input_conv = torch.nn.Conv2d(self.in_channels, dim, kernel_size=input_kernel,
                                           padding=input_kernel // 2 if pad_input else 0, stride=1)
-        self.blocks = torch.nn.ModuleList([FeatureBlock(dim, dim, fft=fft) for _ in range(n_blocks)])
+        self.blocks = torch.nn.ModuleList([])
+        for block_id in range(n_blocks):
+            if block_id > 0:
+                self.blocks.append(torch.nn.Conv2d(dim * 2 ** (block_id - 1), dim * 2 ** block_id, kernel_size=1))
+            for _ in range(n_layers):
+                self.blocks.append(FeatureBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft))
         self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
-        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bicubic')
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode=self.upscale_mode)
 
         # extract channels
         h = x[:, :self.in_channels]
@@ -331,7 +355,10 @@ class ResNetEnhancer(torch.nn.Module):
 
         # get updated and remained part
         upscaled = center_crop(upscaled, h.shape)
-        result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        if self.enhance:
+            result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        else:
+            result = torch.cat((h, upscaled[:, self.in_channels:]), dim=-3)
         if return_features:
             return result, features
 
@@ -340,14 +367,17 @@ class ResNetEnhancer(torch.nn.Module):
 
 class UNetEnhancer(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=32, n_blocks=3, scale=2, input_kernel=3, pad_input=True, fft=False):
+    def __init__(self, in_channels=1, dim=32, n_blocks=3, scale=2, input_kernel=3, pad_input=True, fft=False,
+                 n_layers=2, enhance=True, upscale_mode='nearest-exact'):
         super(UNetEnhancer, self).__init__()
         self.in_channels = in_channels
         self.scale = scale
+        self.enhance = enhance
+        self.upscale_mode = upscale_mode
         self.input_conv = torch.nn.Conv2d(self.in_channels, dim, kernel_size=input_kernel,
                                           padding=input_kernel // 2 if pad_input else 0, stride=1)
         self.down_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
-            [FeatureBlock(dim * 2 ** idx, fft=fft) for _ in range(1)])
+            [FeatureBlock(dim * 2 ** idx, fft=fft) for _ in range(n_layers)])
             for idx in range(n_blocks)])
         self.downs = torch.nn.ModuleList(
             [DownSample2d(dim * 2 ** (idx - 1), dim * 2 ** idx) for idx in range(1, n_blocks)])
@@ -355,7 +385,7 @@ class UNetEnhancer(torch.nn.Module):
 
         self.up_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
             [FeatureBlock(dim * 2 ** idx, in_dim=(int(block_id == 0 and idx != n_blocks - 1) + 1) * dim * 2 ** idx,
-                          fft=fft) for block_id in range(1)]) for idx in reversed(range(n_blocks))])
+                          fft=fft) for block_id in range(n_layers)]) for idx in reversed(range(n_blocks))])
         self.ups = torch.nn.ModuleList([UpSample2d(dim * 2 ** idx, dim * 2 ** (idx - 1)) for idx in
                                         reversed(range(1, n_blocks))])
         self.ups.append(torch.nn.Identity())
@@ -363,7 +393,7 @@ class UNetEnhancer(torch.nn.Module):
 
     def forward(self, x, return_features=False):
         # upscale initial patch for enhancing
-        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode='bicubic')
+        upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode=self.upscale_mode)
 
         # extract channels
         h = self.input_conv(upscaled[:, :self.in_channels])
@@ -392,7 +422,10 @@ class UNetEnhancer(torch.nn.Module):
 
         # get updated and remained part
         upscaled = center_crop(upscaled, h.shape)
-        result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        if self.enhance:
+            result = torch.cat((upscaled[:, :self.in_channels] + h, upscaled[:, self.in_channels:]), dim=-3)
+        else:
+            result = torch.cat((h, upscaled[:, self.in_channels:]), dim=-3)
         if return_features:
             return result, features
 
@@ -416,14 +449,19 @@ class SRImagesBase:
         if type(folder) is not list:
             folder = [folder]
         self.folder = folder
+        self.offsets = []
+        self.sizes = []
         self.files = self.find_files()
 
         self.cache_size = cache_size
         self.cache = []
 
     def find_files(self):
-        self.files = [os.path.join(f, file) for f in self.folder for file in os.listdir(f) if
-                      os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')]
+        folders = [[os.path.join(folder, file) for file in os.listdir(folder) if
+                    os.path.splitext(file)[1] in ('.png', '.jpg', '.jpeg')] for folder in self.folder]
+        self.sizes = [len(folder) for folder in folders]
+        self.offsets = [sum(self.sizes[:idx]) for idx in range(len(self.sizes))]
+        self.files = list(chain(*folders))
         return self.files
 
     def __load_file(self, file, resize=False):
@@ -539,7 +577,9 @@ class TrainSRImages(SRImagesBase, torch.utils.data.Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        obj = self.load_file(self.find_files()[idx], resize=True)
+        group_id = idx % len(self.sizes)
+        idx = self.offsets[group_id] + (idx // len(self.sizes)) % self.sizes[group_id]
+        obj = self.load_file(self.files[idx], resize=True)
         return {
             'lr': obj[self.orig],
             'sr': obj[choice([k for k in obj.keys() if k != self.orig])] if self.bitrate is None else obj[self.bitrate]
@@ -581,6 +621,7 @@ class ImageEnhancer(pl.LightningModule):
                  min_lr_rate=0.01,
                  batch_size=1024,
                  full_batch_size=1,
+                 acc_grads=1,
                  epochs=300,
                  steps=1000,
                  samples_epoch=5,
@@ -636,6 +677,7 @@ class ImageEnhancer(pl.LightningModule):
         self.full_batch_size = full_batch_size
         self.steps = steps
         self.epochs = epochs
+        self.acc_grads = acc_grads
         self.samples_epoch = samples_epoch
 
     def forward(self, x, train=True, **kwargs):
@@ -719,10 +761,10 @@ class ImageEnhancer(pl.LightningModule):
         loss['loss'] = loss['aux_loss'] + loss['loss']
 
         # loss on high frequency details compared with gaussian blurred
-        # x_details = x - torchvision.transforms.functional.gaussian_blur(x, kernel_size=(5, 5))
-        # sr_details = sr - torchvision.transforms.functional.gaussian_blur(sr, kernel_size=(5, 5))
-        # loss['high_freq'] = charbonnier_loss(x_details, sr_details)
-        # loss['loss'] += loss['high_freq']
+        x_details = x - torchvision.transforms.functional.gaussian_blur(x, kernel_size=(5, 5))
+        sr_details = sr - torchvision.transforms.functional.gaussian_blur(sr, kernel_size=(5, 5))
+        loss['high_freq'] = charbonnier_loss(x_details, sr_details)
+        loss['loss'] += loss['high_freq']
 
         # adversarial based loss
         if self.disc and self.current_epoch >= self.disc_warmup:
@@ -851,16 +893,20 @@ class ImageEnhancer(pl.LightningModule):
         optimizers = self.optimizers()
         optimizer_upscale = optimizers[0] if isinstance(optimizers, list) else optimizers
         self.toggle_optimizer(optimizer_upscale, optimizer_idx=0)
-        optimizer_upscale.zero_grad(set_to_none=True)
+        if batch_idx % self.acc_grads == 0:
+            optimizer_upscale.zero_grad(set_to_none=True)
 
         # upscale patches and calculate loss
         loss = self.upscale_step(batch)
+
+        # do backward for upscaler model
+        self.manual_backward(loss['loss'] / self.acc_grads)
+
         for k, v in loss.items():
             self.log(f'train_{k}', v, prog_bar=True, sync_dist=True)
 
-        # do backward for upscaler model
-        self.manual_backward(loss['loss'])
-        optimizer_upscale.step()
+        if (batch_idx + 1) % self.acc_grads == 0:
+            optimizer_upscale.step()
         self.untoggle_optimizer(optimizer_idx=0)
 
         # train discriminator
@@ -868,15 +914,17 @@ class ImageEnhancer(pl.LightningModule):
             # enable disc optimizer
             optimizer_disc = self.optimizers()[1]
             self.toggle_optimizer(optimizer_disc, optimizer_idx=1)
-            optimizer_disc.zero_grad(set_to_none=True)
+            if batch_idx % self.acc_grads == 0:
+                optimizer_disc.zero_grad(set_to_none=True)
 
             # calculate disc loss and log it
             loss = self.disc_step(batch)
             self.log(f'disc_loss', loss, prog_bar=True, sync_dist=True)
 
             # do backward propagation over disc parameters
-            self.manual_backward(loss)
-            optimizer_disc.step()
+            self.manual_backward(loss / self.acc_grads)
+            if (batch_idx + 1) % self.acc_grads == 0:
+                optimizer_disc.step()
             self.untoggle_optimizer(optimizer_idx=1)
 
         # run lr schedulers
@@ -955,7 +1003,8 @@ class ImageEnhancer(pl.LightningModule):
 
     def configure_optimizers(self):
         params = list(self.model.parameters()) + (list(self.teacher_projection.parameters()) if self.teacher else [])
-        optimizer = torch.optim.AdamW(lr=self.learning_rate * self.min_lr_rate, params=params, betas=(0.9, 0.99), weight_decay=0.001)
+        optimizer = torch.optim.AdamW(lr=self.learning_rate * self.min_lr_rate, params=params, betas=(0.9, 0.99),
+                                      weight_decay=0.001)
         optimizers = [optimizer]
 
         scheduler = {
@@ -966,7 +1015,7 @@ class ImageEnhancer(pl.LightningModule):
         schedulers = [scheduler]
 
         if self.disc:
-            optimizers += [torch.optim.SGD(lr=self.disc_lr, params=self.disc.parameters())]
+            optimizers += [torch.optim.SGD(lr=self.disc_lr, params=self.disc.parameters(), momentum=0.9)]
 
         return optimizers, schedulers
 
@@ -1000,6 +1049,9 @@ def get_parser():
     parser.add_argument("--videos", default=None, nargs='+', help="Path to videos to upscale")
     parser.add_argument("--video_suffix", default="upscaled", help="Suffix for upscaled videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
+    parser.add_argument("--model", default="resnet", choices=['unet', 'resnet', 'mobilenet'], help="model kind")
+    parser.add_argument("--upscale_mode", default='nearest-exact',
+                        choices=['nearest-exact', 'bilinear', 'bicubic', 'area'], help="upscaling type")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
     parser.add_argument("--train_bitrate", default=None, help="Bitrate folder for train")
@@ -1007,8 +1059,9 @@ def get_parser():
     parser.add_argument("--find_lr", action='store_true', help='whether dataset was preprocessed')
     parser.add_argument("--prep", action='store_true', help='whether dataset was preprocessed')
     parser.add_argument("--patch", action='store_true', help='whether to use patches for training')
+    parser.add_argument("--enhance", action='store_true', help='whether to enhance picture or predict it')
     parser.add_argument("--test_prep", action='store_true', help='whether test dataset was preprocessed')
-    parser.set_defaults(prep=False, test_prep=False, patch=False, find_lr=False)
+    parser.set_defaults(prep=False, test_prep=False, patch=False, find_lr=False, enhance=False)
     # Training settings
     parser.add_argument("--lr", default=2e-3, type=float, help="Learning rate for model")
     parser.add_argument("--disc_lr", default=1e-4, type=float, help="Learning rate for discriminator")
@@ -1038,7 +1091,8 @@ def get_parser():
     parser.add_argument("--dim", default=16, type=int, help="Base channel")
     parser.add_argument("--disc_dim", default=128, type=int, help="Discriminator base channel")
     parser.add_argument("--in_channels", default=3, type=int, choices=[1, 3], help="1 or 3 use only Luma or Cb Cr too")
-    parser.add_argument("--n_blocks", default=3, type=int, help="Feature extraction blocks")
+    parser.add_argument("--n_blocks", default=4, type=int, help="Feature extraction blocks")
+    parser.add_argument("--n_layers", default=2, type=int, help="Layers per resolution")
     parser.add_argument("--disc_blocks", default=2, type=int, help="Discriminator blocks")
     parser.add_argument("--random_filters", default=72, type=int, help="Binary filters for loss")
     parser.add_argument("--random_filters_kernel", default=3, type=int, help="Binary filters kernel size")
@@ -1080,13 +1134,12 @@ if __name__ == "__main__":
             os.makedirs(model_path, exist_ok=True)
             open(model_path, 'wb').write(r.content)
 
-        model = Swin2SR(upscale=2, in_chans=3, img_size=64, window_size=8,
+        teacher = Swin2SR(upscale=2, in_chans=3, img_size=64, window_size=8,
                         img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
                         mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
         sd = torch.load(model_path, map_location='cpu')
-        model.load_state_dict(sd, strict=True)
-        model.eval()
-        teacher = model
+        teacher.load_state_dict(sd, strict=True)
+        teacher.eval()
 
     if args.patch:
         dataset = PatchSRImages(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
@@ -1094,35 +1147,52 @@ if __name__ == "__main__":
                                 bitrate=args.train_bitrate)
     else:
         dataset = TrainSRImages(folder=args.dataset, scale=args.scale, orig=args.orig, w=args.w, h=args.h,
-                               preprocessed=args.prep, bitrate=args.train_bitrate)
+                                preprocessed=args.prep, bitrate=args.train_bitrate)
     test_dataset = FullSRImages(folder=args.test_dataset if args.test_dataset else args.dataset,
                                 scale=args.scale, orig=args.orig, w=args.w, h=args.h,
                                 preprocessed=args.test_prep, bitrate=args.bitrate)
 
-    input_kernel = 1 + args.tile_pad * args.scale * 2 if args.patch else 3
-    model = UNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks, input_kernel=input_kernel,
-                         pad_input=not args.patch, fft=args.fft)
+    # update scale to * 1 in case of resnet
+    if args.patch:
+        if args.model == 'unet':
+            input_kernel = 1 + args.tile_pad * args.scale * 2
+        else:
+            input_kernel = 1 + args.tile_pad * args.scale
+        input_pad = True
+    else:
+        input_kernel = 3
+        input_pad = False
+
+    if args.model == 'unet':
+        model = UNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
+                             input_kernel=input_kernel, pad_input=input_pad, fft=args.fft,
+                             enhance=args.enhance, upscale_mode=args.upscale_mode, n_layers=args.n_layers)
+    elif args.model == 'resnet':
+        model = ResNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
+                               input_kernel=input_kernel, pad_input=input_pad, fft=args.fft,
+                               enhance=args.enhance, upscale_mode=args.upscale_mode, n_layers=args.n_layers)
+    else:
+        model = MobileEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
+                               input_kernel=input_kernel, pad_input=input_pad, fft=args.fft,
+                               enhance=args.enhance, upscale_mode=args.upscale_mode, n_layers=args.n_layers)
     if args.disc:
-        disc = SimpleDiscriminator(in_channels=args.in_channels, dim=args.disc_dim, n_blocks=args.disc_blocks)
+        disc = SimpleDiscriminator(in_channels=args.in_channels, dim=args.disc_dim, n_blocks=args.disc_blocks, )
     else:
         disc = None
 
     devices = list(range(torch.cuda.device_count()))
     if args.sample:
-        enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset, disc=disc,
-                                                      test_dataset=test_dataset, in_channels=args.in_channels,
-                                                      clearml=logger, teacher=teacher, disc_lr=args.disc_lr,
-                                                      teacher_rate=args.teacher_rate, ema_weight=args.ema,
-                                                      learning_rate=args.lr, full_batch_size=args.full_batch_size,
-                                                      initial_lr_rate=args.initial_lr_rate,
-                                                      bitrate=args.bitrate, patched=args.patch,
-                                                      disc_warmup=args.disc_warmup, dim=args.dim,
-                                                      teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
-                                                      min_lr_rate=args.min_lr_rate, disc_w=args.disc_w,
-                                                      random_filters_kernel=args.random_filters_kernel,
-                                                      batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
-                                                      samples_epoch=args.samples_epoch, scale=args.scale,
-                                                      tile=args.tile, tile_pad=args.tile_pad, orig=args.orig)
+        enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset, test_dataset=test_dataset, clearml=logger, disc=disc,
+                                 in_channels=args.in_channels, random_filters=args.random_filters, teacher=teacher,
+                                 teacher_rate=args.teacher_rate, ema_weight=args.ema, learning_rate=args.lr,
+                                 initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate,
+                                 dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
+                                 batch_size=args.batch_size, epochs=args.epochs, steps=args.steps * args.acc_grads,
+                                 patched=args.patch, acc_grads=args.acc_grads,
+                                 disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
+                                 samples_epoch=args.samples_epoch, scale=args.scale, bitrate=args.bitrate,
+                                 random_filters_kernel=args.random_filters_kernel, orig=args.orig,
+                                 tile=args.tile, tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
         enhancer.to(f'cuda:{devices[0]}')
         if args.videos:
             for video in args.videos:
@@ -1186,8 +1256,8 @@ if __name__ == "__main__":
                                  teacher_rate=args.teacher_rate, ema_weight=args.ema, learning_rate=args.lr,
                                  initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate,
                                  dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
-                                 batch_size=args.batch_size, epochs=args.epochs, steps=args.steps,
-                                 patched=args.patch,
+                                 batch_size=args.batch_size, epochs=args.epochs, steps=args.steps * args.acc_grads,
+                                 patched=args.patch, acc_grads=args.acc_grads,
                                  disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
                                  samples_epoch=args.samples_epoch, scale=args.scale, bitrate=args.bitrate,
                                  random_filters_kernel=args.random_filters_kernel, orig=args.orig,
@@ -1197,11 +1267,10 @@ if __name__ == "__main__":
                                                            filename=os.path.basename(args.out_model_name),
                                                            monitor='val_psnr', mode='max')
         early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=10, min_delta=1e-3)
-        trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps,
+        trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps * args.acc_grads,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
                           strategy=DDPStrategy(find_unused_parameters=True), precision=16,
                           profiler=args.profile, check_val_every_n_epoch=1, limit_val_batches=args.val_steps,
-                          accumulate_grad_batches=args.acc_grads,
                           accelerator='gpu', devices=devices,
                           callbacks=[checkpoint_callback, early_stopping])
         if args.find_lr:
