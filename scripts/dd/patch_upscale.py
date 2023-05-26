@@ -282,7 +282,7 @@ class MobileEnhancer(torch.nn.Module):
                 self.blocks.append(torch.nn.Conv2d(dim * 2 ** (block_id - 1), dim * 2 ** block_id, kernel_size=1))
             for _ in range(n_layers):
                 self.blocks.append(MobileBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft))
-        self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
+        self.out = torch.nn.Conv2d(dim * 2 ** (n_blocks - 1) // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
         upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode=self.upscale_mode)
@@ -332,7 +332,7 @@ class ResNetEnhancer(torch.nn.Module):
                 self.blocks.append(torch.nn.Conv2d(dim * 2 ** (block_id - 1), dim * 2 ** block_id, kernel_size=1))
             for _ in range(n_layers):
                 self.blocks.append(FeatureBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft))
-        self.out = torch.nn.Conv2d(dim // self.scale ** 2, in_channels, kernel_size=3, padding=1)
+        self.out = torch.nn.Conv2d(dim * 2 ** (n_blocks - 1) // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
         upscaled = torch.nn.functional.interpolate(x, scale_factor=self.scale, mode=self.upscale_mode)
