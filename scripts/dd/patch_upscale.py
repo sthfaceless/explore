@@ -928,17 +928,18 @@ class ImageEnhancer(pl.LightningModule):
             self.untoggle_optimizer(optimizer_idx=1)
 
         # run lr schedulers
-        schedulers = self.lr_schedulers()
-        schedulers = schedulers if isinstance(schedulers, list) else [schedulers]
-        for sch in schedulers:
-            if type(sch) is torch.optim.lr_scheduler.CosineAnnealingWarmRestarts:
-                interval = 'step'
-            else:
-                interval = 'epoch'
-            if interval == 'step':
-                sch.step()
-            elif interval == 'epoch' and self.trainer.is_last_batch:
-                sch.step()
+        if (batch_idx + 1) % self.acc_grads == 0:
+            schedulers = self.lr_schedulers()
+            schedulers = schedulers if isinstance(schedulers, list) else [schedulers]
+            for sch in schedulers:
+                if type(sch) is torch.optim.lr_scheduler.CosineAnnealingWarmRestarts:
+                    interval = 'step'
+                else:
+                    interval = 'epoch'
+                if interval == 'step':
+                    sch.step()
+                elif interval == 'epoch' and self.trainer.is_last_batch:
+                    sch.step()
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         if self.use_ema:
@@ -1157,11 +1158,11 @@ if __name__ == "__main__":
         if args.model == 'unet':
             input_kernel = 1 + args.tile_pad * args.scale * 2
         else:
-            input_kernel = 1 + args.tile_pad * args.scale
-        input_pad = True
+            input_kernel = 1 + args.tile_pad * 2
+        input_pad = False
     else:
         input_kernel = 3
-        input_pad = False
+        input_pad = True
 
     if args.model == 'unet':
         model = UNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
@@ -1209,10 +1210,11 @@ if __name__ == "__main__":
                 # fourcc = cv2.VideoWriter_fourcc(*'FFV1')
                 # writer = cv2.VideoWriter(path, apiPreference=0, fourcc=0, fps=video_fps, frameSize=(ww, hh))
                 writer = FFmpegWriter(path, outputdict={
-                    '-vcodec': 'libx264',
+                    # '-vcodec': 'libx264',
                     '-crf': '0',
                     '-preset': 'ultrafast',
-                    '-r': f'{video_fps}'
+                    '-r': f'{video_fps}',
+                    '-pix_fmt': 'yuv420p'
                 })
                 processed = 0
                 pbar = tqdm(total=nframes)
