@@ -219,3 +219,12 @@ def cases(tps):
         if tp[0]:
             return tp[1]
     return tps[-1]
+
+def grad_norm(model):
+    grads = [
+        param.grad.detach().flatten()
+        for param in model.parameters()
+        if param.grad is not None
+    ]
+    norm = torch.cat(grads).norm()
+    return norm

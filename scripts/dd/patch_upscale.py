@@ -28,6 +28,10 @@ import clearml
 from skvideo.io import FFmpegWriter
 
 
+# def norm(dim):
+#     return torch.nn.BatchNorm2d(dim)
+
+
 def nonlinear(x):
     return torch.nn.functional.silu(x)
 
@@ -106,12 +110,16 @@ def charbonnier_loss(x, y, eps=1e-6):
     return torch.sqrt((x - y) ** 2 + eps).mean()
 
 
-def multiscale_loss(x1, x2, scales=(1, 2)):
+def mse_loss(x, y):
+    return torch.nn.functional.mse_loss(x, y)
+
+
+def multiscale_loss(x1, x2, scales=(1, 2), loss_fn=charbonnier_loss):
     loss = 0
     for scale in scales:
         __x1 = torch.nn.functional.interpolate(x1, scale_factor=1 / scale, mode='bilinear')
         __x2 = torch.nn.functional.interpolate(x2, scale_factor=1 / scale, mode='bilinear')
-        loss += charbonnier_loss(__x1, __x2)
+        loss += loss_fn(__x1, __x2)
     return loss / len(scales)
 
 
@@ -173,22 +181,31 @@ class MobileBlock(torch.nn.Module):
 
 class FeatureBlock(torch.nn.Module):
 
-    def __init__(self, dim, in_dim=-1, kernel_size=3, fft=False):
+    def __init__(self, dim, in_dim=-1, kernel_size=3, fft=False, use_norm=False):
         super(FeatureBlock, self).__init__()
         self.fft = fft
+        self.use_norm = use_norm
         self.dim = dim
         self.in_dim = in_dim if in_dim > 0 else self.dim
 
         self.conv1 = torch.nn.Conv2d(self.in_dim, self.dim, kernel_size=kernel_size, padding=kernel_size // 2)
         self.conv2 = torch.nn.Conv2d(self.dim, self.dim, kernel_size=kernel_size, padding=kernel_size // 2)
 
+        if self.use_norm:
+            self.norm1 = norm(self.in_dim)
+            self.norm2 = norm(self.dim)
+
         if self.in_dim != dim:
             self.skip_conv = torch.nn.Conv2d(self.in_dim, self.dim, kernel_size=1)
 
     def forward(self, x):
+        if self.use_norm:
+            x = self.norm1(x)
         h = self.conv1(nonlinear(x))
         if self.fft:
             h = torch.fft.fft2(x, norm='ortho').real
+        if self.use_norm:
+            h = self.norm2(h)
         h = self.conv2(nonlinear(h))
         if self.fft:
             h = torch.fft.fft2(x, norm='ortho').real
@@ -213,23 +230,22 @@ class ResBlock(torch.nn.Module):
 
 class SimpleDiscriminator(torch.nn.Module):
 
-    def __init__(self, in_channels=1, dim=128, n_blocks=2):
+    def __init__(self, in_channels=1, dim=128, n_blocks=2, input_kernel=5):
         super(SimpleDiscriminator, self).__init__()
         self.in_channels = in_channels
-        self.first_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=3, padding=1)
+        self.first_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=input_kernel, padding=input_kernel // 2)
         self.feature_extractor = torch.nn.Sequential(*[ResBlock(dim) for _ in range(n_blocks)])
         self.classifier = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d(1),
             torch.nn.Flatten(),
             torch.nn.utils.spectral_norm(torch.nn.Linear(dim, 1)),
-            torch.nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, x, return_probs=True):
         h = self.first_conv(x[:, :self.in_channels])
         features = self.feature_extractor(h)
         probs = self.classifier(features)
-        return probs.view(-1)
+        return torch.sigmoid(probs.view(-1)) if return_probs else probs.view(-1)
 
 
 class DownSample2d(torch.nn.Module):
@@ -318,7 +334,7 @@ class MobileEnhancer(torch.nn.Module):
 class ResNetEnhancer(torch.nn.Module):
 
     def __init__(self, in_channels=1, dim=32, input_kernel=5, pad_input=False, n_blocks=4, scale=2, fft=False,
-                 enhance=False, upscale_mode='nearest-exact', n_layers=1):
+                 enhance=False, upscale_mode='nearest-exact', n_layers=1, use_norm=False):
         super(ResNetEnhancer, self).__init__()
         self.in_channels = in_channels
         self.scale = scale
@@ -331,7 +347,7 @@ class ResNetEnhancer(torch.nn.Module):
             if block_id > 0:
                 self.blocks.append(torch.nn.Conv2d(dim * 2 ** (block_id - 1), dim * 2 ** block_id, kernel_size=1))
             for _ in range(n_layers):
-                self.blocks.append(FeatureBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft))
+                self.blocks.append(FeatureBlock(dim * 2 ** block_id, dim * 2 ** block_id, fft=fft, use_norm=use_norm))
         self.out = torch.nn.Conv2d(dim * 2 ** (n_blocks - 1) // self.scale ** 2, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x, return_features=False):
@@ -368,7 +384,7 @@ class ResNetEnhancer(torch.nn.Module):
 class UNetEnhancer(torch.nn.Module):
 
     def __init__(self, in_channels=1, dim=32, n_blocks=3, scale=2, input_kernel=3, pad_input=True, fft=False,
-                 n_layers=2, enhance=True, upscale_mode='nearest-exact'):
+                 n_layers=2, enhance=True, upscale_mode='nearest-exact', use_norm=False):
         super(UNetEnhancer, self).__init__()
         self.in_channels = in_channels
         self.scale = scale
@@ -377,7 +393,7 @@ class UNetEnhancer(torch.nn.Module):
         self.input_conv = torch.nn.Conv2d(self.in_channels, dim, kernel_size=input_kernel,
                                           padding=input_kernel // 2 if pad_input else 0, stride=1)
         self.down_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
-            [FeatureBlock(dim * 2 ** idx, fft=fft) for _ in range(n_layers)])
+            [FeatureBlock(dim * 2 ** idx, fft=fft, use_norm=use_norm) for _ in range(n_layers)])
             for idx in range(n_blocks)])
         self.downs = torch.nn.ModuleList(
             [DownSample2d(dim * 2 ** (idx - 1), dim * 2 ** idx) for idx in range(1, n_blocks)])
@@ -385,7 +401,8 @@ class UNetEnhancer(torch.nn.Module):
 
         self.up_blocks = torch.nn.ModuleList([torch.nn.ModuleList(
             [FeatureBlock(dim * 2 ** idx, in_dim=(int(block_id == 0 and idx != n_blocks - 1) + 1) * dim * 2 ** idx,
-                          fft=fft) for block_id in range(n_layers)]) for idx in reversed(range(n_blocks))])
+                          fft=fft, use_norm=use_norm) for block_id in range(n_layers)])
+            for idx in reversed(range(n_blocks))])
         self.ups = torch.nn.ModuleList([UpSample2d(dim * 2 ** idx, dim * 2 ** (idx - 1)) for idx in
                                         reversed(range(1, n_blocks))])
         self.ups.append(torch.nn.Identity())
@@ -463,6 +480,11 @@ class SRImagesBase:
         self.offsets = [sum(self.sizes[:idx]) for idx in range(len(self.sizes))]
         self.files = list(chain(*folders))
         return self.files
+
+    def get_uniform_idx(self, idx):
+        group_id = idx % len(self.sizes)
+        idx = self.offsets[group_id] + (idx // len(self.sizes)) % self.sizes[group_id]
+        return idx
 
     def __load_file(self, file, resize=False):
         frame = cv2.imread(file)
@@ -577,8 +599,6 @@ class TrainSRImages(SRImagesBase, torch.utils.data.Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        group_id = idx % len(self.sizes)
-        idx = self.offsets[group_id] + (idx // len(self.sizes)) % self.sizes[group_id]
         obj = self.load_file(self.files[idx], resize=True)
         return {
             'lr': obj[self.orig],
@@ -592,7 +612,7 @@ class FullSRImages(SRImagesBase, torch.utils.data.Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        return self.load_file(self.find_files()[idx], resize=True)
+        return self.load_file(self.files[self.get_uniform_idx(idx)], resize=True)
 
 
 class ImageEnhancer(pl.LightningModule):
@@ -631,6 +651,9 @@ class ImageEnhancer(pl.LightningModule):
                  debug=True,
                  random_filters=64,
                  random_filters_kernel=5,
+                 high_freq=False,
+                 multiscale=False,
+                 base_loss='mse',
                  ):
         super(ImageEnhancer, self).__init__()
 
@@ -658,8 +681,17 @@ class ImageEnhancer(pl.LightningModule):
         if self.teacher:
             self.teacher_projection = torch.nn.Conv2d(dim, teacher_dim, kernel_size=1)
 
-        self.random_filter = RandomBinaryFilter(in_channels=in_channels, filters=random_filters,
-                                                kernel_size=random_filters_kernel)
+        if base_loss == 'mse':
+            self.loss_fn = mse_loss
+        else:
+            self.loss_fn = charbonnier_loss
+
+        self.multiscale = multiscale
+        self.high_freq = high_freq
+        self.use_random_filters = random_filters > 0
+        if self.use_random_filters:
+            self.random_filter = RandomBinaryFilter(in_channels=in_channels, filters=random_filters,
+                                                    kernel_size=random_filters_kernel)
 
         self.model = model
         self.disc = disc
@@ -686,7 +718,7 @@ class ImageEnhancer(pl.LightningModule):
 
         return model(x, return_features=train, **kwargs)
 
-    def fixpad(self, image):
+    def fix_padding(self, image):
         # remove padding from orig batch
         if self.patched:
             image = image[:, :,
@@ -701,7 +733,7 @@ class ImageEnhancer(pl.LightningModule):
         upscaled, features = self.forward(lr, train=True)
 
         # return loss on real SR
-        return self.get_losses(upscaled, lr, self.fixpad(batch['sr']), features)
+        return self.get_losses(upscaled, lr, self.fix_padding(batch['sr']), features)
 
     def disc_step(self, batch):
 
@@ -709,16 +741,15 @@ class ImageEnhancer(pl.LightningModule):
             upscaled = self.forward(batch['lr'], train=True)[0]
 
         # discriminator must learn how fake the example looks like
-        preds = self.disc(torch.cat([upscaled, self.fixpad(batch['sr'])], dim=0))
-        target = torch.ones_like(preds)
-        target[len(upscaled):] = torch.rand_like(target[len(upscaled):]) * 0.1
+        preds = self.disc(torch.cat([upscaled, self.fix_padding(batch['sr'])], dim=0), return_probs=False)
+        target = torch.zeros_like(preds)
+        target[len(upscaled):] = 1 - torch.rand_like(target[len(upscaled):]) * 0.1
 
-        values = target * torch.log(preds + 1e-6) + (1 - target) * torch.log(1 - preds + 1e-6)
-        bce_loss = - torch.mean(torch.nan_to_num(values, nan=0, posinf=1, neginf=-1))
         # hinge_loss = torch.mean(torch.maximum(torch.zeros_like(preds), 1 - target * (preds * 2 - 1.0)))
-
+        bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(preds, target)
         return bce_loss
 
+    @torch.no_grad()
     def base_metrics(self, x, sr):
         x_normalized = torch_convert_YUV2RGB(x * 0.5 + 0.5).clip(0, 1)
         sr_normalized = torch_convert_YUV2RGB(sr * 0.5 + 0.5).clip(0, 1)
@@ -750,28 +781,36 @@ class ImageEnhancer(pl.LightningModule):
     def get_losses(self, x, lr, sr, features):
 
         loss = {
-            'loss': 0.0
+            'loss': torch.tensor(0.0).type_as(x)
         }
 
         x = x[:, :self.in_channels]
         sr = sr[:, :self.in_channels]
-        # loss on down sampled images to reduce artifacts
-        loss['aux_loss'] = multiscale_loss(torch.cat([x, self.random_filter(x)], dim=1),
-                                           torch.cat([sr, self.random_filter(sr)], dim=1))
-        loss['loss'] = loss['aux_loss'] + loss['loss']
+        loss['base_loss'] = multiscale_loss(x, sr, self.loss_fn) if self.multiscale else self.loss_fn(x, sr)
+        loss['loss'] += loss['base_loss']
 
-        # loss on high frequency details compared with gaussian blurred
-        x_details = x - torchvision.transforms.functional.gaussian_blur(x, kernel_size=(5, 5))
-        sr_details = sr - torchvision.transforms.functional.gaussian_blur(sr, kernel_size=(5, 5))
-        loss['high_freq'] = charbonnier_loss(x_details, sr_details)
-        loss['loss'] += loss['high_freq']
+        # gradient based loss
+        if self.use_random_filters:
+            loss['filter_loss'] = self.loss_fn(self.random_filter(x), self.random_filter(sr))
+            loss['loss'] += loss['filter_loss']
+
+        # details based loss
+        if self.high_freq:
+            # loss on high frequency details compared with gaussian blurred
+            x_details = x - torchvision.transforms.functional.gaussian_blur(x, kernel_size=(5, 5))
+            sr_details = sr - torchvision.transforms.functional.gaussian_blur(sr, kernel_size=(5, 5))
+            loss['high_freq'] = self.loss_fn(x_details, sr_details)
+            loss['loss'] += loss['high_freq']
 
         # adversarial based loss
         if self.disc and self.current_epoch >= self.disc_warmup:
-            # we want to minimize example falseness estimated by discriminator
-            loss['adv_loss'] = - torch.mean(torch.log(1 - self.disc(x) + 1e-6))
+            # we want to maximize example truthness estimated by discriminator
+            disc_preds = self.disc(x, return_probs=False)
+            loss['adv_loss'] = \
+                torch.nn.functional.binary_cross_entropy_with_logits(disc_preds, torch.ones_like(disc_preds))
             loss['loss'] += loss['adv_loss'] * self.disc_w
 
+        # teacher features based loss
         if self.teacher:
             sr, teacher_features = self.call_teacher(lr)
             loss['teacher_loss'] = gram_loss(self.teacher_projection(features), teacher_features)
@@ -906,6 +945,7 @@ class ImageEnhancer(pl.LightningModule):
             self.log(f'train_{k}', v, prog_bar=True, sync_dist=True)
 
         if (batch_idx + 1) % self.acc_grads == 0:
+            self.log(f'model_grad_norm', grad_norm(self.model), prog_bar=True, sync_dist=True)
             optimizer_upscale.step()
         self.untoggle_optimizer(optimizer_idx=0)
 
@@ -924,6 +964,7 @@ class ImageEnhancer(pl.LightningModule):
             # do backward propagation over disc parameters
             self.manual_backward(loss / self.acc_grads)
             if (batch_idx + 1) % self.acc_grads == 0:
+                self.log(f'disc_grad_norm', grad_norm(self.disc), prog_bar=True, sync_dist=True)
                 optimizer_disc.step()
             self.untoggle_optimizer(optimizer_idx=1)
 
@@ -1051,18 +1092,24 @@ def get_parser():
     parser.add_argument("--video_suffix", default="upscaled", help="Suffix for upscaled videos")
     parser.add_argument("--tmp", default="tmp", help="temporary directory for logs etc")
     parser.add_argument("--model", default="resnet", choices=['unet', 'resnet', 'mobilenet'], help="model kind")
+    parser.add_argument("--base_loss", default="mse", choices=['mse', 'mae'], help="loss kind")
     parser.add_argument("--upscale_mode", default='nearest-exact',
                         choices=['nearest-exact', 'bilinear', 'bicubic', 'area'], help="upscaling type")
     parser.add_argument("--teacher", default=None, help="name of SwinSR checkpoint (Swin2SR_Lightweight_X2_64)")
     parser.add_argument("--cache_size", default=512, type=int, help="Cache images for each epoch")
     parser.add_argument("--train_bitrate", default=None, help="Bitrate folder for train")
     parser.add_argument("--bitrate", default='b4', help="Bitrate folder for evaluate")
-    parser.add_argument("--find_lr", action='store_true', help='whether dataset was preprocessed')
+    parser.add_argument("--find_lr", action='store_true', help='activates lr_finder for model')
     parser.add_argument("--prep", action='store_true', help='whether dataset was preprocessed')
     parser.add_argument("--patch", action='store_true', help='whether to use patches for training')
     parser.add_argument("--enhance", action='store_true', help='whether to enhance picture or predict it')
+    parser.add_argument("--augment", action='store_true', help='whether to add augmentation to image patches')
     parser.add_argument("--test_prep", action='store_true', help='whether test dataset was preprocessed')
-    parser.set_defaults(prep=False, test_prep=False, patch=False, find_lr=False, enhance=False)
+    parser.add_argument("--high_freq", action='store_true', help='whether to use high frequency loss')
+    parser.add_argument("--multiscale", action='store_true', help='whether to use multiscale loss')
+    parser.add_argument("--normalize", action='store_true', help='whether to normalize features in upscaler')
+    parser.set_defaults(prep=False, test_prep=False, patch=False, find_lr=False, enhance=False, augment=False,
+                        high_freq=False, multiscale=False, normalize=False)
     # Training settings
     parser.add_argument("--lr", default=2e-3, type=float, help="Learning rate for model")
     parser.add_argument("--disc_lr", default=1e-4, type=float, help="Learning rate for discriminator")
@@ -1136,8 +1183,8 @@ if __name__ == "__main__":
             open(model_path, 'wb').write(r.content)
 
         teacher = Swin2SR(upscale=2, in_chans=3, img_size=64, window_size=8,
-                        img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
-                        mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
+                          img_range=1., depths=[6, 6, 6, 6], embed_dim=60, num_heads=[6, 6, 6, 6],
+                          mlp_ratio=2, upsampler='pixelshuffledirect', resi_connection='1conv')
         sd = torch.load(model_path, map_location='cpu')
         teacher.load_state_dict(sd, strict=True)
         teacher.eval()
@@ -1145,10 +1192,10 @@ if __name__ == "__main__":
     if args.patch:
         dataset = PatchSRImages(folder=args.dataset, tile=args.tile, tile_pad=args.tile_pad, scale=args.scale,
                                 cache_size=args.cache_size, w=args.w, h=args.h, preprocessed=args.prep, orig=args.orig,
-                                bitrate=args.train_bitrate)
+                                bitrate=args.train_bitrate, augment=args.augment)
     else:
         dataset = TrainSRImages(folder=args.dataset, scale=args.scale, orig=args.orig, w=args.w, h=args.h,
-                                preprocessed=args.prep, bitrate=args.train_bitrate)
+                                preprocessed=args.prep, bitrate=args.train_bitrate, augment=args.augment)
     test_dataset = FullSRImages(folder=args.test_dataset if args.test_dataset else args.dataset,
                                 scale=args.scale, orig=args.orig, w=args.w, h=args.h,
                                 preprocessed=args.test_prep, bitrate=args.bitrate)
@@ -1166,11 +1213,11 @@ if __name__ == "__main__":
 
     if args.model == 'unet':
         model = UNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
-                             input_kernel=input_kernel, pad_input=input_pad, fft=args.fft,
+                             input_kernel=input_kernel, pad_input=input_pad, fft=args.fft, use_norm=args.normalize,
                              enhance=args.enhance, upscale_mode=args.upscale_mode, n_layers=args.n_layers)
     elif args.model == 'resnet':
         model = ResNetEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
-                               input_kernel=input_kernel, pad_input=input_pad, fft=args.fft,
+                               input_kernel=input_kernel, pad_input=input_pad, fft=args.fft, use_norm=args.normalize,
                                enhance=args.enhance, upscale_mode=args.upscale_mode, n_layers=args.n_layers)
     else:
         model = MobileEnhancer(in_channels=args.in_channels, dim=args.dim, n_blocks=args.n_blocks,
@@ -1183,17 +1230,17 @@ if __name__ == "__main__":
 
     devices = list(range(torch.cuda.device_count()))
     if args.sample:
-        enhancer = ImageEnhancer.load_from_checkpoint(args.sample, model=model, dataset=dataset, test_dataset=test_dataset, clearml=logger, disc=disc,
-                                 in_channels=args.in_channels, random_filters=args.random_filters, teacher=teacher,
-                                 teacher_rate=args.teacher_rate, ema_weight=args.ema, learning_rate=args.lr,
-                                 initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate,
-                                 dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
-                                 batch_size=args.batch_size, epochs=args.epochs, steps=args.steps * args.acc_grads,
-                                 patched=args.patch, acc_grads=args.acc_grads,
-                                 disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
-                                 samples_epoch=args.samples_epoch, scale=args.scale, bitrate=args.bitrate,
-                                 random_filters_kernel=args.random_filters_kernel, orig=args.orig,
-                                 tile=args.tile, tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
+        enhancer = ImageEnhancer.load_from_checkpoint(
+            args.sample, model=model, dataset=dataset, test_dataset=test_dataset, clearml=logger, disc=disc,
+            in_channels=args.in_channels, random_filters=args.random_filters, teacher=teacher,
+            multiscale=args.multiscale, high_freq=args.high_freq, base_loss=args.base_loss,
+            teacher_rate=args.teacher_rate, ema_weight=args.ema, learning_rate=args.lr,
+            initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate, dim=args.dim,
+            teacher_dim=args.teacher_dim, teacher_w=args.teacher_w, batch_size=args.batch_size, epochs=args.epochs,
+            steps=args.steps * args.acc_grads, patched=args.patch, acc_grads=args.acc_grads, disc_lr=args.disc_lr,
+            disc_w=args.disc_w, disc_warmup=args.disc_warmup, samples_epoch=args.samples_epoch, scale=args.scale,
+            bitrate=args.bitrate, random_filters_kernel=args.random_filters_kernel, orig=args.orig, tile=args.tile,
+            tile_pad=args.tile_pad, full_batch_size=args.full_batch_size)
         enhancer.to(f'cuda:{devices[0]}')
         if args.videos:
             for video in args.videos:
@@ -1259,7 +1306,8 @@ if __name__ == "__main__":
                                  initial_lr_rate=args.initial_lr_rate, min_lr_rate=args.min_lr_rate,
                                  dim=args.dim, teacher_dim=args.teacher_dim, teacher_w=args.teacher_w,
                                  batch_size=args.batch_size, epochs=args.epochs, steps=args.steps * args.acc_grads,
-                                 patched=args.patch, acc_grads=args.acc_grads,
+                                 patched=args.patch, acc_grads=args.acc_grads, multiscale=args.multiscale,
+                                 high_freq=args.high_freq, base_loss=args.base_loss,
                                  disc_lr=args.disc_lr, disc_w=args.disc_w, disc_warmup=args.disc_warmup,
                                  samples_epoch=args.samples_epoch, scale=args.scale, bitrate=args.bitrate,
                                  random_filters_kernel=args.random_filters_kernel, orig=args.orig,
@@ -1268,10 +1316,10 @@ if __name__ == "__main__":
         checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=os.path.dirname(args.out_model_name),
                                                            filename=os.path.basename(args.out_model_name),
                                                            monitor='val_psnr', mode='max')
-        early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=10, min_delta=1e-3)
+        early_stopping = pl.callbacks.EarlyStopping(monitor="val_psnr", mode="max", patience=10, min_delta=1e-4)
         trainer = Trainer(max_epochs=args.epochs, limit_train_batches=args.steps * args.acc_grads,
                           enable_model_summary=True, enable_progress_bar=True, enable_checkpointing=True,
-                          strategy=DDPStrategy(find_unused_parameters=True), precision=16,
+                          strategy=DDPStrategy(find_unused_parameters=args.disc), precision=16,
                           profiler=args.profile, check_val_every_n_epoch=1, limit_val_batches=args.val_steps,
                           accelerator='gpu', devices=devices,
                           callbacks=[checkpoint_callback, early_stopping])
