@@ -1029,7 +1029,7 @@ class ImageEnhancer(pl.LightningModule):
 
             if value < best_loss:
                 best_loss = value
-                best_lr = min_lr
+                best_lr = lr
 
             if step_id > 0 and value > best_loss * max_factor:
                 break
