@@ -26,6 +26,26 @@ from torchmetrics.functional import peak_signal_noise_ratio, structural_similari
 import torchvision
 
 
+def norm(dims, num_groups=32, min_channels_group=4):
+    num_groups = min(num_groups, dims // min_channels_group)
+    while dims % num_groups != 0:
+        num_groups -= 1
+    return torch.nn.GroupNorm(num_channels=dims, num_groups=num_groups, eps=1e-6)
+
+
+def nonlinear(x):
+    return torch.nn.functional.silu(x)
+
+def grad_norm(model):
+    grads = [
+        param.grad.detach().flatten()
+        for param in model.parameters()
+        if param.grad is not None
+    ]
+    grads = torch.cat(grads)
+    norm = grads.norm() / len(grads)
+    return norm
+
 def get_YUV(R, G, B):
     Y = 0.299 * R + 0.587 * G + 0.114 * B
     Cb = 0.5 - 0.168736 * R - 0.331264 * G + 0.5 * B
@@ -583,9 +603,80 @@ def build_model(cfg):
     return model
 
 
+class RandomBinaryFilter(torch.nn.Module):
+
+    def __init__(self, in_channels=1, filters=48, kernel_size=5):
+        super(RandomBinaryFilter, self).__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=filters,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=in_channels,
+            bias=False)
+
+        filters = torch.bernoulli(torch.torch.full(self.conv.weight.data.shape, 0.5)) * 2 - 1
+        filters[torch.rand(filters.shape) > 0.75] = 0
+
+        self.conv.weight.data.copy_(filters)
+        self.conv.weight.requires_grad_(False)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+def charbonnier_loss(x, y, eps=1e-6):
+    return torch.sqrt((x - y) ** 2 + eps).mean()
+
+
+def multiscale_loss(x1, x2, scales=(1, 2), loss_fn=charbonnier_loss):
+    loss = 0
+    for scale in scales:
+        __x1 = torch.nn.functional.interpolate(x1, scale_factor=1 / scale, mode='bilinear')
+        __x2 = torch.nn.functional.interpolate(x2, scale_factor=1 / scale, mode='bilinear')
+        loss += loss_fn(__x1, __x2)
+    return loss / len(scales)
+
+
+class ResBlock(torch.nn.Module):
+
+    def __init__(self, dim):
+        super(ResBlock, self).__init__()
+        self.norm1 = norm(dim)
+        self.conv1 = torch.nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+        self.norm2 = norm(dim)
+        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        h = self.conv1(nonlinear(self.norm1(x)))
+        h = self.conv2(nonlinear(self.norm2(h)))
+        return (x + h) / 2 ** 0.5
+
+
+class SimpleDiscriminator(torch.nn.Module):
+
+    def __init__(self, in_channels=1, dim=128, n_blocks=2, input_kernel=5):
+        super(SimpleDiscriminator, self).__init__()
+        self.in_channels = in_channels
+        self.first_conv = torch.nn.Conv2d(in_channels, dim, kernel_size=input_kernel, padding=input_kernel // 2)
+        self.feature_extractor = torch.nn.Sequential(*[ResBlock(dim) for _ in range(n_blocks)])
+        self.classifier = torch.nn.Sequential(
+            torch.nn.AdaptiveAvgPool2d(1),
+            torch.nn.Flatten(),
+            torch.nn.utils.spectral_norm(torch.nn.Linear(dim, 1)),
+        )
+
+    def forward(self, x, return_probs=True):
+        h = self.first_conv(x[:, :self.in_channels])
+        features = self.feature_extractor(h)
+        probs = self.classifier(features)
+        return torch.sigmoid(probs.view(-1)) if return_probs else probs.view(-1)
+
+
 class Losses():
-    def __init__(self, loss_coeff):
+    def __init__(self, loss_coeff, rbf=None):
         self.coeff = loss_coeff
+        self.rbf = rbf
 
     def combined_loss(self, y_pred, y_true):
         loss = torch.nn.functional.mse_loss(y_true, y_pred) * (self.coeff['mse'] if 'mse' in self.coeff else 0.0) + \
@@ -593,7 +684,9 @@ class Losses():
                peak_signal_noise_ratio(y_pred, y_true, data_range=1.0) \
                * (self.coeff['psnr'] if 'psnr' in self.coeff else 0.0) + \
                structural_similarity_index_measure(y_pred, y_true, data_range=1.0) \
-               * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0)
+               * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0) + \
+               (charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
+                   'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0
         return loss
 
 
@@ -612,7 +705,7 @@ class Trainer():
 
         self.scale = self.cfg['model']['upscale_factor']
         self.channels = self.cfg['model']['channels']
-        self.net = None
+        self.model = None
         self.trainloader = None
         self.validloaders = None
         self.best_train_loss = 100.0
@@ -634,13 +727,15 @@ class Trainer():
     def metrics(self, outputs, labels):
         return {
             'loss': self.losses.combined_loss(outputs[:, :self.channels], labels[:, :self.channels]),
-            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0), # gamma channel only
+            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0),  # gamma channel only
             'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0)
         }
 
+    def forward(self, x):
+        return self.model(x)
     def train(self, epoch, steps=None):
 
-        self.net.train()
+        self.model.train()
         if steps is None:
             if not self.cfg['data']['patched']:
                 steps = len(self.trainloader)
@@ -657,9 +752,10 @@ class Trainer():
             labels = data[1].to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
-            outputs = self.net(inputs)
+            outputs = self.forward(inputs)
             __metrics = self.metrics(outputs, labels)
             __metrics['loss'].backward()
+            __metrics['grad-norm'] = grad_norm(self.model)
             self.optimizer.step()
 
             for k, v in __metrics.items():
@@ -711,7 +807,7 @@ class Trainer():
 
         upscaled = []
         for __tiles in torch.split(tiles, self.cfg['data']['batch_size'], dim=0):
-            upscaled.append(self.net(__tiles.to(self.device)).to(images.device))
+            upscaled.append(self.forward(__tiles.to(self.device)).to(images.device))
             del __tiles
         gc.collect()
         torch.cuda.empty_cache()
@@ -732,11 +828,11 @@ class Trainer():
         if self.cfg['data']['patched']:
             return self.patch_upscale(inputs)
         else:
-            return self.net(inputs.to(self.device)).to(orig_device)
+            return self.forward(inputs.to(self.device)).to(orig_device)
 
     def validate(self):
 
-        self.net.eval()
+        self.model.eval()
         total_metrics = []
         for valid_idx, validloader in enumerate(self.validloaders):
 
@@ -755,7 +851,6 @@ class Trainer():
                         metrics[k].append(v.item())
 
                     if self.cfg['data']['out']:
-                        channels = self.cfg['model']['channels']
                         out = torch.cat([
                             outputs[:, :self.channels],
                             torch.nn.functional.interpolate(
@@ -787,7 +882,7 @@ class Trainer():
         val_loss = torch.tensor(val_loss).mean().item()
         if val_loss < self.best_val_loss:
             print("Best val loss updated.")
-            torch.save(self.net.state_dict(), self.val_weights_path)
+            torch.save(self.model.state_dict(), self.val_weights_path)
             self.best_val_loss = val_loss
 
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False):
@@ -801,7 +896,7 @@ class Trainer():
         else:
             dataset = GameDataset(file_names)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched, num_workers=4,
-                                                 prefetch_factor=2)
+                                                 prefetch_factor=2, pin_memory=True)
         return dataloader
 
     def prepare_train_data(self):
@@ -822,29 +917,31 @@ class Trainer():
 
     def configure_model(self):
 
-        net = build_model(self.cfg)
+        model = build_model(self.cfg)
         print('\nModel', self.cfg['model']['name'])
 
-        total_params = sum(p.numel() for p in net.parameters())
-        trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print('Total number of parameters: ', total_params)
         print('Number of trainable parameters: ', trainable_params)
-        print(net)
-        self.net = net
+        print(model)
+        self.model = model
 
         print('device: ', self.device)
-        self.net.to(self.device)
+        self.model.to(self.device)
 
     def configure_loss(self):
-        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'])
+        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'],
+                             rbf=RandomBinaryFilter(in_channels=self.channels, filters=self.cfg['train']['rbf_filters'])
+                             if self.cfg['train']['rbf_filters'] else None)
 
     def configure_optimizer(self):
 
         lr = self.cfg['train']['base_rate']
         if self.cfg['train']['optimizer'] == 'adamw':
-            self.optimizer = torch.optim.AdamW(self.net.parameters(), lr=lr)
+            self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
         elif self.cfg['train']['optimizer'] == 'adam':
-            self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr, betas=(0.9, 0.99))
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
 
         if self.cfg['train']['sched'] == 'cosine':
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -857,10 +954,10 @@ class Trainer():
 
     def get_onnx(self):
         x = torch.randn(1, 1, 720, 1280)
-        self.net.to('cpu')
-        self.net.eval()
+        self.model.to('cpu')
+        self.model.eval()
 
-        torch.onnx.export(self.net, x, f"{self.cfg['model']['name']}.onnx",
+        torch.onnx.export(self.model, x, f"{self.cfg['model']['name']}.onnx",
                           export_params=True,
                           input_names=['input'],
                           output_names=['output'])
@@ -872,7 +969,7 @@ class Trainer():
         dict_weights = torch.load(file, map_location=self.device)
 
         dict_weights = {k.split('module.')[-1]: v for k, v in dict_weights.items()}
-        status = self.net.load_state_dict(dict_weights)
+        status = self.model.load_state_dict(dict_weights)
         print('Weights loaded: ', status)
 
         val_metrics = self.validate()
