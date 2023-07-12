@@ -2,6 +2,7 @@ import itertools
 import threading
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
 
 from random import randint, randrange, choice, choices, random
 import yaml
@@ -116,14 +117,14 @@ class PatchedDataset(torch.utils.data.IterableDataset):
             for file in self.file_names:
                 tasks.append(pool.submit(self.load_file, file=file))
 
-            self.images.clear()
+            self.objects.clear()
             for task in tasks:
-                self.images.append(task.result())
+                self.objects.append(task.result())
 
         gc.collect()
 
     def reset_cache(self):
-        run_async(self.__reset_cache())
+        self.__reset_cache()
 
     def load_patch(self, obj):
 
@@ -191,7 +192,7 @@ class GameDataset(torch.utils.data.Dataset):
         return len(self.filenames)
 
 
-def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format='*.(png|jpe?g)'):
+def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format='*.png'):
     filenames = []
     if len(datasets_names) == 0:
         f = glob(os.path.join(dataset_path, hr_subfolder, pic_format))
@@ -492,7 +493,6 @@ class UpscalingModelBase(torch.nn.Module):
                  upscaling_method='PixelShuffle',
                  main_act='ReLU',
                  final_act='Sigmoid',
-                 first_block_type='depthwise-separable-convolution',
                  main_block_type='depthwise-separable-convolution'):
         super().__init__()
 
@@ -578,7 +578,6 @@ def build_model(cfg):
                                upscaling_method=cfg['model']['upscaling_method'],
                                main_act=cfg['model']['main_act'],
                                final_act=cfg['model']['final_act'],
-                               first_block_type=cfg['model']['first_block_type'],
                                main_block_type=cfg['model']['main_block_type'])
     return model
 
@@ -606,11 +605,12 @@ class Trainer():
             else torch.device('cpu')
 
         pref_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        self.val_weights_path = cfg['saving']['chkp_folder'] + cfg['model'][
+        self.val_weights_path = cfg['saving']['ckp_folder'] + cfg['model'][
             'name'] + '-' + pref_time + '-val-weights.pth'
         self.logs_path = cfg['saving']['log_folder'] + cfg['model']['name'] + '-' + pref_time + '-logs.json'
 
         self.scale = self.cfg['model']['upscale_factor']
+        self.channels = self.cfg['model']['channels']
         self.net = None
         self.trainloader = None
         self.validloaders = None
@@ -630,20 +630,23 @@ class Trainer():
         self.configure_optimizer()
         self.prepare_val_data()
 
+    def metrics(self, outputs, labels):
+        return {
+            'loss': self.losses.combined_loss(outputs[:, :self.channels], labels[:, :self.channels]),
+            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0), # gamma channel only
+            'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0)
+        }
+
     def train(self, epoch, steps=None):
 
         self.net.train()
         if steps is None:
-            if hasattr(self.trainloader, '__len__'):
+            if not self.cfg['data']['patched']:
                 steps = len(self.trainloader)
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
-        metrics = {
-            'loss': [],
-            'psnr': [],
-            'ssim': []
-        }
+        metrics = defaultdict(list)
 
         data_iter = iter(self.trainloader)
         for batch_id in range(steps):
@@ -654,15 +657,14 @@ class Trainer():
 
             self.optimizer.zero_grad(set_to_none=True)
             outputs = self.net(inputs)
-            loss_function = self.losses.combined_loss(outputs, labels)
-            loss_function.backward()
+            __metrics = self.metrics(outputs, labels)
+            __metrics['loss'].backward()
             self.optimizer.step()
 
-            metrics['loss'].append(loss_function.item())
-            metrics['psnr'].append(peak_signal_noise_ratio(outputs, labels, data_range=1.0).item())
-            metrics['ssim'].append(structural_similarity_index_measure(outputs, labels, data_range=1.0).item())
+            for k, v in __metrics.items():
+                metrics[k].append(v.item())
 
-            record_step = steps // 5
+            record_step = steps // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
                       *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.4f}'
@@ -715,8 +717,9 @@ class Trainer():
 
         upscaled = torch.cat(upscaled, dim=0)
         upscaled = rearrange(upscaled, '(b n m) c p1 p2 -> b c n m p1 p2', n=h // patch_size, m=w // patch_size)
-        upscaled = upscaled[:, :, :, :, patch_pad:-patch_pad, patch_pad:-patch_pad]
-        upscaled = rearrange(upscaled, 'b c n m p1 p2 -> b c (n p1) (m p2)', p1=patch_size, p2=patch_size)
+        upscaled = upscaled[:, :, :, :, patch_pad * self.scale:-patch_pad * self.scale,
+                   patch_pad * self.scale:-patch_pad * self.scale]
+        upscaled = rearrange(upscaled, 'b c n m p1 p2 -> b c (n p1) (m p2)', n=h // patch_size, m=w // patch_size)
         upscaled = upscaled[:, :, (h_add // 2 + h_add % 2) * self.scale: -h_add // 2 * self.scale,
                    (w_add // 2 + w_add % 2) * self.scale: -w_add // 2 * self.scale]
 
@@ -736,32 +739,27 @@ class Trainer():
         total_metrics = []
         for valid_idx, validloader in enumerate(self.validloaders):
 
-            out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
-            os.makedirs(out_path, exist_ok=True)
+            if self.cfg['data']['out']:
+                out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
+                os.makedirs(out_path, exist_ok=True)
 
-            metrics = {
-                'loss': [],
-                'psnr': [],
-                'ssim': []
-            }
+            metrics = defaultdict(list)
 
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
                     inputs, labels = data[0].to(self.device), data[1].to(self.device)
                     outputs = self.upscale(inputs)
 
-                    loss_function = self.losses.combined_loss(outputs, labels)
-                    metrics['loss'].append(loss_function.item())
+                    for k, v in self.metrics(outputs, labels):
+                        metrics[k].append(v.item())
 
-                    metrics['psnr'].append(peak_signal_noise_ratio(outputs, labels, data_range=1.0).item())
-                    metrics['ssim'].append(structural_similarity_index_measure(outputs, labels, data_range=1.0).item())
-
-                    if cfg['data']['out']:
+                    if self.cfg['data']['out']:
                         channels = self.cfg['model']['channels']
                         out = torch.cat([
-                            outputs[:, :channels],
+                            outputs[:, :self.channels],
                             torch.nn.functional.interpolate(
-                                inputs[:, channels:], scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
+                                inputs[:, self.channels:],
+                                scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
                         out = to_image(out)
                         for image_idx in range(len(out)):
                             cv2.imwrite(os.path.join(out_path,
@@ -777,9 +775,9 @@ class Trainer():
             json.dump(item, f)
             f.write('\n')
 
-        if cfg['train_loss'] < self.best_train_loss:
+        if item['train_loss'] < self.best_train_loss:
             print("Best train loss updated.")
-            self.best_train_loss = cfg['train_loss']
+            self.best_train_loss = item['train_loss']
 
         val_loss = []
         for key, value in item.items():
@@ -794,9 +792,13 @@ class Trainer():
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False):
 
         file_names = get_filenames(folder, datasets)
-        dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
-                                 patch_pad=self.cfg['data']['patch_pad'],
-                                 augment=self.cfg['data']['augment']) if patched else GameDataset(file_names)
+        if patched:
+            dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
+                                     patch_pad=self.cfg['data']['patch_pad'],
+                                     augment=self.cfg['data']['augment'])
+            dataset.reset_cache()
+        else:
+            dataset = GameDataset(file_names)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched, num_workers=4,
                                                  prefetch_factor=2)
         return dataloader
@@ -806,7 +808,7 @@ class Trainer():
                                             self.cfg['data']['train_datasets'],
                                             self.cfg['data']['batch_size'], patched=self.cfg['data']['patched'])
 
-        if hasattr(self.trainloader, '__len__'):
+        if not self.cfg['data']['patched']:
             train_len = len(self.trainloader) * self.cfg['data']['batch_size']
             print(f'Number of images in the train: {train_len}')
 
@@ -814,9 +816,8 @@ class Trainer():
         self.validloaders = [self.get_dataset(folder, batch_size=self.cfg['data']['val_batch_size'])
                              for folder in self.cfg['data']['val_folder']]
         for n, validloader in enumerate(self.validloaders):
-            if hasattr(validloader, '__len__'):
-                val_len = len(validloader) * self.cfg['data']['val_batch_size']
-                print(f'Number of images in {n + 1} validation: {val_len}')
+            val_len = len(validloader) * self.cfg['data']['val_batch_size']
+            print(f'Number of images in {n + 1} validation: {val_len}')
 
     def configure_model(self):
 
@@ -887,12 +888,12 @@ def run(cfg, logger):
     torch.cuda.manual_seed_all(seed)
 
     model_trainer = Trainer(cfg)
-    model_trainer.prepare_train_data() # train data didn't loaded automatically as it loads all dataset in memory
+    model_trainer.prepare_train_data()  # train data didn't loaded automatically as it loads all dataset in memory
 
     print(f'Start training on device: ', model_trainer.device)
     for epoch in range(cfg['train']['n_epochs']):
 
-        train_metrics = model_trainer.train(epoch)
+        train_metrics = model_trainer.train(epoch, steps=cfg['train']['steps'])
         val_metrics = model_trainer.validate()
 
         item = {
@@ -908,7 +909,7 @@ def run(cfg, logger):
         print(*(f'{k}: {v:.6f}' if isinstance(v, float) else f'{k}: {v}' for k, v in item.items()))
 
         for key, group in itertools.groupby(
-                sorted(item.keys(), key=lambda x: x.split['_'][-1]), key=lambda x: x.split['_'][-1]):
+                sorted(item.keys(), key=lambda x: x.split('_')[-1]), key=lambda x: x.split('_')[-1]):
             for k in group:
                 logger.report_scalar(title=key, series=k, iteration=epoch, value=item[k])
 

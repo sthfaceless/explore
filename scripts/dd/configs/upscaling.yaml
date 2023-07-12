@@ -1,17 +1,17 @@
 data:
-  batch_size: 2
+  batch_size: 256
   augment: false
   patched: true
-  patch_size: 32
-  patch_pad: 4
+  patch_size: 80
+  patch_pad: 8
   val_batch_size: 2
   train_datasets:
   - all
-  train_folder: /dsk1/danil/3d/nerf/data/games/images/
+  train_folder: /dsk1/danil/3d/nerf/data/games/julia/
   val_folder:
   - /dsk1/danil/3d/nerf/data/facebook/
   mode: bilinear
-  out:
+  out: /dsk1/danil/3d/nerf/results
 metrics:
   loss_coeff:
     mae: 0.0
@@ -31,7 +31,7 @@ model:
   main_block_type: wide-depthwise-convolution
   n_blocks: 1
   n_channels: 96
-  name: wm96-lrelu
+  name: wm-patched
   upscale_factor: 2
   upscaling_method: ConvTranspose
 saving:
@@ -40,9 +40,11 @@ saving:
 train:
   base_rate: 0.002
   n_epochs: 50
+  steps: 10000
+  log_freq: 50
   optimizer: adam
   pretrained_weights: ''
-  sched: 'multistep'
+  sched: 'cosine'
   sched_min: 0.01
   sched_first: 5
   sched_mult: 1
