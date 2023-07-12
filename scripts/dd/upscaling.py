@@ -668,7 +668,7 @@ class Trainer():
             record_step = steps // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
-                      *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.4f}'
+                      *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
 
         # if not isinstance(self.scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
@@ -751,7 +751,7 @@ class Trainer():
                     inputs, labels = data[0].to(self.device), data[1].to(self.device)
                     outputs = self.upscale(inputs)
 
-                    for k, v in self.metrics(outputs, labels):
+                    for k, v in self.metrics(outputs, labels).items():
                         metrics[k].append(v.item())
 
                     if self.cfg['data']['out']:
