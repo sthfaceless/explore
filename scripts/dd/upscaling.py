@@ -13,6 +13,7 @@ import gc
 import json
 from glob import glob
 from pathlib import Path
+from tqdm import tqdm
 
 import cv2
 import numpy as np
@@ -118,7 +119,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                 tasks.append(pool.submit(self.load_file, file=file))
 
             self.objects.clear()
-            for task in tasks:
+            for task in tqdm(tasks, desc='Loading cache'):
                 self.objects.append(task.result())
 
         gc.collect()
