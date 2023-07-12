@@ -1,0 +1,61 @@
+data:
+  batch_size: 2
+  augment: false
+  patched: true
+  patch_size: 32
+  patch_pad: 4
+  val_batch_size: 2
+  train_datasets:
+  - all
+  train_folder: /dsk1/danil/3d/nerf/data/games/images/
+  val_folder:
+  - /dsk1/danil/3d/nerf/data/facebook/
+  mode: bilinear
+  out:
+metrics:
+  loss_coeff:
+    mae: 0.0
+    mse: 1.0
+    psnr: 0.0
+    ssim: 0.0
+  loss_name:
+  - mse
+  - mae
+model:
+  block_size: 2
+  channels: 1
+  final_act: Tanh
+  first_block_type: none
+  kernel_size: 3
+  main_act: SiLU
+  main_block_type: wide-depthwise-convolution
+  n_blocks: 1
+  n_channels: 96
+  name: wm96-lrelu
+  upscale_factor: 2
+  upscaling_method: ConvTranspose
+saving:
+  ckp_folder: checkpoints/
+  log_folder: logs/
+train:
+  base_rate: 0.002
+  n_epochs: 50
+  optimizer: adam
+  pretrained_weights: ''
+  sched: 'multistep'
+  sched_min: 0.01
+  sched_first: 5
+  sched_mult: 1
+  sched_gamma: 0.4
+  sched_steps:
+  - 7
+  - 17
+  - 30
+  - 45
+  - 75
+  - 90
+  - 125
+  - 150
+  - 175
+  - 200
+  - 225
