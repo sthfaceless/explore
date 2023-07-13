@@ -5,6 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 from random import randint, randrange, choice, choices, random
+import imageio
+import seaborn as sns
+import matplotlib.pyplot as plt
+from PIL import Image
+
 import yaml
 import argparse
 import clearml
@@ -111,6 +116,147 @@ def to_image(tensor, yuv=True):
 def run_async(fun, *args, **kwargs):
     thread = threading.Thread(target=fun, args=args, kwargs=kwargs)
     thread.start()
+
+
+class SimpleLogger:
+
+    def __init__(self, clearml=None, run_async=False, tmpdir='.'):
+        self.clearml = clearml
+        self.run_async = run_async
+        self.tmpdir = tmpdir
+        if not os.path.exists(tmpdir):
+            os.makedirs(tmpdir, exist_ok=True)
+
+    def log_value(self, value, name, epoch=0, kind='val'):
+        if self.clearml:
+            self.clearml.report_scalar(name, kind, iteration=epoch, value=value)
+        else:
+            print(f'{name} --- {value}')
+
+    def log_image(self, image, name, epoch=0):
+        path = f"{self.tmpdir}/{name}.png"
+        Image.fromarray(image).save(path)
+        if self.clearml:
+            self.clearml.report_image('valid', f"{name}", iteration=epoch, local_path=path)
+
+    def log_images(self, images, prefix, epoch=0):
+        for image_id, image in enumerate(images):
+            self.log_image(image, f'{prefix}_{image_id}', epoch)
+
+    def log_image_compare(self, images, texts, epoch, name='compare'):
+        gallery = []
+        for img, text in zip(images, texts):
+            cv2.rectangle(img, pt1=(0, img.shape[0] // 30), pt2=(img.shape[1] // 90 * len(text), 0), color=0,
+                          thickness=-1)
+            cv2.putText(img, text=text, org=(0, img.shape[0] // 40), fontFace=cv2.FONT_HERSHEY_PLAIN, fontScale=3.0,
+                        color=(255, 255, 255), thickness=3)
+            gallery.append(img)
+        gallery = np.concatenate(gallery, axis=1)
+        if self.clearml:
+            self.clearml.report_image('valid', name, iteration=epoch, image=gallery)
+        else:
+            Image.fromarray(gallery).save(f"{self.tmpdir}/{name}.png")
+
+    def log_images_compare(self, images, texts, epoch, name='compare'):
+        for idx, batch in enumerate(zip(*images)):
+            self.log_image_compare(batch, texts, epoch=epoch, name=f'{name}_{idx}')
+
+    def log_tensor(self, tensor, name='', depth=0):
+        import lovely_tensors as lt
+        if tensor.numel() > 0:
+            print(f'{name} --- {lt.lovely(tensor, depth=depth)}')
+        else:
+            print(f'{name} --- empty tensor of shape {tensor.shape}')
+
+    def log_plot(self, plt, name, epoch=0):
+        if self.clearml:
+            self.clearml.report_matplotlib_figure(title=name, series=f"valid", iteration=epoch, figure=plt)
+        else:
+            plt.savefig(f"{self.tmpdir}/{name}_{epoch}.png")
+        plt.close()
+
+    def log_distribution(self, values, name, epoch=0):
+        sns.kdeplot(values)
+        self.log_plot(plt, name, epoch)
+
+    def log_values(self, values, name, epoch=0):
+        sns.lineplot(values)
+        self.log_plot(plt, name, epoch)
+
+    def log_line(self, x, y, name, epoch=0):
+        sns.lineplot(x=x, y=y)
+        self.log_plot(plt, name, epoch)
+
+    def _log_scatter2d(self, x, y, name, color=None, epoch=0):
+        plt.scatter(x=x, y=y, c=None)
+        self.log_plot(plt, name, epoch)
+
+    def log_scatter2d(self, x, y, name, color=None, epoch=0):
+        if self.run_async:
+            run_async(self._log_scatter2d, x, y, name, color=color, epoch=epoch)
+        else:
+            self._log_scatter2d(x, y, name, color=color, epoch=epoch)
+
+    def _log_scatter3d(self, x, y, z, name, color=None, epoch=0):
+        ax = plt.axes(projection="3d")
+        ax.set_xlim3d(-1, 1)
+        ax.set_ylim3d(-1, 1)
+        ax.set_zlim3d(-1, 1)
+        ax.scatter3D(x, y, z, c=color)
+        self.log_plot(plt, name, epoch)
+
+    def log_scatter3d(self, x, y, z, name, color=None, epoch=0):
+        if self.run_async:
+            run_async(self._log_scatter3d, x, y, z, name, color=color, epoch=epoch)
+        else:
+            self._log_scatter3d(x, y, z, name, color=color, epoch=epoch)
+
+    def _log_mesh(self, vertices, faces, name, epoch=0):
+        from mpl_toolkits.mplot3d import art3d
+        pc = art3d.Poly3DCollection(vertices[faces],
+                                    facecolors=np.ones((len(faces), 3), dtype=np.float32) * 0.75, edgecolor="gray")
+        ax = plt.axes(projection="3d")
+        ax.set_xlim3d(-1, 1)
+        ax.set_ylim3d(-1, 1)
+        ax.set_zlim3d(-1, 1)
+        ax.add_collection(pc)
+        self.log_plot(plt, name, epoch)
+
+    def log_mesh(self, vertices, faces, name, epoch=0):
+        if self.run_async:
+            run_async(self._log_mesh, vertices, faces, name, epoch=epoch)
+        else:
+            self._log_mesh(vertices, faces, name, epoch=epoch)
+
+    def log_video(self, frames, gap, name, epoch=0):
+
+        path = f'{self.tmpdir}/{name}_{epoch}.mp4'
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        w, h = frames[0].shape[1], frames[0].shape[0]
+        writer = cv2.VideoWriter(path, apiPreference=0, fourcc=fourcc, fps=int(1 / (gap / 1000)), frameSize=(w, h))
+        for frame in frames:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            writer.write(frame)
+        writer.release()
+
+        if self.clearml:
+            self.clearml.report_media('video', name, iteration=epoch, local_path=path)
+
+    def log_videos(self, videos_frames, gap, name, tempdir, epoch=0):
+        for video_id, frames in enumerate(videos_frames):
+            self.log_video(frames, gap, f'{name}_{video_id}', tempdir, epoch)
+
+    def log_gif(self, frames, gap, name, epoch=0):
+        path = f'{self.tmpdir}/{name}_{epoch}.gif'
+
+        imageio.mimsave(path, frames, fps=int(1 / (gap / 1000)))
+        if self.clearml:
+            self.clearml.report_media('gifs', name, iteration=epoch, local_path=path)
+
+    def log_gifs(self, frames_list, gap, name, tempdir, epoch=0):
+        for idx, frames in enumerate(frames_list):
+            self.log_gif(frames, gap, f'{name}_{idx}', tempdir, epoch)
 
 
 class PatchedDataset(torch.utils.data.IterableDataset):
@@ -1040,6 +1186,7 @@ class Trainer():
         pb_steps.close()
         return np.asarray(lrs), np.clip(np.asarray(values), a_min=0.0, a_max=best_loss * max_factor)
 
+
 def run(cfg, logger):
     seed = 131313
     torch.manual_seed(seed)
@@ -1094,7 +1241,7 @@ if __name__ == "__main__":
         trainer = Trainer(cfg)
         trainer.prepare_train_data()
         lr, values = trainer.find_lr()
-        logger.log_line(x=lr, y=values, name='learning rate')
+        SimpleLogger(clearml=logger).log_line(x=lr, y=values, name='learning rate')
     else:
 
         task = clearml.Task.init(project_name="upscaling",
