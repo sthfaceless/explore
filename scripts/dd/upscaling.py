@@ -793,7 +793,7 @@ class Trainer():
 
             if self.cfg['data']['out'] and val_metrics['psnr'] > self.best_val_psnr:
 
-                out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
+                out_path = os.path.join(self.cfg['data']['out'], self.cfg['model']['name'], f'val_{valid_idx}')
                 os.makedirs(out_path, exist_ok=True)
 
                 upscaled_images = np.concatenate(upscaled_images, axis=0)
