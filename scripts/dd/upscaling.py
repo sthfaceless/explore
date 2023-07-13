@@ -50,7 +50,7 @@ def grad_norm(model):
         if param.grad is not None
     ]
     grads = torch.cat(grads)
-    norm = grads.norm() / len(grads)
+    norm = grads.norm(p=1) / len(grads)
     return norm
 
 
@@ -384,31 +384,27 @@ def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format
 
 
 class Conv(torch.nn.Module):
-    def __init__(self, n_channels,
-                 kernel_size):
+    def __init__(self, n_channels, kernel_size=3):
         super().__init__()
         self.conv = torch.nn.Conv2d(n_channels, n_channels,
                                     kernel_size=kernel_size,
                                     stride=1,
                                     padding=(kernel_size // 2, kernel_size // 2))
-        self.relu = torch.nn.ReLU(inplace=False)
 
     def forward(self, x):
-        out = self.conv(x)
-        out = self.relu(out)
-        return out
+        x = nonlinear(x)
+        x = self.conv(x)
+        return x
 
 
 class ConvBlock(torch.nn.Module):
 
-    def __init__(self, n_channels,
-                 block_size,
-                 kernel_size):
+    def __init__(self, n_channels, block_size):
         super().__init__()
 
         layers = []
         for _ in range(block_size):
-            layers.append(Conv(n_channels, kernel_size))
+            layers.append(Conv(n_channels))
         self.separable_conv_block = torch.nn.Sequential(*layers)
 
     def forward(self, x):
@@ -417,233 +413,44 @@ class ConvBlock(torch.nn.Module):
         return out
 
 
-class DepthwiseSeparableConv(torch.nn.Module):
-    def __init__(self, n_channels,
-                 kernel_size,
-                 quantization_friendly=False):
+class WideConv(torch.nn.Module):
+
+    def __init__(self, dim):
         super().__init__()
 
-        self.quantization_friendly = quantization_friendly
-        self.dwconv = torch.nn.Conv2d(n_channels, n_channels,
-                                      kernel_size=kernel_size,
-                                      stride=1,
-                                      padding=(kernel_size // 2, kernel_size // 2),
-                                      groups=n_channels)
-        self.pwconv = torch.nn.Conv2d(n_channels, n_channels,
-                                      kernel_size=1,
-                                      stride=1,
-                                      padding=(0, 0))
-        self.relu = torch.nn.ReLU(inplace=False)
+        # 3x3 kernel convolution
+        self.conv1 = torch.nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+
+        # 5x5 kernel convolution
+        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=5, stride=1, padding=2)
+
+        # factorized 7x7 kernel convolution
+        self.conv31 = torch.nn.Conv2d(dim, dim, kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
+        self.conv32 = torch.nn.Conv2d(dim, dim, kernel_size=(7, 1), stride=(1, 1), padding=(3, 0))
+
+        self.out = torch.nn.Conv2d(3 * dim, dim, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
-        out = self.dwconv(x)
-        if not self.quantization_friendly:
-            out = self.relu(out)
-        out = self.pwconv(out)
-        out = self.relu(out)
-        return out
-
-
-class DepthwiseSeparableConvBlock(torch.nn.Module):
-
-    def __init__(self, n_channels,
-                 block_size,
-                 kernel_size):
-        super().__init__()
-
-        layers = []
-        for _ in range(block_size):
-            layers.append(DepthwiseSeparableConv(n_channels, kernel_size))
-        self.separable_conv_block = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.separable_conv_block(x)
-        out = out + x
-        return out
-
-
-class ResidualConv(torch.nn.Module):
-
-    def __init__(self, in_channels, kernel_size):
-        super().__init__()
-
-        expand_channels = in_channels // 2
-
-        self.pwconv_squeeze = torch.nn.Conv2d(in_channels, expand_channels,
-                                              kernel_size=1,
-                                              stride=1,
-                                              padding=(0, 0))
-
-        self.conv = torch.nn.Conv2d(expand_channels, expand_channels,
-                                    kernel_size=kernel_size,
-                                    stride=1,
-                                    padding=(kernel_size // 2, kernel_size // 2))
-
-        self.pwconv_expand = torch.nn.Conv2d(expand_channels, in_channels,
-                                             kernel_size=1,
-                                             stride=1,
-                                             padding=(0, 0))
-        self.relu = torch.nn.ReLU(inplace=False)
-
-    def forward(self, x):
-        out = self.pwconv_squeeze(x)
-        out = self.relu(out)
-        out = self.conv(out)
-        out = self.relu(out)
-        out = self.pwconv_expand(out)
-        out = self.relu(out)
-        return out
-
-
-class ResidualConvBlock(torch.nn.Module):
-
-    def __init__(self, in_channels,
-                 block_size,
-                 kernel_size):
-        super().__init__()
-
-        layers = []
-        for _ in range(block_size):
-            layers.append(ResidualConv(in_channels, kernel_size))
-        self.residual_conv_block = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.residual_conv_block(x)
-        out = out + x
-        return out
-
-
-class InvertedResidualConv(torch.nn.Module):
-
-    def __init__(self, in_channels, kernel_size):
-        super().__init__()
-
-        expand_channels = in_channels * 2
-
-        self.pwconv_expand = torch.nn.Conv2d(in_channels, expand_channels,
-                                             kernel_size=1,
-                                             stride=1,
-                                             padding=(0, 0))
-
-        self.dwconv = torch.nn.Conv2d(expand_channels, expand_channels,
-                                      kernel_size=kernel_size,
-                                      stride=1,
-                                      padding=(kernel_size // 2, kernel_size // 2),
-                                      groups=expand_channels)
-
-        self.pwconv_squeeze = torch.nn.Conv2d(expand_channels, in_channels,
-                                              kernel_size=1,
-                                              stride=1,
-                                              padding=(0, 0))
-        self.relu = torch.nn.ReLU(inplace=False)
-
-    def forward(self, x):
-        out = self.pwconv_expand(x)
-        out = self.relu(out)
-        out = self.dwconv(out)
-        out = self.relu(out)
-        out = self.pwconv_squeeze(out)
-        out = self.relu(out)
-        return out
-
-
-class InvertedResidualConvBlock(torch.nn.Module):
-
-    def __init__(self, in_channels,
-                 block_size,
-                 kernel_size):
-        super().__init__()
-
-        layers = []
-        for _ in range(block_size):
-            layers.append(InvertedResidualConv(in_channels, kernel_size))
-        self.inverted_residual_conv_block = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.inverted_residual_conv_block(x)
-        out = out + x
-        return out
-
-
-class DepthwiseInceptionBlock(torch.nn.Module):
-
-    def __init__(self, in_channels, kernel_size):
-        super().__init__()
-
-        self.in_channels = in_channels
-
-        if not self.in_channels % 3:
-            self.mid_channels = self.in_channels // 3
-            self.pass3 = ResidualConv(self.in_channels, kernel_size)
-
-        elif not self.in_channels % 2:
-            self.mid_channels = self.in_channels // 2
-
-        self.pass1 = DepthwiseSeparableConv(self.in_channels, kernel_size)
-        self.pass2 = InvertedResidualConv(self.in_channels, kernel_size)
-
-    def forward(self, x):
-
-        out1 = self.pass1(x)
-        out2 = self.pass2(x)
-
-        if not self.in_channels // 3:
-            out3 = self.pass3(x)
-            out = out1 + out2 + out3
-        else:
-            out = out1 + out2
-
-        return out
-
-
-class Wide3DepthwiseConv(torch.nn.Module):
-
-    def __init__(self, in_channels):
-        super().__init__()
-
-        squeeze_channels = in_channels // 3
-        self.pwconv_squeeze = torch.nn.Conv2d(in_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
-
-        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1))
-
-        self.conv2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (5, 5), (1, 1), (2, 2))
-
-        self.dwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1),
-                                       groups=squeeze_channels)
-        self.pwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
-
-        self.act = torch.nn.SiLU()
-
-    def forward(self, x):
-        x = self.pwconv_squeeze(x)
-        x = self.act(x)
-
+        x = nonlinear(x)
         x1 = self.conv1(x)
-        x1 = self.act(x1)
-
         x2 = self.conv2(x)
-        x2 = self.act(x2)
-
-        x3 = self.dwconv3(x)
-        x3 = self.act(x3)
-        x3 = self.pwconv3(x3)
-        x3 = self.act(x3)
+        x3 = self.conv32(self.conv31(x))
 
         x = torch.cat((x1, x2, x3), dim=1)
+        x = nonlinear(x)
+        x = self.out(x)
 
         return x
 
 
-class WideDepthwiseConvBlock(torch.nn.Module):
+class WideBlock(torch.nn.Module):
 
-    def __init__(self, in_channels,
-                 block_size,
-                 kernel_size):
+    def __init__(self, dim, block_size):
         super().__init__()
 
         layers = []
         for _ in range(block_size):
-            layers.append(Wide3DepthwiseConv(in_channels))
+            layers.append(WideConv(dim))
         self.wide_depthwise_conv_block = torch.nn.Sequential(*layers)
 
     def forward(self, x):
@@ -661,7 +468,6 @@ class UpscalingModelBase(torch.nn.Module):
                  kernel_size=3,
                  upscale_factor=2,
                  upscaling_method='PixelShuffle',
-                 main_act='ReLU',
                  final_act='Sigmoid',
                  main_block_type='depthwise-separable-convolution'):
         super().__init__()
@@ -674,32 +480,12 @@ class UpscalingModelBase(torch.nn.Module):
                                           stride=1,
                                           padding=(kernel_size // 2, kernel_size // 2))
 
-        if main_act == 'ReLU':
-            self.activation = torch.nn.ReLU()
-        elif main_act == 'PReLU':
-            self.activation = torch.nn.PReLU()
-        elif main_act == 'SiLU':
-            self.activation = torch.nn.SiLU()
-        elif main_act == 'LeakyReLU':
-            self.activation = torch.nn.LeakyReLU(negative_slope=0.1)
-        elif main_act == 'HardSwish':
-            self.activation = torch.nn.Hardswish(inplace=False)
-
         layers = []
         for _ in range(n_blocks):
-
-            if main_block_type == 'convolution':
-                layers.append(ConvBlock(n_channels, block_size, kernel_size))
-            elif main_block_type == 'depthwise-separable-convolution':
-                layers.append(DepthwiseSeparableConvBlock(n_channels, block_size, kernel_size))
-            elif main_block_type == 'residual-convolution':
-                layers.append(ResidualConvBlock(n_channels, block_size, kernel_size))
-            elif main_block_type == 'inverted-residual-convolution':
-                layers.append(InvertedResidualConvBlock(n_channels, block_size, kernel_size))
-            elif main_block_type == 'depthwise-inception':
-                layers.append(DepthwiseInceptionBlock(n_channels, kernel_size))
-            elif main_block_type == 'wide-depthwise-convolution':
-                layers.append(WideDepthwiseConvBlock(n_channels, block_size, kernel_size))
+            if main_block_type == 'conv':
+                layers.append(ConvBlock(n_channels, block_size))
+            elif main_block_type == 'wide':
+                layers.append(WideBlock(n_channels, block_size))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -724,12 +510,8 @@ class UpscalingModelBase(torch.nn.Module):
         x = x[:, :self.in_channels] * 2 - 1.0
 
         Y = self.first_conv(x)
-        Y = self.activation(Y)
-
         Y = self.base_blocks_seq(Y)
-
         Y = self.upscaling_layer(Y)
-
         Y = self.final_conv(Y)
         Y = self.final_act(Y)
 
@@ -746,7 +528,6 @@ def build_model(cfg):
                                kernel_size=cfg['model']['kernel_size'],
                                upscale_factor=cfg['model']['upscale_factor'],
                                upscaling_method=cfg['model']['upscaling_method'],
-                               main_act=cfg['model']['main_act'],
                                final_act=cfg['model']['final_act'],
                                main_block_type=cfg['model']['main_block_type'])
     return model

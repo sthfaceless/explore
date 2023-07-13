@@ -28,8 +28,7 @@ model:
   final_act: Tanh
   first_block_type: none
   kernel_size: 3
-  main_act: SiLU
-  main_block_type: wide-depthwise-convolution
+  main_block_type: wide
   n_blocks: 1
   n_channels: 96
   name: wm-patched
