@@ -688,8 +688,8 @@ class Losses():
                * (self.coeff['psnr'] if 'psnr' in self.coeff else 0.0) + \
                structural_similarity_index_measure(y_pred, y_true, data_range=1.0) \
                * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0) + \
-               (charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
-                   'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0
+               ((charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
+                   'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0)
         return loss
 
 
@@ -867,11 +867,10 @@ class Trainer():
                 out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
                 os.makedirs(out_path, exist_ok=True)
 
-                upscaled_images = torch.cat(upscaled_images, dim=0)
+                upscaled_images = np.concatenate(upscaled_images, axis=0)
                 for image_idx in range(len(upscaled_images)):
-                    cv2.imwrite(os.path.join(out_path,
-                                             f'{batch_idx * self.cfg["data"]["val_batch_size"] + image_idx}.png'),
-                                cv2.cvtColor(out[image_idx], cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(os.path.join(out_path, f'{image_idx}.png'),
+                                cv2.cvtColor(upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
         return total_metrics
 
     def save_results(self, item):
@@ -995,6 +994,48 @@ class Trainer():
             item.update({f'val{val_idx}_{k}': v for k, v in val_item.items()})
         print(f'Validation metrics for loaded weights:', *(f'{k}: {v:.6f}' for k, v in item.items()))
 
+    def find_lr(self, min_lr=1e-6, max_lr=1.0, steps=1000, acc_grad=1, monitor='loss', max_factor=10.0):
+
+        # setup optimizer
+        optim = self.optimizer
+
+        data_iter = iter(self.trainloader)
+        best_loss, best_lr = 1e9, min_lr
+        values, lrs = [], []
+        pb_steps = tqdm(range(steps), desc='Finding learning rate')
+        for step_id in pb_steps:
+
+            lr = min_lr * np.e ** (step_id / steps * np.log(max_lr / min_lr))
+            lrs.append(lr)
+            for g in optim.param_groups:
+                g['lr'] = lr
+
+            optim.zero_grad(set_to_none=True)
+
+            value = 0
+            for acc_id in range(acc_grad):
+                inputs, labels = (v.to(self.device) for v in next(data_iter))
+                outputs = self.forward(inputs)
+                __metrics = self.metrics(outputs, labels)
+                (__metrics['loss'] / acc_grad).backward()
+                value += __metrics[monitor].item() / acc_grad
+
+            values.append(value)
+
+            optim.step()
+
+            if value < best_loss:
+                best_loss = value
+                best_lr = lr
+
+            if step_id > 0 and value > best_loss * max_factor:
+                break
+
+            pb_steps.set_description(
+                f'Step [{step_id + 1}/{steps}] [lr:{lrs[-1]:.8f}] [loss:{values[-1]:.6f}] [best_loss:{best_loss:.6f}]',
+                refresh=True)
+        pb_steps.close()
+        return np.asarray(lrs), np.clip(np.asarray(values), a_min=0.0, a_max=best_loss * max_factor)
 
 def run(cfg, logger):
     seed = 131313
@@ -1033,7 +1074,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default='scripts/dd/configs/upscaling.yaml')
     parser.add_argument("--val", action='store_true', help='run only validate')
-    parser.set_defaults(val=False)
+    parser.add_argument("--lr", action='store_true', help='run only learning rate finding')
+    parser.set_defaults(val=False, lr=False)
     args = parser.parse_args()
 
     config_path = args.config_path
@@ -1042,6 +1084,14 @@ if __name__ == "__main__":
     if args.val:
         # When trainer loads weights it runs validation and all val upscaling results are saved in out directory
         Trainer(cfg)
+    elif args.lr:
+        task = clearml.Task.init(project_name="upscaling", task_name="lr finding", reuse_last_task_id=True)
+        task.connect(cfg, name='main params')
+        logger = task.get_logger()
+        trainer = Trainer(cfg)
+        trainer.prepare_train_data()
+        lr, values = trainer.find_lr()
+        logger.log_line(x=lr, y=values, name='learning rate')
     else:
 
         task = clearml.Task.init(project_name="upscaling",
