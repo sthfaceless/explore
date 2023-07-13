@@ -947,9 +947,12 @@ class Trainer():
         self.model.to(self.device)
 
     def configure_loss(self):
-        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'],
-                             rbf=RandomBinaryFilter(in_channels=self.channels, filters=self.cfg['train']['rbf_filters'])
-                             if self.cfg['train']['rbf_filters'] else None)
+        if self.cfg['train']['rbf_filters']:
+            rbf = RandomBinaryFilter(in_channels=self.channels, filters=self.cfg['train']['rbf_filters'])
+            rbf = rbf.to(self.device)
+        else:
+            rbf = None
+        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'], rbf=rbf)
 
     def configure_optimizer(self):
 
