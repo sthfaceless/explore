@@ -890,6 +890,9 @@ class Trainer():
             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
         elif self.cfg['train']['optimizer'] == 'adam':
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
+        elif self.cfg['train']['optimizer'] == 'lamb':
+            from modules.common.trainer import Lamb
+            self.optimizer = Lamb(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
 
         if self.cfg['train']['sched'] == 'cosine':
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -901,10 +904,10 @@ class Trainer():
                                                                   gamma=self.cfg['train']['sched_gamma'])
         elif self.cfg['train']['sched'] == 'one':
             self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched_start'] / self.cfg['train']['n_epochs'],
+                self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched_start'] / self.cfg['train']['epochs'],
                 div_factor=1 / self.cfg['train']['sched_initial'],
                 final_div_factor=self.cfg['train']['sched_initial'] / self.cfg['train']['sched_min'],
-                epochs=self.cfg['train']['n_epochs'], steps_per_epoch=self.cfg['train']['steps'])
+                epochs=self.cfg['train']['epochs'], steps_per_epoch=self.cfg['train']['steps'])
 
     def get_onnx(self):
         x = torch.randn(1, 1, 720, 1280)
@@ -986,7 +989,7 @@ def run(cfg, logger):
     model_trainer.prepare_train_data()  # train data didn't loaded automatically as it loads all dataset in memory
 
     print(f'Start training on device: ', model_trainer.device)
-    for epoch in range(cfg['train']['n_epochs']):
+    for epoch in range(cfg['train']['epochs']):
 
         train_metrics = model_trainer.train(epoch, steps=cfg['train']['steps'])
         val_metrics = model_trainer.validate()
