@@ -15,6 +15,7 @@ from glob import glob
 from pathlib import Path
 from tqdm import tqdm
 
+import re
 import cv2
 import numpy as np
 from datetime import datetime
@@ -36,6 +37,7 @@ def norm(dims, num_groups=32, min_channels_group=4):
 def nonlinear(x):
     return torch.nn.functional.silu(x)
 
+
 def grad_norm(model):
     grads = [
         param.grad.detach().flatten()
@@ -45,6 +47,7 @@ def grad_norm(model):
     grads = torch.cat(grads)
     norm = grads.norm() / len(grads)
     return norm
+
 
 def get_YUV(R, G, B):
     Y = 0.299 * R + 0.587 * G + 0.114 * B
@@ -699,8 +702,10 @@ class Trainer():
             else torch.device('cpu')
 
         pref_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        self.val_weights_path = cfg['saving']['ckp_folder'] + cfg['model'][
-            'name'] + '-' + pref_time + '-val-weights.pth'
+        self.val_weights_path = cfg['saving']['ckp_folder'] + cfg['model']['name'] + '-' + pref_time \
+                                + '-val-weights.pth'
+        self.train_weights_path = cfg['saving']['ckp_folder'] + cfg['model']['name'] + '-' + pref_time \
+                                  + '-train-weights.pth'
         self.logs_path = cfg['saving']['log_folder'] + cfg['model']['name'] + '-' + pref_time + '-logs.json'
 
         self.scale = self.cfg['model']['upscale_factor']
@@ -710,6 +715,7 @@ class Trainer():
         self.validloaders = None
         self.best_train_loss = 100.0
         self.best_val_loss = 100.0
+        self.best_val_psnr = 0.0
         self.losses = None
         self.optimizer = None
         self.scheduler = None
@@ -733,6 +739,7 @@ class Trainer():
 
     def forward(self, x):
         return self.model(x)
+
     def train(self, epoch, steps=None):
 
         self.model.train()
@@ -836,12 +843,8 @@ class Trainer():
         total_metrics = []
         for valid_idx, validloader in enumerate(self.validloaders):
 
-            if self.cfg['data']['out']:
-                out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
-                os.makedirs(out_path, exist_ok=True)
-
             metrics = defaultdict(list)
-
+            upscaled_images = []
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
                     inputs, labels = data[0].to(self.device), data[1].to(self.device)
@@ -850,19 +853,25 @@ class Trainer():
                     for k, v in self.metrics(outputs, labels).items():
                         metrics[k].append(v.item())
 
-                    if self.cfg['data']['out']:
-                        out = torch.cat([
-                            outputs[:, :self.channels],
-                            torch.nn.functional.interpolate(
-                                inputs[:, self.channels:],
-                                scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
-                        out = to_image(out)
-                        for image_idx in range(len(out)):
-                            cv2.imwrite(os.path.join(out_path,
-                                                     f'{batch_idx * self.cfg["data"]["val_batch_size"] + image_idx}.png'),
-                                        cv2.cvtColor(out[image_idx], cv2.COLOR_RGB2BGR))
+                    out = torch.cat([
+                        outputs[:, :self.channels],
+                        torch.nn.functional.interpolate(inputs[:, self.channels:],
+                                                        scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
+                    upscaled_images.append(to_image(out))
 
-            total_metrics.append({k: torch.tensor(v).mean().item() for k, v in metrics.items()})
+            val_metrics = {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
+            total_metrics.append(val_metrics)
+
+            if self.cfg['data']['out'] and val_metrics['psnr'] > self.best_val_psnr:
+
+                out_path = os.path.join(self.cfg['data']['out'], f'val_{valid_idx}')
+                os.makedirs(out_path, exist_ok=True)
+
+                upscaled_images = torch.cat(upscaled_images, dim=0)
+                for image_idx in range(len(upscaled_images)):
+                    cv2.imwrite(os.path.join(out_path,
+                                             f'{batch_idx * self.cfg["data"]["val_batch_size"] + image_idx}.png'),
+                                cv2.cvtColor(out[image_idx], cv2.COLOR_RGB2BGR))
         return total_metrics
 
     def save_results(self, item):
@@ -874,16 +883,24 @@ class Trainer():
         if item['train_loss'] < self.best_train_loss:
             print("Best train loss updated.")
             self.best_train_loss = item['train_loss']
+            torch.save(self.model.state_dict(), self.train_weights_path)
 
-        val_loss = []
+        val_loss, val_psnr = [], []
         for key, value in item.items():
-            if key.startswith('val'):
+            if re.match(f'^val\d_loss$', key):
                 val_loss.append(value)
+            if re.match(f'^val\d_psnr$', key):
+                val_psnr.append(value)
         val_loss = torch.tensor(val_loss).mean().item()
         if val_loss < self.best_val_loss:
             print("Best val loss updated.")
-            torch.save(self.model.state_dict(), self.val_weights_path)
+            torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-loss'))
             self.best_val_loss = val_loss
+        val_psnr = torch.tensor(val_psnr).mean().item()
+        if val_psnr > self.best_val_psnr:
+            print("Best val psnr updated")
+            torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-psnr'))
+            self.best_val_psnr = val_psnr
 
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False):
 
