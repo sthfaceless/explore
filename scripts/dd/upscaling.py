@@ -413,6 +413,38 @@ class ConvBlock(torch.nn.Module):
         return out
 
 
+class WideOld(torch.nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+
+        squeeze_channels = in_channels // 3
+        self.pwconv_squeeze = torch.nn.Conv2d(in_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
+
+        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1))
+
+        self.conv2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (5, 5), (1, 1), (2, 2))
+
+        self.dwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1),
+                                       groups=squeeze_channels)
+        self.pwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
+
+    def forward(self, x):
+        x = self.pwconv_squeeze(x)
+        x = nonlinear(x)
+
+        x1 = self.conv1(x)
+
+        x2 = self.conv2(x)
+
+        x3 = self.dwconv3(x)
+        x3 = self.pwconv3(x3)
+
+        x = torch.cat((x1, x2, x3), dim=1)
+        x = nonlinear(x)
+
+        return x
+
+
 class WideConv(torch.nn.Module):
 
     def __init__(self, dim):
