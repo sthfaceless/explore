@@ -700,9 +700,11 @@ class Trainer():
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
                       *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                self.scheduler.step()
 
-        # if not isinstance(self.scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
-        self.scheduler.step()
+        if not isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            self.scheduler.step()
 
         return {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
 
@@ -891,12 +893,18 @@ class Trainer():
 
         if self.cfg['train']['sched'] == 'cosine':
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                self.optimizer, self.cfg['train']['sched_first'],
+                self.optimizer, self.cfg['train']['sched_start'],
                 T_mult=self.cfg['train']['sched_mult'], eta_min=lr * self.cfg['train']['sched_min'])
         elif self.cfg['train']['sched'] == 'multistep':
             self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
                                                                   milestones=self.cfg['train']['sched_steps'],
                                                                   gamma=self.cfg['train']['sched_gamma'])
+        elif self.cfg['train']['sched'] == 'one':
+            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched_start'] / self.cfg['train']['n_epochs'],
+                div_factor=1 / self.cfg['train']['sched_initial'],
+                final_div_factor=self.cfg['train']['sched_initial'] / self.cfg['train']['sched_min'],
+                epochs=self.cfg['train']['n_epochs'], steps_per_epoch=self.cfg['train']['steps'])
 
     def get_onnx(self):
         x = torch.randn(1, 1, 720, 1280)

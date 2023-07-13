@@ -18,7 +18,7 @@ metrics:
     mse: 1.0
     psnr: 0.0
     ssim: 0.0
-    rbf: 0.01
+    rbf: 0.0
   loss_name:
   - mse
   - mae
@@ -39,15 +39,16 @@ saving:
   log_folder: logs/
 train:
   base_rate: 0.002
-  rbf_filters: 48
-  n_epochs: 50
-  steps: 10000
+  rbf_filters:
+  epochs: 50
+  steps: 2000
   log_freq: 50
   optimizer: adam
   pretrained_weights: ''
   sched: 'cosine'
   sched_min: 0.01
-  sched_first: 5
+  sched_initial: 0.25
+  sched_start: 5
   sched_mult: 1
   sched_gamma: 0.4
   sched_steps:
