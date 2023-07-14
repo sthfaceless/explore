@@ -322,7 +322,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         return {
             'lr': lr_patch,
-            'sr': sr_patch
+            'hr': sr_patch
         }
 
     def __iter__(self):
@@ -358,7 +358,7 @@ class GameDataset(torch.utils.data.Dataset):
 
         return {
             'lr': img,
-            'sr': label,
+            'hr': label,
             'name': os.path.basename(label_path)
         }
 
@@ -485,6 +485,73 @@ class WideConv(torch.nn.Module):
         return x
 
 
+class SqueezeConv(torch.nn.Module):
+
+    def __init__(self, dim, use_norm=False):
+        super().__init__()
+
+        self.use_norm = use_norm
+        if norm:
+            self.in_norm = norm(dim)
+
+        squeeze_channels = dim // 3
+        # 3x3 kernel convolution
+        self.pw1 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=3, stride=1, padding=1)
+
+        # 5x5 kernel convolution
+        self.pw2 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=5, stride=1, padding=2)
+
+        # factorized 7x7 kernel convolution
+        self.pw3 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv31 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
+                                      kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
+        self.conv32 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
+                                      kernel_size=(7, 1), stride=(1, 1), padding=(3, 0))
+
+    def forward(self, x):
+        x = self.in_norm(x) if self.use_norm else x
+        x = nonlinear(x)
+        x1 = self.conv1(self.pw1(x))
+        x2 = self.conv2(self.pw2(x))
+        x3 = self.conv32(self.conv31(self.pw3(x)))
+
+        x = torch.cat((x1, x2, x3), dim=1)
+
+        return x
+
+
+class SqueezeBlock(torch.nn.Module):
+
+    def __init__(self, dim, block_size, use_norm=False):
+        super().__init__()
+
+        layers = []
+        for _ in range(block_size):
+            layers.append(SqueezeConv(dim, use_norm=use_norm))
+        self.layers = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.layers(x)
+        out = out + x
+        return out
+
+
+class VITBlock(torch.nn.Module):
+
+    def __init__(self, in_channels, dim):
+        super(VITBlock, self).__init__()
+        self.reducer = torch.nn.Conv2d(in_channels, dim, kernel_size=(4, 4), padding=0, stride=4)
+        self.expander = torch.nn.ConvTranspose2d(dim, in_channels, kernel_size=(4, 4), padding=0, stride=4)
+        self.pw = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0, stride=1)
+
+    def forward(self, x):
+        h = self.reducer(x)
+        h = self.expander(h)
+        return (h + self.pw(x)) / 2 ** 0.5
+
+
 class WideBlock(torch.nn.Module):
 
     def __init__(self, dim, block_size, use_norm=False):
@@ -511,7 +578,7 @@ class UpscalingModelBase(torch.nn.Module):
                  upscale_factor=2,
                  upscaling_method='PixelShuffle',
                  final_act='Sigmoid',
-                 main_block_type='depthwise-separable-convolution',
+                 main_block_type='wide',
                  use_norm=False):
         super().__init__()
 
@@ -530,6 +597,8 @@ class UpscalingModelBase(torch.nn.Module):
                 layers.append(ConvBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'wide':
                 layers.append(WideBlock(n_channels, block_size, use_norm=use_norm))
+            elif main_block_type == 'squeeze':
+                layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -1077,7 +1146,8 @@ if __name__ == "__main__":
         # When trainer loads weights it runs validation and all val upscaling results are saved in out directory
         Trainer(cfg)
     elif args.lr:
-        task = clearml.Task.init(project_name="upscaling", task_name="lr finding", reuse_last_task_id=True)
+        task = clearml.Task.init(project_name="upscaling", task_name=f"lr finding {cfg['model']['name']}",
+                                 reuse_last_task_id=True)
         task.connect(cfg, name='main params')
         logger = task.get_logger()
         trainer = Trainer(cfg)
