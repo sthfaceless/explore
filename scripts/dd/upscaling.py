@@ -109,7 +109,7 @@ def to_image(tensor, yuv=True):
     image = tensor.movedim(-3, -1).detach().cpu().numpy()
     if yuv:
         image = convert_YUV2RGB(image)
-    image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+    image = np.round(np.clip(image, 0, 1) * 255).astype(np.uint8)
     return image
 
 
@@ -320,7 +320,10 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         lr_patch = torch.nn.functional.interpolate(lr_patch.unsqueeze(0), scale_factor=1 / self.scale,
                                                    mode=choice([self.mode]))[0]
 
-        return lr_patch, sr_patch
+        return {
+            'lr': lr_patch,
+            'sr': sr_patch
+        }
 
     def __iter__(self):
         return self
@@ -337,10 +340,7 @@ class GameDataset(torch.utils.data.Dataset):
 
     def transform(self, image):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = np.array(image, dtype=np.float32) / 255.
-        image = convert_RGB2YUV(image)
-        image = torch.movedim(torch.tensor(image), -1, -3)
-
+        image = to_tensor(image, yuv=True)
         return image
 
     def __getitem__(self, idx):
@@ -356,7 +356,11 @@ class GameDataset(torch.utils.data.Dataset):
         else:
             img = torch.nn.functional.interpolate(label, scale_factor=0.5, mode=self.mode)
 
-        return img, label
+        return {
+            'lr': img,
+            'sr': label,
+            'name': os.path.basename(label_path)
+        }
 
     def __len__(self):
         return len(self.filenames)
@@ -399,7 +403,7 @@ class Conv(torch.nn.Module):
 
 class ConvBlock(torch.nn.Module):
 
-    def __init__(self, n_channels, block_size):
+    def __init__(self, n_channels, block_size, use_norm=False):
         super().__init__()
 
         layers = []
@@ -414,7 +418,7 @@ class ConvBlock(torch.nn.Module):
 
 
 class WideOld(torch.nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, use_norm=False):
         super().__init__()
 
         squeeze_channels = in_channels // 3
@@ -447,9 +451,13 @@ class WideOld(torch.nn.Module):
 
 class WideConv(torch.nn.Module):
 
-    def __init__(self, dim):
+    def __init__(self, dim, use_norm=False):
         super().__init__()
 
+        self.use_norm = use_norm
+        if norm:
+            self.in_norm = norm(dim)
+            self.out_norm = norm(3 * dim)
         # 3x3 kernel convolution
         self.conv1 = torch.nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
 
@@ -463,12 +471,14 @@ class WideConv(torch.nn.Module):
         self.out = torch.nn.Conv2d(3 * dim, dim, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
+        x = self.in_norm(x) if self.use_norm else x
         x = nonlinear(x)
         x1 = self.conv1(x)
         x2 = self.conv2(x)
         x3 = self.conv32(self.conv31(x))
 
         x = torch.cat((x1, x2, x3), dim=1)
+        x = self.out_norm(x) if self.use_norm else x
         x = nonlinear(x)
         x = self.out(x)
 
@@ -477,16 +487,16 @@ class WideConv(torch.nn.Module):
 
 class WideBlock(torch.nn.Module):
 
-    def __init__(self, dim, block_size):
+    def __init__(self, dim, block_size, use_norm=False):
         super().__init__()
 
         layers = []
         for _ in range(block_size):
-            layers.append(WideConv(dim))
-        self.wide_depthwise_conv_block = torch.nn.Sequential(*layers)
+            layers.append(WideConv(dim, use_norm=use_norm))
+        self.layers = torch.nn.Sequential(*layers)
 
     def forward(self, x):
-        out = self.wide_depthwise_conv_block(x)
+        out = self.layers(x)
         out = out + x
         return out
 
@@ -501,11 +511,13 @@ class UpscalingModelBase(torch.nn.Module):
                  upscale_factor=2,
                  upscaling_method='PixelShuffle',
                  final_act='Sigmoid',
-                 main_block_type='depthwise-separable-convolution'):
+                 main_block_type='depthwise-separable-convolution',
+                 use_norm=False):
         super().__init__()
 
         self.in_channels = in_channels
         self.scale = upscale_factor
+        self.use_norm = use_norm
 
         self.first_conv = torch.nn.Conv2d(in_channels, n_channels,
                                           kernel_size=kernel_size,
@@ -515,9 +527,9 @@ class UpscalingModelBase(torch.nn.Module):
         layers = []
         for _ in range(n_blocks):
             if main_block_type == 'conv':
-                layers.append(ConvBlock(n_channels, block_size))
+                layers.append(ConvBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'wide':
-                layers.append(WideBlock(n_channels, block_size))
+                layers.append(WideBlock(n_channels, block_size, use_norm=use_norm))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -527,6 +539,8 @@ class UpscalingModelBase(torch.nn.Module):
             self.upscaling_layer = torch.nn.ConvTranspose2d(n_channels, n_channels // (self.scale * self.scale),
                                                             kernel_size=self.scale, stride=self.scale, padding=0)
 
+        if use_norm:
+            self.out_norm = norm(n_channels // (self.scale * self.scale))
         self.final_conv = torch.nn.Conv2d(n_channels // (self.scale * self.scale), in_channels,
                                           kernel_size=kernel_size,
                                           stride=1,
@@ -544,6 +558,7 @@ class UpscalingModelBase(torch.nn.Module):
         Y = self.first_conv(x)
         Y = self.base_blocks_seq(Y)
         Y = self.upscaling_layer(Y)
+        Y = self.out_norm(Y) if self.use_norm else Y
         Y = self.final_conv(Y)
         Y = self.final_act(Y)
 
@@ -561,7 +576,8 @@ def build_model(cfg):
                                upscale_factor=cfg['model']['upscale_factor'],
                                upscaling_method=cfg['model']['upscaling_method'],
                                final_act=cfg['model']['final_act'],
-                               main_block_type=cfg['model']['main_block_type'])
+                               main_block_type=cfg['model']['main_block_type'],
+                               use_norm=cfg['model']['use_norm'])
     return model
 
 
@@ -714,8 +730,8 @@ class Trainer():
         for batch_id in range(steps):
 
             data = next(data_iter)
-            inputs = data[0].to(self.device, non_blocking=True)
-            labels = data[1].to(self.device, non_blocking=True)
+            inputs = data['lr'].to(self.device, non_blocking=True)
+            labels = data['hr'].to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
             outputs = self.forward(inputs)
@@ -805,20 +821,22 @@ class Trainer():
         for valid_idx, validloader in enumerate(self.validloaders):
 
             metrics = defaultdict(list)
-            upscaled_images = []
+            upscaled_images, upscaled_names = [], []
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
-                    inputs, labels = data[0].to(self.device), data[1].to(self.device)
+                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
                     outputs = self.upscale(inputs)
-
-                    for k, v in self.metrics(outputs, labels).items():
-                        metrics[k].append(v.item())
-
                     out = torch.cat([
                         outputs[:, :self.channels],
                         torch.nn.functional.interpolate(inputs[:, self.channels:],
                                                         scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
+                    # imitates image saving for correct validation metrics
+                    out = torch_convert_RGB2YUV((torch_convert_YUV2RGB(out) * 255.0).round() / 255.0)
+                    for k, v in self.metrics(out, labels).items():
+                        metrics[k].append(v.item())
+
                     upscaled_images.append(to_image(out))
+                    upscaled_names.extend(names)
 
             val_metrics = {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
             total_metrics.append(val_metrics)
@@ -830,7 +848,7 @@ class Trainer():
 
                 upscaled_images = np.concatenate(upscaled_images, axis=0)
                 for image_idx in range(len(upscaled_images)):
-                    cv2.imwrite(os.path.join(out_path, f'{image_idx}.png'),
+                    cv2.imwrite(os.path.join(out_path, upscaled_names[image_idx]),
                                 cv2.cvtColor(upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
         return total_metrics
 
