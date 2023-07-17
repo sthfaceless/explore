@@ -538,6 +538,57 @@ class SqueezeBlock(torch.nn.Module):
         return out
 
 
+class MiniConv(torch.nn.Module):
+
+    def __init__(self, dim):
+        super().__init__()
+
+        squeeze_channels = dim // 3
+        # 3x3 kernel convolution
+        self.pw1 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=3, stride=1, padding=1)
+
+        # factorized 5x5 kernel convolution
+        self.pw2 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv21 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(1, 5), stride=(1, 1),
+                                      padding=(0, 2))
+        self.conv22 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(5, 1), stride=(1, 1),
+                                      padding=(2, 0))
+
+        # factorized 7x7 kernel convolution
+        self.pw3 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.conv31 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
+                                      kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
+        self.conv32 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
+                                      kernel_size=(7, 1), stride=(1, 1), padding=(3, 0))
+
+    def forward(self, x):
+        x = nonlinear(x)
+        x1 = self.conv1(self.pw1(x))
+        x2 = self.conv22(self.conv21(self.pw2(x)))
+        x3 = self.conv32(self.conv31(self.pw3(x)))
+
+        x = torch.cat((x1, x2, x3), dim=1)
+
+        return x
+
+
+class MiniBlock(torch.nn.Module):
+
+    def __init__(self, dim, block_size):
+        super().__init__()
+
+        layers = []
+        for _ in range(block_size):
+            layers.append(MiniConv(dim))
+        self.layers = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.layers(x)
+        out = out + x
+        return out
+
+
 class VITBlock(torch.nn.Module):
 
     def __init__(self, in_channels, dim):
@@ -599,6 +650,8 @@ class UpscalingModelBase(torch.nn.Module):
                 layers.append(WideBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'squeeze':
                 layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm))
+            elif main_block_type == 'mini':
+                layers.append(MiniBlock(n_channels, block_size))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -1135,6 +1188,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default='scripts/dd/configs/upscaling.yaml')
     parser.add_argument("--val", action='store_true', help='run only validate')
+    parser.add_argument("--onnx", action='store_true', help='validate and save to onnx')
     parser.add_argument("--lr", action='store_true', help='run only learning rate finding')
     parser.set_defaults(val=False, lr=False)
     args = parser.parse_args()
@@ -1142,9 +1196,11 @@ if __name__ == "__main__":
     config_path = args.config_path
     cfg = yaml.load(open(config_path, 'r'), yaml.FullLoader)
 
-    if args.val:
+    if args.val or args.onnx:
         # When trainer loads weights it runs validation and all val upscaling results are saved in out directory
-        Trainer(cfg)
+        trainer = Trainer(cfg)
+        if args.onnx:
+            trainer.get_onnx()
     elif args.lr:
         task = clearml.Task.init(project_name="upscaling", task_name=f"lr finding {cfg['model']['name']}",
                                  reuse_last_task_id=True)
