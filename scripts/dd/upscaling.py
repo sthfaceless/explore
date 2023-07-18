@@ -416,75 +416,6 @@ class ConvBlock(torch.nn.Module):
         out = out + x
         return out
 
-
-class WideOld(torch.nn.Module):
-    def __init__(self, in_channels, use_norm=False):
-        super().__init__()
-
-        squeeze_channels = in_channels // 3
-        self.pwconv_squeeze = torch.nn.Conv2d(in_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
-
-        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1))
-
-        self.conv2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (5, 5), (1, 1), (2, 2))
-
-        self.dwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (3, 3), (1, 1), (1, 1),
-                                       groups=squeeze_channels)
-        self.pwconv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, (1, 1), (1, 1), (0, 0))
-
-    def forward(self, x):
-        x = self.pwconv_squeeze(x)
-        x = nonlinear(x)
-
-        x1 = self.conv1(x)
-
-        x2 = self.conv2(x)
-
-        x3 = self.dwconv3(x)
-        x3 = self.pwconv3(x3)
-
-        x = torch.cat((x1, x2, x3), dim=1)
-        x = nonlinear(x)
-
-        return x
-
-
-class WideConv(torch.nn.Module):
-
-    def __init__(self, dim, use_norm=False):
-        super().__init__()
-
-        self.use_norm = use_norm
-        if norm:
-            self.in_norm = norm(dim)
-            self.out_norm = norm(3 * dim)
-        # 3x3 kernel convolution
-        self.conv1 = torch.nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
-
-        # 5x5 kernel convolution
-        self.conv2 = torch.nn.Conv2d(dim, dim, kernel_size=5, stride=1, padding=2)
-
-        # factorized 7x7 kernel convolution
-        self.conv31 = torch.nn.Conv2d(dim, dim, kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
-        self.conv32 = torch.nn.Conv2d(dim, dim, kernel_size=(7, 1), stride=(1, 1), padding=(3, 0))
-
-        self.out = torch.nn.Conv2d(3 * dim, dim, kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        x = self.in_norm(x) if self.use_norm else x
-        x = nonlinear(x)
-        x1 = self.conv1(x)
-        x2 = self.conv2(x)
-        x3 = self.conv32(self.conv31(x))
-
-        x = torch.cat((x1, x2, x3), dim=1)
-        x = self.out_norm(x) if self.use_norm else x
-        x = nonlinear(x)
-        x = self.out(x)
-
-        return x
-
-
 class SqueezeConv(torch.nn.Module):
 
     def __init__(self, dim, use_norm=False):
@@ -551,16 +482,16 @@ class MiniConv(torch.nn.Module):
         # factorized 5x5 kernel convolution
         self.pw2 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
         self.conv21 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(1, 5), stride=(1, 1),
-                                      padding=(0, 2))
+                                      padding=(0, 2), groups=squeeze_channels)
         self.conv22 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(5, 1), stride=(1, 1),
-                                      padding=(2, 0))
+                                      padding=(2, 0), groups=squeeze_channels)
 
         # factorized 7x7 kernel convolution
         self.pw3 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
         self.conv31 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
-                                      kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
+                                      kernel_size=(1, 7), stride=(1, 1), padding=(0, 3), groups=squeeze_channels)
         self.conv32 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
-                                      kernel_size=(7, 1), stride=(1, 1), padding=(3, 0))
+                                      kernel_size=(7, 1), stride=(1, 1), padding=(3, 0), groups=squeeze_channels)
 
     def forward(self, x):
         x = nonlinear(x)
@@ -602,23 +533,6 @@ class VITBlock(torch.nn.Module):
         h = self.expander(h)
         return (h + self.pw(x)) / 2 ** 0.5
 
-
-class WideBlock(torch.nn.Module):
-
-    def __init__(self, dim, block_size, use_norm=False):
-        super().__init__()
-
-        layers = []
-        for _ in range(block_size):
-            layers.append(WideConv(dim, use_norm=use_norm))
-        self.layers = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.layers(x)
-        out = out + x
-        return out
-
-
 class UpscalingModelBase(torch.nn.Module):
 
     def __init__(self, n_channels,
@@ -628,8 +542,7 @@ class UpscalingModelBase(torch.nn.Module):
                  kernel_size=3,
                  upscale_factor=2,
                  upscaling_method='PixelShuffle',
-                 final_act='Sigmoid',
-                 main_block_type='wide',
+                 main_block_type='squeeze',
                  use_norm=False):
         super().__init__()
 
@@ -646,8 +559,6 @@ class UpscalingModelBase(torch.nn.Module):
         for _ in range(n_blocks):
             if main_block_type == 'conv':
                 layers.append(ConvBlock(n_channels, block_size, use_norm=use_norm))
-            elif main_block_type == 'wide':
-                layers.append(WideBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'squeeze':
                 layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'mini':
@@ -668,10 +579,7 @@ class UpscalingModelBase(torch.nn.Module):
                                           stride=1,
                                           padding=(kernel_size // 2, kernel_size // 2))
 
-        if final_act == 'Tanh':
-            self.final_act = torch.nn.Tanh()
-        elif final_act == 'Sigmoid':
-            self.final_act = torch.nn.Sigmoid()
+        self.final_act = torch.nn.Tanh()
 
     def forward(self, x):
 
@@ -697,7 +605,6 @@ def build_model(cfg):
                                kernel_size=cfg['model']['kernel_size'],
                                upscale_factor=cfg['model']['upscale_factor'],
                                upscaling_method=cfg['model']['upscaling_method'],
-                               final_act=cfg['model']['final_act'],
                                main_block_type=cfg['model']['main_block_type'],
                                use_norm=cfg['model']['use_norm'])
     return model
@@ -830,8 +737,10 @@ class Trainer():
     def metrics(self, outputs, labels):
         return {
             'loss': self.losses.combined_loss(outputs[:, :self.channels], labels[:, :self.channels]),
-            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0),  # gamma channel only
-            'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0)
+            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0,
+                                            dim=tuple(range(1, len(outputs.shape)))),  # gamma channel only
+            'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0,
+                                                        reduction=None).view(len(outputs), -1).mean(dim=1).mean()
         }
 
     def forward(self, x):
@@ -938,12 +847,15 @@ class Trainer():
 
     def validate(self):
 
+        save_images = self.cfg['data']['out'] is not None
+
         self.model.eval()
         total_metrics = []
         for valid_idx, validloader in enumerate(self.validloaders):
 
             metrics = defaultdict(list)
-            upscaled_images, upscaled_names = [], []
+            if save_images:
+                upscaled_images, upscaled_names = [], []
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
                     inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
@@ -957,13 +869,14 @@ class Trainer():
                     for k, v in self.metrics(out, labels).items():
                         metrics[k].append(v.item())
 
-                    upscaled_images.append(to_image(out))
-                    upscaled_names.extend(names)
+                    if save_images:
+                        upscaled_images.append(to_image(out))
+                        upscaled_names.extend(names)
 
             val_metrics = {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
             total_metrics.append(val_metrics)
 
-            if self.cfg['data']['out'] and val_metrics['psnr'] > self.best_val_psnr:
+            if save_images and val_metrics['psnr'] > self.best_val_psnr:
 
                 out_path = os.path.join(self.cfg['data']['out'], self.cfg['model']['name'], f'val_{valid_idx}')
                 os.makedirs(out_path, exist_ok=True)
@@ -1002,7 +915,7 @@ class Trainer():
             torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-psnr'))
             self.best_val_psnr = val_psnr
 
-    def get_dataset(self, folder, datasets=(), batch_size=1, patched=False):
+    def get_dataset(self, folder, datasets=(), batch_size=1, patched=False, val=False):
 
         file_names = get_filenames(folder, datasets)
         if patched:
@@ -1012,8 +925,8 @@ class Trainer():
             dataset.reset_cache()
         else:
             dataset = GameDataset(file_names)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched, num_workers=4,
-                                                 prefetch_factor=2, pin_memory=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
+                                                 num_workers=4, prefetch_factor=2, pin_memory=True)
         return dataloader
 
     def prepare_train_data(self):
@@ -1026,7 +939,7 @@ class Trainer():
             print(f'Number of images in the train: {train_len}')
 
     def prepare_val_data(self):
-        self.validloaders = [self.get_dataset(folder, batch_size=self.cfg['data']['val_batch_size'])
+        self.validloaders = [self.get_dataset(folder, batch_size=self.cfg['data']['val_batch_size'], val=True)
                              for folder in self.cfg['data']['val_folder']]
         for n, validloader in enumerate(self.validloaders):
             val_len = len(validloader) * self.cfg['data']['val_batch_size']
@@ -1127,7 +1040,8 @@ class Trainer():
 
             value = 0
             for acc_id in range(acc_grad):
-                inputs, labels = (v.to(self.device) for v in next(data_iter))
+                data = next(data_iter)
+                inputs, labels = data['lr'].to(self.device), data['hr'].to(self.device)
                 outputs = self.forward(inputs)
                 __metrics = self.metrics(outputs, labels)
                 (__metrics['loss'] / acc_grad).backward()

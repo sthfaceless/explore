@@ -1,5 +1,5 @@
 data:
-  batch_size: 128
+  batch_size: 256
   augment: false
   patched: true
   patch_size: 80
@@ -28,10 +28,10 @@ model:
   final_act: Tanh
   first_block_type: none
   kernel_size: 3
-  main_block_type: squeeze
+  main_block_type: mini
   n_blocks: 4
-  n_channels: 63
-  name: squeeze-model
+  n_channels: 6
+  name: mini-model
   upscale_factor: 2
   upscaling_method: ConvTranspose
   use_norm: false
@@ -39,7 +39,7 @@ saving:
   ckp_folder: checkpoints/
   log_folder: logs/
 train:
-  base_rate: 0.002
+  base_rate: 0.005
   rbf_filters:
   epochs: 30
   steps: 2000
