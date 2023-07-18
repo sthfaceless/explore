@@ -416,6 +416,7 @@ class ConvBlock(torch.nn.Module):
         out = out + x
         return out
 
+
 class SqueezeConv(torch.nn.Module):
 
     def __init__(self, dim, use_norm=False):
@@ -533,6 +534,7 @@ class VITBlock(torch.nn.Module):
         h = self.expander(h)
         return (h + self.pw(x)) / 2 ** 0.5
 
+
 class UpscalingModelBase(torch.nn.Module):
 
     def __init__(self, n_channels,
@@ -543,7 +545,8 @@ class UpscalingModelBase(torch.nn.Module):
                  upscale_factor=2,
                  upscaling_method='PixelShuffle',
                  main_block_type='squeeze',
-                 use_norm=False):
+                 use_norm=False,
+                 out_channels=None):
         super().__init__()
 
         self.in_channels = in_channels
@@ -569,15 +572,17 @@ class UpscalingModelBase(torch.nn.Module):
         if upscaling_method == 'PixelShuffle':
             self.upscaling_layer = torch.nn.PixelShuffle(self.scale)
         elif upscaling_method == 'ConvTranspose':
-            self.upscaling_layer = torch.nn.ConvTranspose2d(n_channels, n_channels // (self.scale * self.scale),
-                                                            kernel_size=self.scale, stride=self.scale, padding=0)
+            self.upscaling_layer = torch.nn.ConvTranspose2d(
+                n_channels, n_channels // (self.scale * self.scale) if not out_channels else out_channels,
+                kernel_size=self.scale, stride=self.scale, padding=0)
 
         if use_norm:
             self.out_norm = norm(n_channels // (self.scale * self.scale))
-        self.final_conv = torch.nn.Conv2d(n_channels // (self.scale * self.scale), in_channels,
-                                          kernel_size=kernel_size,
-                                          stride=1,
-                                          padding=(kernel_size // 2, kernel_size // 2))
+        self.final_conv = torch.nn.Conv2d(
+            n_channels // (self.scale * self.scale) if not out_channels else out_channels, in_channels,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=(kernel_size // 2, kernel_size // 2))
 
         self.final_act = torch.nn.Tanh()
 
@@ -600,13 +605,14 @@ class UpscalingModelBase(torch.nn.Module):
 def build_model(cfg):
     model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
                                n_blocks=cfg['model']['n_blocks'],
-                               in_channels=cfg['model']['channels'],
+                               in_channels=cfg['model']['in_channels'],
                                block_size=cfg['model']['block_size'],
                                kernel_size=cfg['model']['kernel_size'],
                                upscale_factor=cfg['model']['upscale_factor'],
                                upscaling_method=cfg['model']['upscaling_method'],
                                main_block_type=cfg['model']['main_block_type'],
-                               use_norm=cfg['model']['use_norm'])
+                               use_norm=cfg['model']['use_norm'],
+                               out_channels=cfg['model']['out_channels'])
     return model
 
 
@@ -713,7 +719,7 @@ class Trainer():
         self.logs_path = cfg['saving']['log_folder'] + cfg['model']['name'] + '-' + pref_time + '-logs.json'
 
         self.scale = self.cfg['model']['upscale_factor']
-        self.channels = self.cfg['model']['channels']
+        self.in_channels = self.cfg['model']['in_channels']
         self.model = None
         self.trainloader = None
         self.validloaders = None
@@ -736,7 +742,7 @@ class Trainer():
 
     def metrics(self, outputs, labels):
         return {
-            'loss': self.losses.combined_loss(outputs[:, :self.channels], labels[:, :self.channels]),
+            'loss': self.losses.combined_loss(outputs[:, :self.in_channels], labels[:, :self.in_channels]),
             'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0,
                                             dim=tuple(range(1, len(outputs.shape)))),  # gamma channel only
             'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0,
@@ -861,8 +867,8 @@ class Trainer():
                     inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
                     outputs = self.upscale(inputs)
                     out = torch.cat([
-                        outputs[:, :self.channels],
-                        torch.nn.functional.interpolate(inputs[:, self.channels:],
+                        outputs[:, :self.in_channels],
+                        torch.nn.functional.interpolate(inputs[:, self.in_channels:],
                                                         scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
                     # imitates image saving for correct validation metrics
                     out = torch_convert_RGB2YUV((torch_convert_YUV2RGB(out) * 255.0).round() / 255.0)
@@ -962,7 +968,7 @@ class Trainer():
 
     def configure_loss(self):
         if self.cfg['train']['rbf_filters']:
-            rbf = RandomBinaryFilter(in_channels=self.channels, filters=self.cfg['train']['rbf_filters'])
+            rbf = RandomBinaryFilter(in_channels=self.in_channels, filters=self.cfg['train']['rbf_filters'])
             rbf = rbf.to(self.device)
         else:
             rbf = None
