@@ -27,7 +27,7 @@ def process_game(game, videos_root, images_root):
                 ret, frame = cap.read()
                 if not ret:
                     break
-                img_name = f'{os.path.basename(path)}_{current_frame}.png'
+                img_name = f'{os.path.splitext(os.path.basename(path))[0]}_{current_frame}.png'
                 if not os.path.exists(f'{hr_out}/{img_name}'):
                     cv2.imwrite(f'{hr_out}/{img_name}', frame)
                 if not os.path.exists(f'{lr_out}/{img_name}'):
