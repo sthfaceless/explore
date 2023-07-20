@@ -4,7 +4,7 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
-from random import randint, randrange, choice, choices, random, sample
+from random import randint, randrange, choice, choices, random, sample, shuffle
 import imageio
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -271,7 +271,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.noise = noise
         self.orig = orig
         self.file_names = file_names
-        self.cache_size = cache_size
+        self.cache_size = cache_size if cache_size else sum([len(folder) for folder in file_names])
         self.mode = mode
 
         self.objects = []
@@ -310,8 +310,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         # randomly select items for cache
         total = sum([len(folder) for folder in self.file_names])
         files = list(itertools.chain.from_iterable([
-            sample(folder, k=int(len(folder) / total)) for folder in self.file_names
+            sample(folder, k=int(len(folder) / total * self.cache_size)) for folder in self.file_names
         ]))
+        shuffle(files)
 
         # create thread pool and submit all files
         tasks = []
@@ -406,7 +407,7 @@ def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format
     elif datasets_names[0] == 'all':  # take all game folders in the root folder
         dir_all = glob(os.path.join(dataset_path, '*'))
         for dir_game in dir_all:
-            pattern = os.path.join(dataset_path, hr_subfolder, pic_format)
+            pattern = os.path.join(dataset_path, dir_game, hr_subfolder, pic_format)
             print(pattern)
             filenames.append(glob(pattern))
     else:  # take all files from folder games in the list dataset_names
@@ -793,7 +794,7 @@ class Trainer:
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
-        if self.cfg['data']['cache_size'] and self.cfg['data']['patched']:
+        if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
             self.train_dataset.reset_cache()
 
         metrics = defaultdict(list)
@@ -965,7 +966,7 @@ class Trainer:
             dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
                                      patch_pad=self.cfg['data']['patch_pad'],
                                      augment=self.cfg['data']['augment'],
-                                     cache_size=args['data']['cache_size'])
+                                     cache_size=self.cfg['data']['cache_size'])
         else:
             dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
