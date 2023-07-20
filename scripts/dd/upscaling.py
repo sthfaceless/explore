@@ -29,7 +29,7 @@ import torch
 from einops import rearrange
 
 from torchmetrics.functional import peak_signal_noise_ratio, structural_similarity_index_measure
-import torchvision
+import torchvision.transforms as TF
 
 
 def norm(dims, num_groups=32, min_channels_group=4):
@@ -261,17 +261,32 @@ class SimpleLogger:
 
 class PatchedDataset(torch.utils.data.IterableDataset):
 
-    def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, augment=False, orig='hr', mode='bilinear'):
+    def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, augment=0.0, noise=0.0, orig='hr',
+                 mode='bilinear'):
         super(PatchedDataset, self).__init__()
         self.patch_size = patch_size
         self.patch_pad = patch_pad
         self.scale = scale
         self.augment = augment
+        self.noise = noise
         self.orig = orig
         self.file_names = file_names
         self.mode = mode
 
         self.objects = []
+        if augment > 0:
+            self.transforms = [
+                TF.RandomAffine(
+                    degrees=(-60, 60),
+                    translate=(0, 0.1),
+                    scale=(0.75, 1.0),
+                    interpolation=TF.InterpolationMode.BILINEAR),
+                TF.RandomPosterize(bits=6, p=1.0),
+                TF.RandomAdjustSharpness(sharpness_factor=2, p=1.0),
+                TF.RandomAutocontrast(p=1.0),
+                TF.RandomHorizontalFlip(p=1.0),
+                TF.RandomVerticalFlip(p=1.0)
+            ]
 
     def __load_file(self, file):
         frame = cv2.imread(file)
@@ -307,18 +322,16 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         sr_patch = sr[:, i_start:i_start + patch_size, j_start:j_start + patch_size]
         sr_patch = sr_patch.to(torch.float32)
 
-        lr_patch = sr_patch
-        if self.augment:
-            # random noise
-            if random() < 0.5:
-                lr_patch += torch.randn_like(lr_patch) * 0.05
-            # random blurring
-            if random() < 0.5:
-                ks = choice([1, 3, 5])
-                lr_patch = torchvision.transforms.functional.gaussian_blur(lr_patch, (ks, ks))
-        # random method down sampling
-        lr_patch = torch.nn.functional.interpolate(lr_patch.unsqueeze(0), scale_factor=1 / self.scale,
+        if random() < self.augment:
+            sr_patch = choice(self.transforms)[sr_patch]
+
+        # random down sampling
+        lr_patch = torch.nn.functional.interpolate(sr_patch.unsqueeze(0), scale_factor=1 / self.scale,
                                                    mode=choice([self.mode]))[0]
+
+        if random() < self.noise:
+            # random noise
+            lr_patch += torch.randn_like(lr_patch) * 0.05
 
         return {
             'lr': lr_patch,
@@ -694,9 +707,9 @@ class Losses():
     def combined_loss(self, y_pred, y_true):
         loss = torch.nn.functional.mse_loss(y_true, y_pred) * (self.coeff['mse'] if 'mse' in self.coeff else 0.0) + \
                torch.nn.functional.l1_loss(y_true, y_pred) * (self.coeff['mae'] if 'mae' in self.coeff else 0.0) + \
-               peak_signal_noise_ratio(y_pred, y_true, data_range=1.0) \
+               1 / peak_signal_noise_ratio(y_pred, y_true, data_range=1.0) \
                * (self.coeff['psnr'] if 'psnr' in self.coeff else 0.0) + \
-               structural_similarity_index_measure(y_pred, y_true, data_range=1.0) \
+               1 / structural_similarity_index_measure(y_pred, y_true, data_range=1.0) \
                * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0) + \
                ((charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
                    'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0)
@@ -1102,6 +1115,11 @@ def run(cfg, logger):
                 sorted(item.keys(), key=lambda x: x.split('_')[-1]), key=lambda x: x.split('_')[-1]):
             for k in group:
                 logger.report_scalar(title=key, series=k, iteration=epoch, value=item[k])
+
+        if train_metrics['psnr'] < 20.0:
+            print(f"Achieved train psnr --- {train_metrics['psnr']} model did not converged")
+            print('Stop training...')
+            break
 
 
 if __name__ == "__main__":

@@ -1,44 +1,35 @@
 import cv2
 import os
+
+import numpy as np
 from tqdm import tqdm
 from glob import glob
 from concurrent.futures import ThreadPoolExecutor
 from argparse import ArgumentParser
+import imageio.v3 as iio
+from imageio_ffmpeg import read_frames
 
 
-def process_game(game, videos_root, images_root):
+# os.environ['IMAGEIO_FFMPEG_EXE'] = '/dsk1/anaconda3/envs/danil/bin/ffmpeg'
+def process_game(game, videos_root, images_root, step=60):
     root = f'{videos_root}/{game}'
     lr_out = f'{images_root}/{game}/lr'
     hr_out = f'{images_root}/{game}/hr'
     os.makedirs(lr_out, exist_ok=True)
     os.makedirs(hr_out, exist_ok=True)
     for path in glob(f'{root}/*.mp4'):
-        cap = cv2.VideoCapture(path)
         try:
-            video_fps = int(cap.get(cv2.CAP_PROP_FPS))
-            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            current_frame = 0
-            step = video_fps
+            reader = read_frames(path)
+            meta = reader.__next__()
+            w, h = meta['size']
 
-            pbar = tqdm(total=n_frames // step, desc=f'processing {os.path.basename(path)}')
-            while cap.isOpened():
-                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                img_name = f'{os.path.splitext(os.path.basename(path))[0]}_{current_frame}.png'
-                if not os.path.exists(f'{hr_out}/{img_name}'):
-                    cv2.imwrite(f'{hr_out}/{img_name}', frame)
-                if not os.path.exists(f'{lr_out}/{img_name}'):
-                    cv2.imwrite(f'{lr_out}/{img_name}',
-                                cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2),
-                                           interpolation=cv2.INTER_LINEAR))
-                current_frame += step
-                pbar.update(1)
+            for idx, frame in tqdm(enumerate(reader), desc=f'processing {os.path.basename(path)}'):
+                if idx % step == 0:
+                    img_name = f'{os.path.splitext(os.path.basename(path))[0]}_{idx}.png'
+                    if not os.path.exists(f'{hr_out}/{img_name}'):
+                        iio.imwrite(f'{hr_out}/{img_name}', np.frombuffer(frame, dtype=np.uint8).reshape(h, w, 3))
 
-            pbar.close()
-            cap.release()
         except Exception as e:
             print(e)
 
@@ -48,6 +39,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--videos", type=str, default='/dsk1/danil/3d/nerf/data/games/video')
     parser.add_argument("--out", type=str, default='/dsk1/danil/3d/nerf/data/games/images')
+    parser.add_argument("--step", type=int, default=60)
     args = parser.parse_args()
 
     VIDEOS_ROOT = args.videos
@@ -57,6 +49,7 @@ if __name__ == "__main__":
     tasks = []
     with ThreadPoolExecutor(max_workers=8) as pool:
         for game in games:
-            tasks.append(pool.submit(process_game, game=game, videos_root=VIDEOS_ROOT, images_root=IMAGES_ROOT))
+            tasks.append(pool.submit(process_game, game=game, videos_root=VIDEOS_ROOT, images_root=IMAGES_ROOT,
+                                     step=args.step))
         for task in tqdm(tasks, desc='games processed'):
             task.result()
