@@ -1,5 +1,6 @@
 data:
   batch_size: 128
+  cache_size: 1000
   augment: 0.0
   noise: 0.0
   patched: true
@@ -8,7 +9,7 @@ data:
   val_batch_size: 5
   train_datasets:
   - all
-  train_folder: /dsk1/danil/3d/nerf/data/games/julia/
+  train_folder: /dsk1/danil/3d/nerf/data/games/images/
   val_folder:
   - /dsk1/danil/3d/nerf/data/facebook/
   mode: bilinear

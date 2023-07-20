@@ -4,7 +4,7 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
-from random import randint, randrange, choice, choices, random
+from random import randint, randrange, choice, choices, random, sample
 import imageio
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -262,7 +262,7 @@ class SimpleLogger:
 class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, augment=0.0, noise=0.0, orig='hr',
-                 mode='bilinear'):
+                 mode='bilinear', cache_size=1024):
         super(PatchedDataset, self).__init__()
         self.patch_size = patch_size
         self.patch_pad = patch_pad
@@ -271,6 +271,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.noise = noise
         self.orig = orig
         self.file_names = file_names
+        self.cache_size = cache_size
         self.mode = mode
 
         self.objects = []
@@ -281,7 +282,6 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                     translate=(0, 0.1),
                     scale=(0.75, 1.0),
                     interpolation=TF.InterpolationMode.BILINEAR),
-                TF.RandomPosterize(bits=6, p=1.0),
                 TF.RandomAdjustSharpness(sharpness_factor=2, p=1.0),
                 TF.RandomAutocontrast(p=1.0),
                 TF.RandomHorizontalFlip(p=1.0),
@@ -296,20 +296,38 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def load_file(self, file):
         return {self.orig: self.__load_file(file)}
 
-    def __reset_cache(self):
-        tasks = []
-        with ThreadPoolExecutor(max_workers=min(8, multiprocessing.cpu_count())) as pool:
-            for file in self.file_names:
-                tasks.append(pool.submit(self.load_file, file=file))
-
-            self.objects.clear()
-            for task in tqdm(tasks, desc='Loading cache'):
-                self.objects.append(task.result())
-
+    def __wait_tasks(self, tasks, pbar, pool, update=100):
+        for task_id, task in enumerate(tasks):
+            self.objects.append(task.result())
+            if task_id % update == 0:
+                pbar.update(update)
+        pbar.close()
+        pool.shutdown()
         gc.collect()
 
-    def reset_cache(self):
-        self.__reset_cache()
+    def reset_cache(self, warmup=100):
+
+        # randomly select items for cache
+        total = sum([len(folder) for folder in self.file_names])
+        files = list(itertools.chain.from_iterable([
+            sample(folder, k=int(len(folder) / total)) for folder in self.file_names
+        ]))
+
+        # create thread pool and submit all files
+        tasks = []
+        pool = ThreadPoolExecutor(max_workers=min(8, multiprocessing.cpu_count()))
+        for file in files:
+            tasks.append(pool.submit(self.load_file, file=file))
+
+        # clear cache and load first warmup items
+        self.objects.clear()
+        pbar = tqdm(total=len(tasks), desc='Loading cache')
+        for task in tasks[:warmup]:
+            self.objects.append(task.result())
+            pbar.update()
+
+        # asynchronously load rest items
+        run_async(self.__wait_tasks, tasks=tasks[warmup:], pbar=pbar, pool=pool)
 
     def load_patch(self, obj):
 
@@ -323,7 +341,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         sr_patch = sr_patch.to(torch.float32)
 
         if random() < self.augment:
-            sr_patch = choice(self.transforms)[sr_patch]
+            sr_patch = choice(self.transforms)(sr_patch)
 
         # random down sampling
         lr_patch = torch.nn.functional.interpolate(sr_patch.unsqueeze(0), scale_factor=1 / self.scale,
@@ -382,20 +400,20 @@ class GameDataset(torch.utils.data.Dataset):
 def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format='*.png'):
     filenames = []
     if len(datasets_names) == 0:
-        f = glob(os.path.join(dataset_path, hr_subfolder, pic_format))
-        print(dataset_path, hr_subfolder, pic_format)
-        filenames.extend(f)
+        pattern = os.path.join(dataset_path, hr_subfolder, pic_format)
+        print(pattern)
+        filenames.append(glob(pattern))
     elif datasets_names[0] == 'all':  # take all game folders in the root folder
         dir_all = glob(os.path.join(dataset_path, '*'))
         for dir_game in dir_all:
-            print(dir_game, hr_subfolder, pic_format)
-            f = glob(os.path.join(dir_game, hr_subfolder, pic_format))
-            print(dir_game, hr_subfolder, pic_format)
-            filenames.extend(f)
+            pattern = os.path.join(dataset_path, hr_subfolder, pic_format)
+            print(pattern)
+            filenames.append(glob(pattern))
     else:  # take all files from folder games in the list dataset_names
         for game in datasets_names:
-            f = glob(os.path.join(dataset_path, game, hr_subfolder, pic_format))
-            filenames.extend(f)
+            pattern =  os.path.join(dataset_path, game, hr_subfolder, pic_format)
+            print(pattern)
+            filenames.extend(glob(pattern))
 
     return filenames
 
@@ -699,7 +717,7 @@ class SimpleDiscriminator(torch.nn.Module):
         return torch.sigmoid(probs.view(-1)) if return_probs else probs.view(-1)
 
 
-class Losses():
+class Losses:
     def __init__(self, loss_coeff, rbf=None):
         self.coeff = loss_coeff
         self.rbf = rbf
@@ -716,7 +734,7 @@ class Losses():
         return loss
 
 
-class Trainer():
+class Trainer:
 
     def __init__(self, cfg):
 
@@ -734,6 +752,7 @@ class Trainer():
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
         self.model = None
+        self.train_dataset = None
         self.trainloader = None
         self.validloaders = None
         self.best_train_loss = 100.0
@@ -773,6 +792,9 @@ class Trainer():
                 steps = len(self.trainloader)
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
+
+        if self.cfg['data']['cache_size'] and self.cfg['data']['patched']:
+            self.train_dataset.reset_cache()
 
         metrics = defaultdict(list)
 
@@ -919,15 +941,17 @@ class Trainer():
 
         val_loss, val_psnr = [], []
         for key, value in item.items():
-            if re.match(f'^val\d_loss$', key):
+            if re.match(f'^val\d*_loss$', key):
                 val_loss.append(value)
-            if re.match(f'^val\d_psnr$', key):
+            if re.match(f'^val\d*_psnr$', key):
                 val_psnr.append(value)
+
         val_loss = torch.tensor(val_loss).mean().item()
         if val_loss < self.best_val_loss:
             print("Best val loss updated.")
             torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-loss'))
             self.best_val_loss = val_loss
+
         val_psnr = torch.tensor(val_psnr).mean().item()
         if val_psnr > self.best_val_psnr:
             print("Best val psnr updated")
@@ -940,25 +964,27 @@ class Trainer():
         if patched:
             dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
                                      patch_pad=self.cfg['data']['patch_pad'],
-                                     augment=self.cfg['data']['augment'])
-            dataset.reset_cache()
+                                     augment=self.cfg['data']['augment'],
+                                     cache_size=args['data']['cache_size'])
         else:
-            dataset = GameDataset(file_names)
+            dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
-                                                 num_workers=4, prefetch_factor=2, pin_memory=True)
-        return dataloader
+                                                 num_workers=2 * torch.cuda.device_count(), prefetch_factor=2,
+                                                 pin_memory=True)
+        return dataset, dataloader
 
     def prepare_train_data(self):
-        self.trainloader = self.get_dataset(self.cfg['data']['train_folder'],
-                                            self.cfg['data']['train_datasets'],
-                                            self.cfg['data']['batch_size'], patched=self.cfg['data']['patched'])
+        self.train_dataset, self.trainloader = self.get_dataset(self.cfg['data']['train_folder'],
+                                                                self.cfg['data']['train_datasets'],
+                                                                self.cfg['data']['batch_size'],
+                                                                patched=self.cfg['data']['patched'])
 
         if not self.cfg['data']['patched']:
             train_len = len(self.trainloader) * self.cfg['data']['batch_size']
             print(f'Number of images in the train: {train_len}')
 
     def prepare_val_data(self):
-        self.validloaders = [self.get_dataset(folder, batch_size=self.cfg['data']['val_batch_size'], val=True)
+        self.validloaders = [self.get_dataset(folder, batch_size=self.cfg['data']['val_batch_size'], val=True)[1]
                              for folder in self.cfg['data']['val_folder']]
         for n, validloader in enumerate(self.validloaders):
             val_len = len(validloader) * self.cfg['data']['val_batch_size']
