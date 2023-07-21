@@ -282,7 +282,6 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                     translate=(0, 0.1),
                     scale=(0.75, 1.0),
                     interpolation=TF.InterpolationMode.BILINEAR),
-                TF.RandomAutocontrast(p=1.0),
                 TF.RandomHorizontalFlip(p=1.0),
                 TF.RandomVerticalFlip(p=1.0)
             ]
@@ -311,8 +310,8 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         if len(self.objects) >= total - len(self.file_names):
             return
 
-        files = list(itertools.chainew.from_iterable([
-            sample(folder, k=int(len(folder) / total * self.cache_size)) for folder in self.file_names
+        files = list(itertools.chain.from_iterable([
+            sample(folder, k=int(len(folder) / total * min(self.cache_size, total))) for folder in self.file_names
         ]))
         shuffle(files)
 
@@ -760,6 +759,7 @@ class Trainer:
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
         self.model = None
+        self.models = None
         self.train_dataset = None
         self.trainloader = None
         self.validloaders = None
@@ -769,6 +769,7 @@ class Trainer:
         self.losses = None
         self.optimizer = None
         self.scheduler = None
+        self.scheduler_interval = 'epoch'
 
         self.configure()
         if cfg['train']['pretrained_weights']:
@@ -789,12 +790,12 @@ class Trainer:
                                                         reduction=None).view(len(outputs), -1).mean(dim=1).mean()
         }
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, model=''):
+        return self.models[model](x)
 
     def train(self, epoch, steps=None):
 
-        self.model.train()
+        self.models[''].train()
         if steps is None:
             if not self.cfg['data']['patched']:
                 steps = len(self.trainloader)
@@ -823,20 +824,31 @@ class Trainer:
             for k, v in __metrics.items():
                 metrics[k].append(v.item())
 
+            # lr scheduling
+            if self.scheduler_interval == 'step':
+                self.scheduler.step()
+
+            # ema updates
+            if 'ema' in self.models:
+                self.models['ema'].update_parameters(self.model)
+
+            # logs running statistics
             record_step = steps // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
                       *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
-            if isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
-                self.scheduler.step()
 
-        if not isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
+        if self.scheduler_interval == 'epoch':
             self.scheduler.step()
+
+        # swa updates
+        if 'swa' in self.models:
+            self.models['swa'].update_parameters(self.model)
 
         return {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
 
-    def patch_upscale(self, images):
+    def patch_upscale(self, images, model=''):
 
         b, c, h_orig, w_orig = images.shape
         patch_size, patch_pad = self.cfg['data']['patch_size'], self.cfg['data']['patch_pad']
@@ -871,7 +883,7 @@ class Trainer:
 
         upscaled = []
         for __tiles in torch.split(tiles, self.cfg['data']['batch_size'], dim=0):
-            upscaled.append(self.forward(__tiles.to(self.device)).to(images.device))
+            upscaled.append(self.forward(__tiles.to(self.device), model=model).to(images.device))
             del __tiles
         gc.collect()
         torch.cuda.empty_cache()
@@ -887,53 +899,65 @@ class Trainer:
         return upscaled
 
     @torch.no_grad()
-    def upscale(self, inputs):
+    def upscale(self, inputs, model=''):
         orig_device = inputs.device
         if self.cfg['data']['patched']:
-            return self.patch_upscale(inputs)
+            return self.patch_upscale(inputs, model=model)
         else:
-            return self.forward(inputs.to(self.device)).to(orig_device)
+            return self.forward(inputs.to(self.device), model=model).to(orig_device)
 
     def validate(self):
 
         save_images = self.cfg['data']['out'] is not None
 
-        self.model.eval()
+        for model in self.models.values():
+            model.eval()
+
         total_metrics = []
         for valid_idx, validloader in enumerate(self.validloaders):
 
-            metrics = defaultdict(list)
             if save_images:
-                upscaled_images, upscaled_names = [], []
+                upscaled_images, upscaled_names = defaultdict(list), defaultdict(list)
+
+            metrics = defaultdict(list)
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
-                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
-                    outputs = self.upscale(inputs)
-                    out = torch.cat([
-                        outputs[:, :self.in_channels],
-                        torch.nn.functional.interpolate(inputs[:, self.in_channels:],
-                                                        scale_factor=self.scale, mode=self.cfg['data']['mode'])], dim=1)
-                    # imitates image saving for correct validation metrics
-                    out = torch_convert_RGB2YUV((torch_convert_YUV2RGB(out) * 255.0).round() / 255.0)
-                    for k, v in self.metrics(out, labels).items():
-                        metrics[k].append(v.item())
 
-                    if save_images:
-                        upscaled_images.append(to_image(out))
-                        upscaled_names.extend(names)
+                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
+
+                    for model in self.models.keys():
+                        outputs = self.upscale(inputs, model=model)
+                        out = torch.cat([
+                            outputs[:, :self.in_channels],
+                            torch.nn.functional.interpolate(inputs[:, self.in_channels:], scale_factor=self.scale,
+                                                            mode=self.cfg['data']['mode'])], dim=1)
+
+                        # imitates image saving for correct validation metrics
+                        out = torch_convert_RGB2YUV((torch_convert_YUV2RGB(out) * 255.0).round() / 255.0)
+                        for k, v in self.metrics(out, labels).items():
+                            metrics[f'{model}_{k}'].append(v.item())
+
+                        if save_images:
+                            upscaled_images[model].append(to_image(out))
+                            upscaled_names[model].extend(names)
 
             val_metrics = {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
             total_metrics.append(val_metrics)
 
-            if save_images and val_metrics['psnr'] > self.best_val_psnr:
+            best_val_psnr = self.best_val_psnr
+            for model in self.models.keys():
+                if save_images and val_metrics[f'{model}_psnr'] > best_val_psnr:
 
-                out_path = os.path.join(self.cfg['data']['out'], self.cfg['model']['name'], f'val_{valid_idx}')
-                os.makedirs(out_path, exist_ok=True)
+                    out_path = os.path.join(self.cfg['data']['out'], self.cfg['model']['name'], f'val_{valid_idx}')
+                    os.makedirs(out_path, exist_ok=True)
 
-                upscaled_images = np.concatenate(upscaled_images, axis=0)
-                for image_idx in range(len(upscaled_images)):
-                    cv2.imwrite(os.path.join(out_path, upscaled_names[image_idx]),
-                                cv2.cvtColor(upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
+                    __upscaled_images = np.concatenate(upscaled_images[model], axis=0)
+                    for image_idx in range(len(__upscaled_images)):
+                        cv2.imwrite(os.path.join(out_path, upscaled_names[model][image_idx]),
+                                    cv2.cvtColor(__upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
+
+                    best_val_psnr = val_metrics[f'{model}_psnr']
+
         return total_metrics
 
     def save_results(self, item):
@@ -947,24 +971,18 @@ class Trainer:
             self.best_train_loss = item['train_loss']
             torch.save(self.model.state_dict(), self.train_weights_path)
 
-        val_loss, val_psnr = [], []
-        for key, value in item.items():
-            if re.match(f'^val\d*_loss$', key):
-                val_loss.append(value)
-            if re.match(f'^val\d*_psnr$', key):
-                val_psnr.append(value)
+        for model_name in self.models.keys():
+            val_loss, val_psnr = [], []
+            for key, value in item.items():
+                if re.match(f'^val\d*_{model_name}_psnr$', key):
+                    val_psnr.append(value)
 
-        val_loss = torch.tensor(val_loss).mean().item()
-        if val_loss < self.best_val_loss:
-            print("Best val loss updated.")
-            torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-loss'))
-            self.best_val_loss = val_loss
-
-        val_psnr = torch.tensor(val_psnr).mean().item()
-        if val_psnr > self.best_val_psnr:
-            print("Best val psnr updated")
-            torch.save(self.model.state_dict(), self.val_weights_path.replace('val', 'val-psnr'))
-            self.best_val_psnr = val_psnr
+            val_psnr = torch.tensor(val_psnr).mean().item()
+            if val_psnr > self.best_val_psnr:
+                print("Best val psnr updated")
+                model = self.model if model_name == '' else self.models[model_name].module
+                torch.save(model.state_dict(), self.val_weights_path.replace('val', 'val-psnr'))
+                self.best_val_psnr = val_psnr
 
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False, val=False):
 
@@ -1009,10 +1027,17 @@ class Trainer:
         print('Total number of parameters: ', total_params)
         print('Number of trainable parameters: ', trainable_params)
         print(model)
-        self.model = model
 
         print('device: ', self.device)
-        self.model.to(self.device)
+        self.model = model.to(self.device)
+        self.models = {'': self.model}
+
+        if 'swa' in self.cfg['model']['avg']:
+            self.models['swa'] = torch.optim.swa_utils.AveragedModel(model, device=self.device)
+
+        if 'ema' in self.cfg['model']['avg']:
+            self.models['ema'] = torch.optim.swa_utils.AveragedModel(
+                model, avg_fn=lambda averaged, params, num: averaged * 0.999 + (1 - 0.999) * params, device=self.device)
 
     def configure_loss(self):
         if self.cfg['train']['rbf_filters']:
@@ -1034,14 +1059,16 @@ class Trainer:
             self.optimizer = Lamb(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
 
         if self.cfg['train']['sched'] == 'cosine':
+            self.scheduler_interval = 'step'
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                self.optimizer, self.cfg['train']['sched_start'],
+                self.optimizer, T_0=self.cfg['train']['sched_start'] * self.cfg['train']['steps'],
                 T_mult=self.cfg['train']['sched_mult'], eta_min=lr * self.cfg['train']['sched_min'])
         elif self.cfg['train']['sched'] == 'multistep':
             self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
                                                                   milestones=self.cfg['train']['sched_steps'],
                                                                   gamma=self.cfg['train']['sched_gamma'])
         elif self.cfg['train']['sched'] == 'one':
+            self.scheduler_interval = 'step'
             self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched_start'] / self.cfg['train']['epochs'],
                 div_factor=1 / self.cfg['train']['sched_initial'],
