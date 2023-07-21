@@ -40,7 +40,7 @@ def norm(dims, num_groups=32, min_channels_group=4):
 
 
 def nonlinear(x):
-    return torch.nn.functional.silu(x)
+    return torch.nn.functional.elu(x, alpha=1.0)
 
 
 def grad_norm(model):
@@ -261,8 +261,8 @@ class SimpleLogger:
 
 class PatchedDataset(torch.utils.data.IterableDataset):
 
-    def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, augment=0.0, noise=0.0, orig='hr',
-                 mode='bilinear', cache_size=1024):
+    def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, in_channels=3, augment=0.0, noise=0.0,
+                 orig='hr', mode='bilinear', cache_size=1024):
         super(PatchedDataset, self).__init__()
         self.patch_size = patch_size
         self.patch_pad = patch_pad
@@ -282,7 +282,6 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                     translate=(0, 0.1),
                     scale=(0.75, 1.0),
                     interpolation=TF.InterpolationMode.BILINEAR),
-                TF.RandomAdjustSharpness(sharpness_factor=2, p=1.0),
                 TF.RandomAutocontrast(p=1.0),
                 TF.RandomHorizontalFlip(p=1.0),
                 TF.RandomVerticalFlip(p=1.0)
@@ -309,7 +308,10 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         # randomly select items for cache
         total = sum([len(folder) for folder in self.file_names])
-        files = list(itertools.chain.from_iterable([
+        if len(self.objects) >= total - len(self.file_names):
+            return
+
+        files = list(itertools.chainew.from_iterable([
             sample(folder, k=int(len(folder) / total * self.cache_size)) for folder in self.file_names
         ]))
         shuffle(files)
@@ -322,6 +324,8 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         # clear cache and load first warmup items
         self.objects.clear()
+        gc.collect()
+
         pbar = tqdm(total=len(tasks), desc='Loading cache')
         for task in tasks[:warmup]:
             self.objects.append(task.result())
@@ -412,7 +416,7 @@ def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format
             filenames.append(glob(pattern))
     else:  # take all files from folder games in the list dataset_names
         for game in datasets_names:
-            pattern =  os.path.join(dataset_path, game, hr_subfolder, pic_format)
+            pattern = os.path.join(dataset_path, game, hr_subfolder, pic_format)
             print(pattern)
             filenames.extend(glob(pattern))
 
@@ -451,7 +455,7 @@ class ConvBlock(torch.nn.Module):
 
 class SqueezeConv(torch.nn.Module):
 
-    def __init__(self, dim, use_norm=False):
+    def __init__(self, dim, use_norm=False, dropout=0.0):
         super().__init__()
 
         self.use_norm = use_norm
@@ -469,6 +473,7 @@ class SqueezeConv(torch.nn.Module):
 
         # factorized 7x7 kernel convolution
         self.pw3 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        self.dropout3 = torch.nn.Dropout2d(p=dropout)
         self.conv31 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
                                       kernel_size=(1, 7), stride=(1, 1), padding=(0, 3))
         self.conv32 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
@@ -479,7 +484,7 @@ class SqueezeConv(torch.nn.Module):
         x = nonlinear(x)
         x1 = self.conv1(self.pw1(x))
         x2 = self.conv2(self.pw2(x))
-        x3 = self.conv32(self.conv31(self.pw3(x)))
+        x3 = self.conv32(self.conv31(self.dropout3(self.pw3(x))))
 
         x = torch.cat((x1, x2, x3), dim=1)
 
@@ -488,12 +493,12 @@ class SqueezeConv(torch.nn.Module):
 
 class SqueezeBlock(torch.nn.Module):
 
-    def __init__(self, dim, block_size, use_norm=False):
+    def __init__(self, dim, block_size, use_norm=False, dropout=0.0):
         super().__init__()
 
         layers = []
         for _ in range(block_size):
-            layers.append(SqueezeConv(dim, use_norm=use_norm))
+            layers.append(SqueezeConv(dim, use_norm=use_norm, dropout=dropout))
         self.layers = torch.nn.Sequential(*layers)
 
     def forward(self, x):
@@ -578,6 +583,7 @@ class UpscalingModelBase(torch.nn.Module):
                  upscaling_method='PixelShuffle',
                  main_block_type='squeeze',
                  use_norm=False,
+                 dropout=0.0,
                  out_channels=None):
         super().__init__()
 
@@ -595,7 +601,7 @@ class UpscalingModelBase(torch.nn.Module):
             if main_block_type == 'conv':
                 layers.append(ConvBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'squeeze':
-                layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm))
+                layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
                 layers.append(MiniBlock(n_channels, block_size))
 
@@ -641,6 +647,7 @@ def build_model(cfg):
                                block_size=cfg['model']['block_size'],
                                kernel_size=cfg['model']['kernel_size'],
                                upscale_factor=cfg['model']['upscale_factor'],
+                               dropout=cfg['model']['dropout'],
                                upscaling_method=cfg['model']['upscaling_method'],
                                main_block_type=cfg['model']['main_block_type'],
                                use_norm=cfg['model']['use_norm'],
@@ -966,7 +973,8 @@ class Trainer:
             dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
                                      patch_pad=self.cfg['data']['patch_pad'],
                                      augment=self.cfg['data']['augment'],
-                                     cache_size=self.cfg['data']['cache_size'])
+                                     cache_size=self.cfg['data']['cache_size'],
+                                     in_channels=self.cfg['model']['in_channels'])
         else:
             dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,

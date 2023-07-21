@@ -28,6 +28,7 @@ model:
   block_size: 2
   in_channels: 1
   out_channels: 3
+  dropout: 0.0
   final_act: Tanh
   first_block_type: none
   kernel_size: 3

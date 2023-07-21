@@ -27,6 +27,7 @@ metrics:
 model:
   block_size: 2
   in_channels: 1
+  dropout: 0.0
   out_channels:
   final_act: Tanh
   first_block_type: none
@@ -47,13 +48,13 @@ train:
   epochs: 30
   steps: 2000
   log_freq: 50
-  optimizer: adam
+  optimizer: lamb
   pretrained_weights: ''
   sched: 'one'
   sched_min: 0.01
   sched_initial: 0.25
   sched_start: 3
-  sched_mult: 1
+  sched_mult: 2
   sched_gamma: 0.4
   sched_steps:
   - 7
