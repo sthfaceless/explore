@@ -39,6 +39,7 @@ model:
   upscale_factor: 2
   upscaling_method: ConvTranspose
   use_norm: false
+  swa_warmup: 12
   avg:
   - ema
   - swa

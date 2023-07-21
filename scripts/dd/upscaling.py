@@ -844,7 +844,7 @@ class Trainer:
             self.scheduler.step()
 
         # swa updates
-        if 'swa' in self.models:
+        if 'swa' in self.models and epoch >= self.cfg['model']['swa_warmup']:
             self.models['swa'].update_parameters(self.model)
 
         return {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
