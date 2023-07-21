@@ -56,8 +56,8 @@ train:
   sched: 'cosine'
   sched_min: 0.01
   sched_initial: 0.25
-  sched_start: 3
-  sched_mult: 1.5
+  sched_start: 4
+  sched_mult: 2
   sched_gamma: 0.4
   sched_steps:
   - 7

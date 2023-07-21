@@ -40,7 +40,7 @@ def norm(dims, num_groups=32, min_channels_group=4):
 
 
 def nonlinear(x):
-    return torch.nn.functional.elu(x, alpha=1.0)
+    return torch.nn.functional.silu(x)
 
 
 def grad_norm(model):
@@ -98,11 +98,11 @@ def torch_convert_YUV2RGB(tensor):
     return torch.stack(get_RGB(Y, Cb, Cr), dim=1)
 
 
-def to_tensor(image, yuv=True):
+def to_tensor(image, yuv=True, in_channels=3):
     image = image.astype(np.float32) / 255.0
     if yuv:
         image = convert_RGB2YUV(image)
-    return torch.tensor(image).movedim(-1, -3)
+    return torch.tensor(image[:, :, :in_channels]).movedim(-1, -3)
 
 
 def to_image(tensor, yuv=True):
@@ -267,6 +267,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.patch_size = patch_size
         self.patch_pad = patch_pad
         self.scale = scale
+        self.in_channels = in_channels
         self.augment = augment
         self.noise = noise
         self.orig = orig
@@ -289,7 +290,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def __load_file(self, file):
         frame = cv2.imread(file)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        return to_tensor(frame).to(torch.float16)
+        return to_tensor(frame, in_channels=self.in_channels).to(torch.float16)
 
     def load_file(self, file):
         return {self.orig: self.__load_file(file)}
@@ -1037,7 +1038,7 @@ class Trainer:
 
         if 'ema' in self.cfg['model']['avg']:
             self.models['ema'] = torch.optim.swa_utils.AveragedModel(
-                model, avg_fn=lambda averaged, params, num: averaged * 0.999 + (1 - 0.999) * params, device=self.device)
+                model, avg_fn=torch.optim.swa_utils.get_ema_avg_fn(0.999), device=self.device)
 
     def configure_loss(self):
         if self.cfg['train']['rbf_filters']:
