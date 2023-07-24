@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 from random import randint, randrange, choice, choices, random, sample, shuffle
+import math
 import imageio
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -259,6 +260,23 @@ class SimpleLogger:
             self.log_gif(frames, gap, f'{name}_{idx}', tempdir, epoch)
 
 
+class CutBlur(torch.nn.Module):
+
+    def __init__(self, patch=16, scale=2.0):
+        super(CutBlur, self).__init__()
+        self.patch = patch
+        self.scale = scale
+
+    def forward(self, image):
+        i_start = randint(0, image.shape[0] - self.patch - 1)
+        j_start = randint(0, image.shape[1] - self.patch - 1)
+        patch = image[:, i_start:i_start + self.patch, j_start:j_start + self.patch]
+        patch = torch.nn.functional.interpolate(patch.unsqueeze(0), scale_factor=1 / self.scale, mode='bilinear')
+        patch = torch.nn.functional.interpolate(patch, scale_factor=self.scale, mode='bilinear')[0]
+        image[:, i_start:i_start + self.patch, j_start:j_start + self.patch] = patch
+        return image
+
+
 class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, in_channels=3, augment=0.0, noise=0.0,
@@ -281,10 +299,15 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                 TF.RandomAffine(
                     degrees=(-60, 60),
                     translate=(0, 0.1),
-                    scale=(0.75, 1.0),
+                    scale=(1.0, 1.0),
                     interpolation=TF.InterpolationMode.BILINEAR),
                 TF.RandomHorizontalFlip(p=1.0),
                 TF.RandomVerticalFlip(p=1.0)
+            ]
+        if noise > 0:
+            self.noises = [
+                CutBlur(patch=patch_size // 4),
+                # lambda x: x + torch.randn_like(x) * 0.005
             ]
 
     def __load_file(self, file):
@@ -353,8 +376,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                                                    mode=choice([self.mode]))[0]
 
         if random() < self.noise:
-            # random noise
-            lr_patch += torch.randn_like(lr_patch) * 0.05
+            lr_patch = choice(self.noises)(lr_patch)
 
         return {
             'lr': lr_patch,
@@ -796,7 +818,6 @@ class Trainer:
 
     def train(self, epoch, steps=None):
 
-        self.models[''].train()
         if steps is None:
             if not self.cfg['data']['patched']:
                 steps = len(self.trainloader)
@@ -805,10 +826,11 @@ class Trainer:
 
         if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
             self.train_dataset.reset_cache()
+        data_iter = iter(self.trainloader)
+
+        self.model.train()
 
         metrics = defaultdict(list)
-
-        data_iter = iter(self.trainloader)
         for batch_id in range(steps):
 
             data = next(data_iter)
@@ -829,10 +851,6 @@ class Trainer:
             if self.scheduler_interval == 'step':
                 self.scheduler.step()
 
-            # ema updates
-            if 'ema' in self.models:
-                self.models['ema'].update_parameters(self.model)
-
             # logs running statistics
             record_step = steps // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
@@ -840,12 +858,18 @@ class Trainer:
                       *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
 
+            # ema updates
+            if 'ema' in self.cfg['model']['avg']:
+                self.models['ema'].update_parameters(self.model)
+
+            # swa updates
+            if 'swa' in self.cfg['model']['avg'] and \
+                    math.isclose(self.scheduler.get_last_lr(),
+                                 self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']):
+                self.models['swa'].update_parameters(self.model)
+
         if self.scheduler_interval == 'epoch':
             self.scheduler.step()
-
-        # swa updates
-        if 'swa' in self.models and epoch >= self.cfg['model']['swa_warmup']:
-            self.models['swa'].update_parameters(self.model)
 
         return {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
 
@@ -1031,14 +1055,18 @@ class Trainer:
 
         print('device: ', self.device)
         self.model = model.to(self.device)
-        self.models = {'': self.model}
+        self.models = defaultdict(lambda: {
+            '': self.model,
+            'swa': self.get_swa_model(),
+            'ema': self.get_ema_model()
+        })
 
-        if 'swa' in self.cfg['model']['avg']:
-            self.models['swa'] = torch.optim.swa_utils.AveragedModel(model, device=self.device)
+    def get_swa_model(self):
+        return torch.optim.swa_utils.AveragedModel(self.model, device=self.device)
 
-        if 'ema' in self.cfg['model']['avg']:
-            self.models['ema'] = torch.optim.swa_utils.AveragedModel(
-                model, avg_fn=torch.optim.swa_utils.get_ema_avg_fn(0.999), device=self.device)
+    def get_ema_model(self):
+        return torch.optim.swa_utils.AveragedModel(
+            self.model, avg_fn=torch.optim.swa_utils.get_ema_avg_fn(0.9999), device=self.device)
 
     def configure_loss(self):
         if self.cfg['train']['rbf_filters']:
