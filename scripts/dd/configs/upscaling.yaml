@@ -1,6 +1,6 @@
 data:
-  batch_size: 128
-  cache_size: 10000
+  batch_size: 256
+  cache_size: 4000
   augment: 0.0
   noise: 0.0
   patched: true
@@ -34,12 +34,11 @@ model:
   kernel_size: 3
   main_block_type: squeeze
   n_blocks: 4
-  n_channels: 63
+  n_channels: 72
   name: squeeze-model
   upscale_factor: 2
   upscaling_method: ConvTranspose
   use_norm: false
-  swa_warmup: 12
   avg:
   - ema
   - swa
@@ -47,9 +46,9 @@ saving:
   ckp_folder: checkpoints/
   log_folder: logs/
 train:
-  base_rate: 0.002
+  base_rate: 0.004
   rbf_filters:
-  epochs: 60
+  epochs: 30
   steps: 2000
   log_freq: 50
   optimizer: lamb
@@ -57,7 +56,7 @@ train:
   sched: 'cosine'
   sched_min: 0.01
   sched_initial: 0.25
-  sched_start: 4
+  sched_start: 2
   sched_mult: 2
   sched_gamma: 0.4
   sched_steps:

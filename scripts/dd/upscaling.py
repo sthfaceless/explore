@@ -316,11 +316,17 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         return to_tensor(frame, in_channels=self.in_channels).to(torch.float16)
 
     def load_file(self, file):
-        return {self.orig: self.__load_file(file)}
+        try:
+            item = {self.orig: self.__load_file(file)}
+            return item
+        except Exception as e:
+            return None
 
     def __wait_tasks(self, tasks, pbar, pool, update=100):
         for task_id, task in enumerate(tasks):
-            self.objects.append(task.result())
+            result = task.result()
+            if result:
+                self.objects.append(result)
             if task_id % update == 0:
                 pbar.update(update)
         pbar.close()
@@ -331,7 +337,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         # randomly select items for cache
         total = sum([len(folder) for folder in self.file_names])
-        if len(self.objects) >= total - len(self.file_names):
+        if len(self.objects) >= total * 0.99:
             return
 
         files = list(itertools.chain.from_iterable([
@@ -351,7 +357,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         pbar = tqdm(total=len(tasks), desc='Loading cache')
         for task in tasks[:warmup]:
-            self.objects.append(task.result())
+            result = task.result()
+            if result:
+                self.objects.append(result)
             pbar.update()
 
         # asynchronously load rest items
@@ -771,10 +779,9 @@ class LazyDict(dict):
         self.__func_dict__ = dict(*args, **kwargs)
 
     def __getitem__(self, item):
-        if item in self.__dict__:
-            return self.__dict__[item]
-        self.__dict__[item] = self.__func_dict__[item]
-        return self.__dict__[item]
+        if not dict.__contains__(self, item):
+            dict.__setitem__(self, item, self.__func_dict__[item]())
+        return dict.__getitem__(self, item)
 
 
 class Trainer:
@@ -806,6 +813,7 @@ class Trainer:
         self.optimizer = None
         self.scheduler = None
         self.scheduler_interval = 'epoch'
+        self.scaler = None
 
         self.configure()
         if cfg['train']['pretrained_weights']:
@@ -847,18 +855,21 @@ class Trainer:
         for batch_id in range(steps):
 
             data = next(data_iter)
-            inputs = data['lr'].to(self.device, non_blocking=True)
-            labels = data['hr'].to(self.device, non_blocking=True)
+            inputs = data['lr'].to(self.device, non_blocking=True, dtype=torch.float16)
+            labels = data['hr'].to(self.device, non_blocking=True, dtype=torch.float16)
 
             self.optimizer.zero_grad(set_to_none=True)
-            outputs = self.forward(inputs)
-            __metrics = self.metrics(outputs, labels)
-            __metrics['loss'].backward()
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                outputs = self.forward(inputs)
+                __metrics = self.metrics(outputs, labels)
+            self.scaler.scale(__metrics['loss']).backward()
+            self.scaler.unscale_(self.optimizer)
             __metrics['grad-norm'] = grad_norm(self.model)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             for k, v in __metrics.items():
-                metrics[k].append(v.item())
+                metrics[k].append(v.detach())
 
             # lr scheduling
             if self.scheduler_interval == 'step':
@@ -868,7 +879,7 @@ class Trainer:
             record_step = steps // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
-                      *(f'{name} --- {torch.tensor(metrics[name][-record_step:]).mean().item():.6f}'
+                      *(f'{name} --- {torch.stack(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
 
             # ema updates
@@ -884,7 +895,7 @@ class Trainer:
         if self.scheduler_interval == 'epoch':
             self.scheduler.step()
 
-        return {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
+        return {k: torch.stack(v).mean().item() for k, v in metrics.items()}
 
     def patch_upscale(self, images, model=''):
 
@@ -1034,7 +1045,7 @@ class Trainer:
         else:
             dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
-                                                 num_workers=2 * torch.cuda.device_count(), prefetch_factor=2,
+                                                 num_workers=4 * torch.cuda.device_count(), prefetch_factor=2,
                                                  pin_memory=True)
         return dataset, dataloader
 
@@ -1099,6 +1110,7 @@ class Trainer:
         elif self.cfg['train']['optimizer'] == 'lamb':
             from modules.common.trainer import Lamb
             self.optimizer = Lamb(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
+        self.scaler = torch.cuda.amp.GradScaler()
 
         if self.cfg['train']['sched'] == 'cosine':
             self.scheduler_interval = 'step'
@@ -1193,6 +1205,7 @@ def run(cfg, logger):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = True
 
     model_trainer = Trainer(cfg)
     model_trainer.prepare_train_data()  # train data didn't loaded automatically as it loads all dataset in memory
