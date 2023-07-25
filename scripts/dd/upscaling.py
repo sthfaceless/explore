@@ -764,6 +764,19 @@ class Losses:
         return loss
 
 
+class LazyDict(dict):
+
+    def __init__(self, *args, **kwargs):
+        super(LazyDict, self).__init__()
+        self.__func_dict__ = dict(*args, **kwargs)
+
+    def __getitem__(self, item):
+        if item in self.__dict__:
+            return self.__dict__[item]
+        self.__dict__[item] = self.__func_dict__[item]
+        return self.__dict__[item]
+
+
 class Trainer:
 
     def __init__(self, cfg):
@@ -864,7 +877,7 @@ class Trainer:
 
             # swa updates
             if 'swa' in self.cfg['model']['avg'] and \
-                    math.isclose(self.scheduler.get_last_lr(),
+                    math.isclose(self.scheduler.get_last_lr()[0],
                                  self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']):
                 self.models['swa'].update_parameters(self.model)
 
@@ -1055,18 +1068,18 @@ class Trainer:
 
         print('device: ', self.device)
         self.model = model.to(self.device)
-        self.models = defaultdict(lambda: {
-            '': self.model,
-            'swa': self.get_swa_model(),
-            'ema': self.get_ema_model()
+        self.models = LazyDict({
+            '': lambda: self.model,
+            'swa': self.get_swa_model,
+            'ema': self.get_ema_model
         })
 
     def get_swa_model(self):
         return torch.optim.swa_utils.AveragedModel(self.model, device=self.device)
 
-    def get_ema_model(self):
+    def get_ema_model(self, alpha=0.9999):
         return torch.optim.swa_utils.AveragedModel(
-            self.model, avg_fn=torch.optim.swa_utils.get_ema_avg_fn(0.9999), device=self.device)
+            self.model, avg_fn=lambda prev, curr, num: prev * alpha + curr * (1 - alpha), device=self.device)
 
     def configure_loss(self):
         if self.cfg['train']['rbf_filters']:
