@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 from random import randint, randrange, choice, choices, random, sample, shuffle
-import math
+import heapq
 import imageio
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -277,10 +277,35 @@ class CutBlur(torch.nn.Module):
         return image
 
 
+class HardItems:
+
+    def __init__(self, size):
+        self.size = size
+        self.__items__ = []
+        self.__keys__ = set()
+
+    def __getitem__(self, idx):
+        return self.__items__[idx][1]
+
+    def __len__(self):
+        return len(self.__items__)
+
+    def put(self, metric, obj):
+
+        loss = -metric
+
+        if len(self.__items__) < self.size:
+            heapq.heappush(self.__items__, (loss, obj))
+            self.__keys__.add(obj)
+        elif loss > self.__items__[0][0] and obj not in self.__keys__:
+            self.__keys__.add(obj)
+            self.__keys__.remove(heapq.heappushpop(self.__items__, (loss, obj)))
+
+
 class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, in_channels=3, augment=0.0, noise=0.0,
-                 orig='hr', mode='bilinear', cache_size=1024):
+                 orig='hr', mode='bilinear', cache_size=1024, hard_rate=0.1, hard_alpha=0.95):
         super(PatchedDataset, self).__init__()
         self.patch_size = patch_size
         self.patch_pad = patch_pad
@@ -293,7 +318,18 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.cache_size = cache_size if cache_size else sum([len(folder) for folder in file_names])
         self.mode = mode
 
+        # cache
         self.objects = []
+        self.path2object = {}
+
+        # hard items sampling
+        self.hard_rate = hard_rate
+        self.hard_prob = 0.0
+        self.hard_alpha = hard_alpha
+        self.metrics = defaultdict(lambda: 0.0)
+        self.hard_items = HardItems(int(cache_size * hard_rate))
+
+        # augment transforms
         if augment > 0:
             self.transforms = [
                 TF.RandomAffine(
@@ -310,6 +346,14 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                 # lambda x: x + torch.randn_like(x) * 0.005
             ]
 
+    def __update_metrics(self, names, values):
+        for name, value in zip(names, values):
+            self.metrics[name] = self.metrics[name] * self.hard_alpha + value * (1 - self.hard_alpha)
+            self.hard_items.put(self.metrics[name], self.path2object[name])
+
+    def update_metrics(self, names, values):
+        run_async(self.__update_metrics, names, values)
+
     def __load_file(self, file):
         frame = cv2.imread(file)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -317,21 +361,28 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
     def load_file(self, file):
         try:
-            item = {self.orig: self.__load_file(file)}
+            item = {
+                self.orig: self.__load_file(file),
+                'path': file
+            }
             return item
         except Exception as e:
             return None
 
     def __wait_tasks(self, tasks, pbar, pool, update=100):
         for task_id, task in enumerate(tasks):
-            result = task.result()
-            if result:
-                self.objects.append(result)
+            self.__update_cache(task.result())
             if task_id % update == 0:
                 pbar.update(update)
         pbar.close()
         pool.shutdown()
         gc.collect()
+
+    def __update_cache(self, item):
+        if item:
+            self.objects.append(item)
+            self.path2object[item['path']] = item
+            self.hard_items.put(self.metrics[item['path']], item)
 
     def reset_cache(self, warmup=100):
 
@@ -352,14 +403,15 @@ class PatchedDataset(torch.utils.data.IterableDataset):
             tasks.append(pool.submit(self.load_file, file=file))
 
         # clear cache and load first warmup items
-        self.objects.clear()
+        self.objects.clear(), self.path2object.clear()
         gc.collect()
+
+        # initialized hard items
+        self.hard_items = HardItems(int(len(files) * self.hard_rate))
 
         pbar = tqdm(total=len(tasks), desc='Loading cache')
         for task in tasks[:warmup]:
-            result = task.result()
-            if result:
-                self.objects.append(result)
+            self.__update_cache(task.result())
             pbar.update()
 
         # asynchronously load rest items
@@ -388,14 +440,15 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         return {
             'lr': lr_patch,
-            'hr': sr_patch
+            'hr': sr_patch,
+            'path': obj['path']
         }
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        return self.load_patch(choice(self.objects))
+        return self.load_patch(choice(self.hard_items if random() < self.hard_prob else self.objects))
 
 
 class GameDataset(torch.utils.data.Dataset):
@@ -425,7 +478,7 @@ class GameDataset(torch.utils.data.Dataset):
         return {
             'lr': img,
             'hr': label,
-            'name': os.path.basename(label_path)
+            'path': label_path
         }
 
     def __len__(self):
@@ -708,7 +761,7 @@ class RandomBinaryFilter(torch.nn.Module):
 
 
 def charbonnier_loss(x, y, eps=1e-6):
-    return torch.sqrt((x - y) ** 2 + eps).mean()
+    return torch.sqrt((x - y) ** 2 + eps).view(len(x), -1).mean(dim=1)
 
 
 def multiscale_loss(x1, x2, scales=(1, 2), loss_fn=charbonnier_loss):
@@ -761,11 +814,14 @@ class Losses:
         self.rbf = rbf
 
     def combined_loss(self, y_pred, y_true):
-        loss = torch.nn.functional.mse_loss(y_true, y_pred) * (self.coeff['mse'] if 'mse' in self.coeff else 0.0) + \
-               torch.nn.functional.l1_loss(y_true, y_pred) * (self.coeff['mae'] if 'mae' in self.coeff else 0.0) + \
-               1 / peak_signal_noise_ratio(y_pred, y_true, data_range=1.0) \
+        loss = ((y_true - y_pred) ** 2).view(len(y_true), -1).mean(dim=1) \
+               * (self.coeff['mse'] if 'mse' in self.coeff else 0.0) + \
+               charbonnier_loss(y_true, y_pred) * (self.coeff['mae'] if 'mae' in self.coeff else 0.0) + \
+               1 / peak_signal_noise_ratio(y_pred, y_true, data_range=1.0, reduction=None,
+                                           dim=tuple(range(1, len(y_true.shape)))) \
                * (self.coeff['psnr'] if 'psnr' in self.coeff else 0.0) + \
-               1 / structural_similarity_index_measure(y_pred, y_true, data_range=1.0) \
+               1 / structural_similarity_index_measure(y_pred, y_true, data_range=1.0,
+                                                       reduction=None).view(len(y_true), -1).mean(dim=1) \
                * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0) + \
                ((charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
                    'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0)
@@ -799,6 +855,7 @@ class Trainer:
                                   + '-train-weights.pth'
         self.logs_path = cfg['saving']['log_folder'] + cfg['model']['name'] + '-' + pref_time + '-logs.json'
 
+        self.min_lr = self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
         self.model = None
@@ -825,14 +882,17 @@ class Trainer:
         self.configure_optimizer()
         self.prepare_val_data()
 
-    def metrics(self, outputs, labels):
+    def element_metrics(self, outputs, labels):
         return {
             'loss': self.losses.combined_loss(outputs[:, :self.in_channels], labels[:, :self.in_channels]),
-            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0,
+            'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0, reduction=None,
                                             dim=tuple(range(1, len(outputs.shape)))),  # gamma channel only
             'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0,
-                                                        reduction=None).view(len(outputs), -1).mean(dim=1).mean()
+                                                        reduction=None).view(len(outputs), -1).mean(dim=1)
         }
+
+    def metrics(self, outputs, labels):
+        return {k: v.mean() for k, v in self.element_metrics(outputs, labels).items()}
 
     def forward(self, x, model=''):
         return self.models[model](x)
@@ -844,6 +904,9 @@ class Trainer:
                 steps = len(self.trainloader)
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
+
+        if epoch + 1 >= self.cfg['train']['hard_warmup']:
+            self.train_dataset.hard_prob = self.cfg['train']['hard_prob']
 
         if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
             self.train_dataset.reset_cache()
@@ -861,19 +924,22 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 outputs = self.forward(inputs)
-                __metrics = self.metrics(outputs, labels)
-            self.scaler.scale(__metrics['loss']).backward()
+                __metrics = self.element_metrics(outputs, labels)
+            self.scaler.scale(__metrics['loss'].mean()).backward()
             self.scaler.unscale_(self.optimizer)
             __metrics['grad-norm'] = grad_norm(self.model)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            for k, v in __metrics.items():
-                metrics[k].append(v.detach())
-
             # lr scheduling
             if self.scheduler_interval == 'step':
                 self.scheduler.step()
+
+            for k, v in __metrics.items():
+                metrics[k].append(v.detach().mean())
+
+            # update hard sampling dataset
+            self.train_dataset.update_metrics(data['path'], __metrics['psnr'].detach().cpu().tolist())
 
             # logs running statistics
             record_step = steps // self.cfg['train']['log_freq']
@@ -888,8 +954,7 @@ class Trainer:
 
             # swa updates
             if 'swa' in self.cfg['model']['avg'] and \
-                    math.isclose(self.scheduler.get_last_lr()[0],
-                                 self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']):
+                    np.abs(self.scheduler.get_last_lr()[0] - self.min_lr) / self.min_lr < 1.0:
                 self.models['swa'].update_parameters(self.model)
 
         if self.scheduler_interval == 'epoch':
@@ -972,7 +1037,8 @@ class Trainer:
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
 
-                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['name']
+                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), os.path.basename(
+                        data['path'])
 
                     for model in self.models.keys():
                         outputs = self.upscale(inputs, model=model)
@@ -1084,6 +1150,7 @@ class Trainer:
             'swa': self.get_swa_model,
             'ema': self.get_ema_model
         })
+        self.models[''] = self.model
 
     def get_swa_model(self):
         return torch.optim.swa_utils.AveragedModel(self.model, device=self.device)
