@@ -297,7 +297,7 @@ class HardItems:
             old_pair = self.pairs[name]
             self.items.discard(old_pair)
 
-        if len(self.items) < self.size or metric < self.items[-1][0]:
+        if len(self.items) < self.size or metric < self.best_metric():
             new_pair = (metric, name)
             self.items.add(new_pair)
             self.pairs[name] = new_pair
@@ -306,6 +306,8 @@ class HardItems:
                 min_pair = self.items.pop()
                 del self.pairs[min_pair[1]]
 
+    def best_metric(self):
+        return self.items[-1][0]
 
 class PatchedDataset(torch.utils.data.IterableDataset):
 
@@ -973,7 +975,10 @@ class Trainer:
         if self.scheduler_interval == 'epoch':
             self.scheduler.step()
 
-        return {k: torch.stack(v).mean().item() for k, v in metrics.items()}
+        metrics = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
+        if self.hard_sampling:
+            metrics['hard_psnr'] = self.train_dataset.hard_items.best_metric()
+        return metrics
 
     def patch_upscale(self, images, model=''):
 
