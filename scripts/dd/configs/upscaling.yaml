@@ -53,12 +53,12 @@ train:
   log_freq: 50
   optimizer: lamb
   pretrained_weights: ''
-  hard_rate: 0.1
+  hard_rate: 0.25
   hard_prob: 0.5
   hard_alpha: 0.95
   hard_warmup: 5
   sched: 'cosine'
-  sched_min: 0.01
+  sched_min: 0.005
   sched_initial: 0.25
   sched_start: 2
   sched_mult: 2

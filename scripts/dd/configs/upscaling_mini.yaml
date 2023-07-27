@@ -1,6 +1,6 @@
 data:
   batch_size: 256
-  cache_size:
+  cache_size: 4000
   augment: 0.0
   noise: 0.0
   patched: true
@@ -9,7 +9,7 @@ data:
   val_batch_size: 5
   train_datasets:
   - all
-  train_folder: /dsk1/danil/3d/nerf/data/games/julia/
+  train_folder: /dsk1/danil/3d/nerf/data/games/images/
   val_folder:
   - /dsk1/danil/3d/nerf/data/facebook/
   mode: bilinear
@@ -27,22 +27,21 @@ metrics:
 model:
   block_size: 2
   in_channels: 1
-  out_channels: 3
   dropout: 0.0
+  out_channels:
   final_act: Tanh
   first_block_type: none
   kernel_size: 3
-  main_block_type: mini
+  main_block_type: squeeze
   n_blocks: 4
   n_channels: 6
   name: mini-model
   upscale_factor: 2
   upscaling_method: ConvTranspose
   use_norm: false
-  swa_warmup: 12
   avg:
-    - ema
-    - swa
+  - ema
+  - swa
 saving:
   ckp_folder: checkpoints/
   log_folder: logs/
@@ -54,10 +53,14 @@ train:
   log_freq: 50
   optimizer: adam
   pretrained_weights: ''
-  sched: 'one'
-  sched_min: 0.01
+  hard_rate: 0.25
+  hard_prob: 0.0
+  hard_alpha: 0.95
+  hard_warmup: 0
+  sched: 'cosine'
+  sched_min: 0.005
   sched_initial: 0.25
-  sched_start: 4
+  sched_start: 2
   sched_mult: 2
   sched_gamma: 0.4
   sched_steps:

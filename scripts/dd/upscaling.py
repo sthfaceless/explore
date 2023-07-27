@@ -3,6 +3,7 @@ import threading
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
+from sortedcollections import SortedList
 
 from random import randint, randrange, choice, choices, random, sample, shuffle
 import heapq
@@ -281,25 +282,29 @@ class HardItems:
 
     def __init__(self, size):
         self.size = size
-        self.__items__ = []
-        self.__keys__ = set()
-
-    def __getitem__(self, idx):
-        return self.__items__[idx][1]
+        self.items = SortedList()
+        self.pairs = {}
 
     def __len__(self):
-        return len(self.__items__)
+        return len(self.items)
 
-    def put(self, metric, obj):
+    def __getitem__(self, idx):
+        return self.items[idx][1]
 
-        loss = -metric
+    def put(self, metric, name):
 
-        if len(self.__items__) < self.size:
-            heapq.heappush(self.__items__, (loss, obj))
-            self.__keys__.add(obj)
-        elif loss > self.__items__[0][0] and obj not in self.__keys__:
-            self.__keys__.add(obj)
-            self.__keys__.remove(heapq.heappushpop(self.__items__, (loss, obj)))
+        if name in self.pairs:
+            old_pair = self.pairs[name]
+            self.items.discard(old_pair)
+
+        if len(self.items) < self.size or metric < self.items[-1][0]:
+            new_pair = (metric, name)
+            self.items.add(new_pair)
+            self.pairs[name] = new_pair
+
+            if len(self.items) > self.size:
+                min_pair = self.items.pop()
+                del self.pairs[min_pair[1]]
 
 
 class PatchedDataset(torch.utils.data.IterableDataset):
@@ -349,7 +354,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def __update_metrics(self, names, values):
         for name, value in zip(names, values):
             self.metrics[name] = self.metrics[name] * self.hard_alpha + value * (1 - self.hard_alpha)
-            self.hard_items.put(self.metrics[name], self.path2object[name])
+            self.hard_items.put(self.metrics[name], name)
 
     def update_metrics(self, names, values):
         run_async(self.__update_metrics, names, values)
@@ -381,8 +386,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def __update_cache(self, item):
         if item:
             self.objects.append(item)
-            self.path2object[item['path']] = item
-            self.hard_items.put(self.metrics[item['path']], item)
+            if self.hard_prob > 0:
+                self.path2object[item['path']] = item
+                self.hard_items.put(self.metrics[item['path']], item['path'])
 
     def reset_cache(self, warmup=100):
 
@@ -396,6 +402,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         ]))
         shuffle(files)
 
+        # initialized hard items
+        self.hard_items = HardItems(int(len(files) * self.hard_rate))
+
         # create thread pool and submit all files
         tasks = []
         pool = ThreadPoolExecutor(max_workers=min(8, multiprocessing.cpu_count()))
@@ -405,9 +414,6 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         # clear cache and load first warmup items
         self.objects.clear(), self.path2object.clear()
         gc.collect()
-
-        # initialized hard items
-        self.hard_items = HardItems(int(len(files) * self.hard_rate))
 
         pbar = tqdm(total=len(tasks), desc='Loading cache')
         for task in tasks[:warmup]:
@@ -448,7 +454,11 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         return self
 
     def __next__(self):
-        return self.load_patch(choice(self.hard_items if random() < self.hard_prob else self.objects))
+        if random() < self.hard_prob:
+            item = self.path2object[choice(self.hard_items)]
+        else:
+            item = choice(self.objects)
+        return self.load_patch(item)
 
 
 class GameDataset(torch.utils.data.Dataset):
@@ -542,7 +552,7 @@ class SqueezeConv(torch.nn.Module):
         super().__init__()
 
         self.use_norm = use_norm
-        if norm:
+        if use_norm:
             self.in_norm = norm(dim)
 
         squeeze_channels = dim // 3
@@ -871,6 +881,8 @@ class Trainer:
         self.scheduler = None
         self.scheduler_interval = 'epoch'
         self.scaler = None
+        self.hard_warmup = self.cfg['train']['hard_warmup']
+        self.hard_sampling = self.hard_warmup and self.cfg['train']['hard_prob'] > 0.0
 
         self.configure()
         if cfg['train']['pretrained_weights']:
@@ -905,7 +917,7 @@ class Trainer:
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
-        if epoch + 1 >= self.cfg['train']['hard_warmup']:
+        if self.hard_sampling and epoch + 1 >= self.hard_warmup:
             self.train_dataset.hard_prob = self.cfg['train']['hard_prob']
 
         if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
@@ -939,7 +951,8 @@ class Trainer:
                 metrics[k].append(v.detach().mean())
 
             # update hard sampling dataset
-            self.train_dataset.update_metrics(data['path'], __metrics['psnr'].detach().cpu().tolist())
+            if self.hard_sampling:
+                self.train_dataset.update_metrics(data['path'], __metrics['psnr'].detach().cpu().tolist())
 
             # logs running statistics
             record_step = steps // self.cfg['train']['log_freq']
@@ -1037,8 +1050,7 @@ class Trainer:
             with torch.no_grad():
                 for batch_idx, data in enumerate(validloader):
 
-                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), os.path.basename(
-                        data['path'])
+                    inputs, labels, names = data['lr'].to(self.device), data['hr'].to(self.device), data['path']
 
                     for model in self.models.keys():
                         outputs = self.upscale(inputs, model=model)
@@ -1068,7 +1080,7 @@ class Trainer:
 
                     __upscaled_images = np.concatenate(upscaled_images[model], axis=0)
                     for image_idx in range(len(__upscaled_images)):
-                        cv2.imwrite(os.path.join(out_path, upscaled_names[model][image_idx]),
+                        cv2.imwrite(os.path.join(out_path, os.path.basename(upscaled_names[model][image_idx])),
                                     cv2.cvtColor(__upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
 
                     best_val_psnr = val_metrics[f'{model}_psnr']
