@@ -1,4 +1,5 @@
 import itertools
+import math
 import threading
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
@@ -309,6 +310,7 @@ class HardItems:
     def best_metric(self):
         return self.items[-1][0]
 
+
 class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, in_channels=3, augment=0.0, noise=0.0,
@@ -388,9 +390,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def __update_cache(self, item):
         if item:
             self.objects.append(item)
-            if self.hard_prob > 0:
-                self.path2object[item['path']] = item
-                self.hard_items.put(self.metrics[item['path']], item['path'])
+            self.path2object[item['path']] = item
 
     def reset_cache(self, warmup=100):
 
@@ -456,11 +456,59 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         return self
 
     def __next__(self):
-        if random() < self.hard_prob:
+        if len(self.hard_items) > 0 and random() < self.hard_prob:
             item = self.path2object[choice(self.hard_items)]
         else:
             item = choice(self.objects)
         return self.load_patch(item)
+
+
+class PatchedDataLoader:
+
+    def __init__(self, dataset, batch_size=1, num_workers=1, prefetch_factor=2, *args, **kwargs):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor + 1
+
+        self.asyncer = None
+        self.pool = None
+        self.dataset_iter = None
+        self.batches = None
+        self.batch_idx = 0
+
+    def load_batch(self):
+        tasks = [self.pool.submit(next, self.dataset_iter) for _ in range(self.batch_size)]
+
+        batch = defaultdict(list)
+        for task in tasks:
+            item = task.result()
+            for k, v in item.items():
+                batch[k].append(v)
+
+        for k, lst in batch.items():
+            if isinstance(lst[0], torch.Tensor):
+                batch[k] = torch.stack(lst, dim=0).pin_memory()
+        return batch
+
+    def __iter__(self):
+        self.asyncer = ThreadPoolExecutor(max_workers=1)
+        self.pool = ThreadPoolExecutor(max_workers=self.num_workers)
+        self.dataset_iter = iter(self.dataset)
+        self.batch_idx = 0
+        self.batches = [self.asyncer.submit(self.load_batch) for _ in range(self.prefetch_factor)]
+        return self
+
+    def __next__(self):
+        batch = self.batches[self.batch_idx].result()
+        self.batches[self.batch_idx] = self.asyncer.submit(self.load_batch)
+        self.batch_idx = (self.batch_idx + 1) % self.prefetch_factor
+        return batch
+
+    def clear(self):
+        self.asyncer.shutdown(wait=False)
+        self.pool.shutdown(wait=False)
+        del self.batches
 
 
 class GameDataset(torch.utils.data.Dataset):
@@ -870,6 +918,7 @@ class Trainer:
         self.min_lr = self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
+        self.max_grad_norm = self.cfg['train']['max_grad_norm']
         self.model = None
         self.models = None
         self.train_dataset = None
@@ -941,6 +990,8 @@ class Trainer:
                 __metrics = self.element_metrics(outputs, labels)
             self.scaler.scale(__metrics['loss'].mean()).backward()
             self.scaler.unscale_(self.optimizer)
+            if self.max_grad_norm:
+                torch.nn.utils.clip_grad_norm(self.model.parameters(), self.max_grad_norm, error_if_nonfinite=False)
             __metrics['grad-norm'] = grad_norm(self.model)
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -974,6 +1025,9 @@ class Trainer:
 
         if self.scheduler_interval == 'epoch':
             self.scheduler.step()
+
+        if self.cfg['data']['patched']:
+            self.trainloader.clear()
 
         metrics = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
         if self.hard_sampling:
@@ -1125,11 +1179,13 @@ class Trainer:
                                      augment=self.cfg['data']['augment'],
                                      cache_size=self.cfg['data']['cache_size'],
                                      in_channels=self.cfg['model']['in_channels'])
+            dataloader = PatchedDataLoader(dataset, batch_size=batch_size, num_workers=4 * torch.cuda.device_count(),
+                                           prefetch_factor=2)
         else:
             dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
-                                                 num_workers=4 * torch.cuda.device_count(), prefetch_factor=2,
-                                                 pin_memory=True)
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
+                                                     num_workers=4 * torch.cuda.device_count(), prefetch_factor=2,
+                                                     pin_memory=True)
         return dataset, dataloader
 
     def prepare_train_data(self):
@@ -1317,7 +1373,7 @@ def run(cfg, logger):
             for k in group:
                 logger.report_scalar(title=key, series=k, iteration=epoch, value=item[k])
 
-        if train_metrics['psnr'] < 20.0:
+        if train_metrics['psnr'] < 20.0 or math.isnan(train_metrics['loss']):
             print(f"Achieved train psnr --- {train_metrics['psnr']} model did not converged")
             print('Stop training...')
             break
