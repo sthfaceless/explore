@@ -52,6 +52,7 @@ train:
   steps: 2000
   log_freq: 50
   optimizer: lamb
+  max_grad_norm: 0.1
   pretrained_weights: ''
   hard_rate: 0.25
   hard_prob: 0.5

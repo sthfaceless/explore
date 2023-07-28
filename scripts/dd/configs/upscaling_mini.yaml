@@ -52,6 +52,7 @@ train:
   steps: 2000
   log_freq: 50
   optimizer: adam
+  max_grad_norm:
   pretrained_weights: ''
   hard_rate: 0.25
   hard_prob: 0.0
