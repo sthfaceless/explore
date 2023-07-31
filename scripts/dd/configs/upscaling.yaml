@@ -6,7 +6,7 @@ data:
   patched: true
   patch_size: 80
   patch_pad: 8
-  val_batch_size: 5
+  val_batch_size: 1
   train_datasets:
   - all
   train_folder: /dsk1/danil/3d/nerf/data/games/images/

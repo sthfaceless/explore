@@ -414,7 +414,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         # hard items for each game
         self.hard_items = {
-            self.get_game(game_paths[0]): HardItems(int(self.hard_rate * len(game_paths)))
+            self.get_game(game_paths[0]): HardItems(max(int(self.hard_rate * len(game_paths)), 1))
             for game_paths in game_files
         }
         self.games = list(self.hard_items.keys())
@@ -1066,7 +1066,7 @@ class Trainer:
             self.scaler.scale(__metrics['loss'].mean()).backward()
             self.scaler.unscale_(self.optimizer)
             if self.max_grad_norm:
-                torch.nn.utils.clip_grad_norm(self.model.parameters(), self.max_grad_norm, error_if_nonfinite=False)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm, error_if_nonfinite=False)
             __metrics['grad-norm'] = grad_norm(self.model)
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -1223,7 +1223,9 @@ class Trainer:
 
         return total_metrics
 
-    def save_results(self, item):
+    def save_results(self, item, epoch):
+
+        item['epoch'] = epoch
 
         with open(self.logs_path, mode='a', encoding='utf-8') as f:
             json.dump(item, f)
@@ -1398,7 +1400,11 @@ class Trainer:
                 outputs = self.forward(inputs)
                 __metrics = self.metrics(outputs, labels)
                 (__metrics['loss'] / acc_grad).backward()
+                if self.max_grad_norm:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm,
+                                                   error_if_nonfinite=False)
                 value += __metrics[monitor].item() / acc_grad
+
 
             values.append(value)
 
@@ -1435,18 +1441,18 @@ def run(cfg, logger):
         val_metrics = model_trainer.validate()
 
         item = {
-            'Epoch': epoch,
             'lr': model_trainer.optimizer.param_groups[0]["lr"],
             **{f'train_{k}': v for k, v in train_metrics.items()},
         }
         val_mean = defaultdict(list)
         for val_idx, val_item in enumerate(val_metrics):
             for k, v in val_item.items():
-                item[f'val{val_idx}_{k}'] = v
+                val_name = cfg["data"]["val_folder"][val_idx].rstrip(os.path.sep).split(os.path.sep)[-1]
+                item[f'{val_name}_{k}'] = v
                 val_mean[k].append(v)
         item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
 
-        model_trainer.save_results(item)
+        model_trainer.save_results(item, epoch)
 
         print(*(f'{k}: {v:.6f}' if isinstance(v, float) else f'{k}: {v}' for k, v in item.items()))
 
