@@ -11,13 +11,17 @@ data:
   - all
   train_folder: /dsk1/danil/3d/nerf/data/games/images/
   val_folder:
-  - /dsk1/danil/3d/nerf/data/facebook/
+  - /dsk1/danil/3d/nerf/data/upscaling_test/facebook/
+  - /dsk1/danil/3d/nerf/data/upscaling_test/ui/
+  - /dsk1/danil/3d/nerf/data/upscaling_test/unreal-engine/
+  - /dsk1/danil/3d/nerf/data/upscaling_test/unsplash2k/
   mode: bilinear
   out: /dsk1/danil/3d/nerf/results
 metrics:
+  loss_threshold: 0.0
   loss_coeff:
-    mae: 0.0
-    mse: 1.0
+    mae: 1.0
+    mse: 0.0
     psnr: 0.0
     ssim: 0.0
     rbf: 0.0
@@ -41,7 +45,6 @@ model:
   use_norm: false
   avg:
   - ema
-  - swa
 saving:
   ckp_folder: checkpoints/
   log_folder: logs/
@@ -54,12 +57,12 @@ train:
   optimizer: lamb
   max_grad_norm: 0.1
   pretrained_weights: ''
-  hard_rate: 0.25
+  hard_rate: 0.1
   hard_prob: 0.5
   hard_alpha: 0.95
   hard_warmup: 5
   sched: 'cosine'
-  sched_min: 0.005
+  sched_min: 0.01
   sched_initial: 0.25
   sched_start: 2
   sched_mult: 2

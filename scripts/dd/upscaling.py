@@ -310,6 +310,9 @@ class HardItems:
     def best_metric(self):
         return self.items[-1][0]
 
+    def worst_metric(self):
+        return self.items[0][0]
+
 
 class PatchedDataset(torch.utils.data.IterableDataset):
 
@@ -336,7 +339,8 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.hard_prob = 0.0
         self.hard_alpha = hard_alpha
         self.metrics = defaultdict(lambda: 0.0)
-        self.hard_items = HardItems(int(cache_size * hard_rate))
+        self.hard_items = {}
+        self.games = []
 
         # augment transforms
         if augment > 0:
@@ -355,10 +359,13 @@ class PatchedDataset(torch.utils.data.IterableDataset):
                 # lambda x: x + torch.randn_like(x) * 0.005
             ]
 
+    def get_game(self, path):
+        return os.path.normpath(path).lstrip(os.path.sep).split(os.path.sep)[-3]  # game/hr/0.png
+
     def __update_metrics(self, names, values):
         for name, value in zip(names, values):
             self.metrics[name] = self.metrics[name] * self.hard_alpha + value * (1 - self.hard_alpha)
-            self.hard_items.put(self.metrics[name], name)
+            self.hard_items[self.get_game(name)].put(self.metrics[name], name)
 
     def update_metrics(self, names, values):
         run_async(self.__update_metrics, names, values)
@@ -399,13 +406,18 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         if len(self.objects) >= total * 0.99:
             return
 
-        files = list(itertools.chain.from_iterable([
+        game_files = [
             sample(folder, k=int(len(folder) / total * min(self.cache_size, total))) for folder in self.file_names
-        ]))
+        ]
+        files = list(itertools.chain.from_iterable(game_files))
         shuffle(files)
 
-        # initialized hard items
-        self.hard_items = HardItems(int(len(files) * self.hard_rate))
+        # hard items for each game
+        self.hard_items = {
+            self.get_game(game_paths[0]): HardItems(int(self.hard_rate * len(game_paths)))
+            for game_paths in game_files
+        }
+        self.games = list(self.hard_items.keys())
 
         # create thread pool and submit all files
         tasks = []
@@ -413,10 +425,11 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         for file in files:
             tasks.append(pool.submit(self.load_file, file=file))
 
-        # clear cache and load first warmup items
+        # clear caches
         self.objects.clear(), self.path2object.clear()
         gc.collect()
 
+        # load first warmup items
         pbar = tqdm(total=len(tasks), desc='Loading cache')
         for task in tasks[:warmup]:
             self.__update_cache(task.result())
@@ -456,11 +469,13 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         return self
 
     def __next__(self):
-        if len(self.hard_items) > 0 and random() < self.hard_prob:
-            item = self.path2object[choice(self.hard_items)]
-        else:
-            item = choice(self.objects)
-        return self.load_patch(item)
+        if random() < self.hard_prob:
+            weights = [len(items) for items in self.hard_items.values()]
+            if any(weights):
+                game = choices(population=self.games, weights=weights, k=1)[0]
+                return self.load_patch(self.path2object[choice(self.hard_items[game])])
+
+        return self.load_patch(choice(self.objects))
 
 
 class PatchedDataLoader:
@@ -533,7 +548,7 @@ class GameDataset(torch.utils.data.Dataset):
         if os.path.exists(img_path):
             img = self.transform(cv2.imread(img_path))
         else:
-            img = torch.nn.functional.interpolate(label, scale_factor=0.5, mode=self.mode)
+            img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=0.5, mode=self.mode)[0]
 
         return {
             'lr': img,
@@ -650,6 +665,60 @@ class SqueezeBlock(torch.nn.Module):
         return out
 
 
+class GroupedConv(torch.nn.Module):
+    def __init__(self, dim, use_norm=False, dropout=0.0):
+        super().__init__()
+
+        self.use_norm = use_norm
+        if use_norm:
+            self.in_norm = norm(dim)
+
+        squeeze_channels = dim // 3
+        self.input_conv = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+
+        # 3x3 kernel convolution
+        self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=3, stride=1, padding=1)
+
+        # 5x5 kernel convolution
+        self.conv2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=5, stride=1, padding=2)
+        self.pw2 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=1, stride=1, padding=0)
+
+        # 7x7 kernel convolution
+        self.dropout3 = torch.nn.Dropout2d(p=dropout)
+        self.conv3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
+                                     kernel_size=(7, 7), stride=(1, 1), padding=(3, 3))
+        self.pw3 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        x = self.in_norm(x) if self.use_norm else x
+        x = nonlinear(x)
+        x = self.input_conv(x)
+
+        x1 = self.conv1(x)
+        x2 = self.pw2(self.conv2(x))
+        x3 = self.pw3(self.conv3(self.dropout3(x)))
+
+        x = torch.cat((x1, x2, x3), dim=1)
+
+        return x
+
+
+class GroupedBlock(torch.nn.Module):
+
+    def __init__(self, dim, block_size, use_norm=False, dropout=0.0):
+        super().__init__()
+
+        layers = []
+        for _ in range(block_size):
+            layers.append(GroupedConv(dim, use_norm=use_norm, dropout=dropout))
+        self.layers = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.layers(x)
+        out = out + x
+        return out
+
+
 class MiniConv(torch.nn.Module):
 
     def __init__(self, dim):
@@ -745,6 +814,8 @@ class UpscalingModelBase(torch.nn.Module):
                 layers.append(ConvBlock(n_channels, block_size, use_norm=use_norm))
             elif main_block_type == 'squeeze':
                 layers.append(SqueezeBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
+            elif main_block_type == 'grouped':
+                layers.append(GroupedBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
                 layers.append(MiniBlock(n_channels, block_size))
 
@@ -820,8 +891,10 @@ class RandomBinaryFilter(torch.nn.Module):
         return self.conv(x)
 
 
-def charbonnier_loss(x, y, eps=1e-6):
-    return torch.sqrt((x - y) ** 2 + eps).view(len(x), -1).mean(dim=1)
+def charbonnier_loss(x, y, eps=1e-6, threshold=0.0):
+    element_loss = torch.sqrt((x - y) ** 2 + eps)
+    element_loss = torch.where(torch.abs(x - y) < threshold, torch.zeros_like(element_loss), element_loss)
+    return element_loss.view(len(x), -1).mean(dim=1)
 
 
 def multiscale_loss(x1, x2, scales=(1, 2), loss_fn=charbonnier_loss):
@@ -869,14 +942,16 @@ class SimpleDiscriminator(torch.nn.Module):
 
 
 class Losses:
-    def __init__(self, loss_coeff, rbf=None):
+    def __init__(self, loss_coeff, rbf=None, threshold=0.0):
         self.coeff = loss_coeff
+        self.threshold = threshold
         self.rbf = rbf
 
     def combined_loss(self, y_pred, y_true):
         loss = ((y_true - y_pred) ** 2).view(len(y_true), -1).mean(dim=1) \
                * (self.coeff['mse'] if 'mse' in self.coeff else 0.0) + \
-               charbonnier_loss(y_true, y_pred) * (self.coeff['mae'] if 'mae' in self.coeff else 0.0) + \
+               charbonnier_loss(y_true, y_pred, threshold=self.threshold) * (
+                   self.coeff['mae'] if 'mae' in self.coeff else 0.0) + \
                1 / peak_signal_noise_ratio(y_pred, y_true, data_range=1.0, reduction=None,
                                            dim=tuple(range(1, len(y_true.shape)))) \
                * (self.coeff['psnr'] if 'psnr' in self.coeff else 0.0) + \
@@ -933,7 +1008,7 @@ class Trainer:
         self.scheduler_interval = 'epoch'
         self.scaler = None
         self.hard_warmup = self.cfg['train']['hard_warmup']
-        self.hard_sampling = self.hard_warmup and self.cfg['train']['hard_prob'] > 0.0
+        self.hard_sampling = self.hard_warmup is not None and self.cfg['train']['hard_prob'] > 0.0
 
         self.configure()
         if cfg['train']['pretrained_weights']:
@@ -1031,7 +1106,9 @@ class Trainer:
 
         metrics = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
         if self.hard_sampling:
-            metrics['hard_psnr'] = self.train_dataset.hard_items.best_metric()
+            for game, items in self.train_dataset.hard_items.items():
+                metrics[f'{game}_lowpsnr'] = items.worst_metric()
+
         return metrics
 
     def patch_upscale(self, images, model=''):
@@ -1137,7 +1214,7 @@ class Trainer:
                     out_path = os.path.join(self.cfg['data']['out'], self.cfg['model']['name'], f'val_{valid_idx}')
                     os.makedirs(out_path, exist_ok=True)
 
-                    __upscaled_images = np.concatenate(upscaled_images[model], axis=0)
+                    __upscaled_images = upscaled_images[model]
                     for image_idx in range(len(__upscaled_images)):
                         cv2.imwrite(os.path.join(out_path, os.path.basename(upscaled_names[model][image_idx])),
                                     cv2.cvtColor(__upscaled_images[image_idx], cv2.COLOR_RGB2BGR))
@@ -1160,7 +1237,7 @@ class Trainer:
         for model_name in self.models.keys():
             val_loss, val_psnr = [], []
             for key, value in item.items():
-                if re.match(f'^val\d*_{model_name}_psnr$', key):
+                if re.match(f'^val_mean_{model_name}_psnr$', key):
                     val_psnr.append(value)
 
             val_psnr = torch.tensor(val_psnr).mean().item()
@@ -1238,7 +1315,8 @@ class Trainer:
             rbf = rbf.to(self.device)
         else:
             rbf = None
-        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'], rbf=rbf)
+        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'], rbf=rbf,
+                             threshold=self.cfg['metrics']['loss_threshold'])
 
     def configure_optimizer(self):
 
@@ -1361,8 +1439,12 @@ def run(cfg, logger):
             'lr': model_trainer.optimizer.param_groups[0]["lr"],
             **{f'train_{k}': v for k, v in train_metrics.items()},
         }
+        val_mean = defaultdict(list)
         for val_idx, val_item in enumerate(val_metrics):
-            item.update({f'val{val_idx}_{k}': v for k, v in val_item.items()})
+            for k, v in val_item.items():
+                item[f'val{val_idx}_{k}'] = v
+                val_mean[k].append(v)
+        item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
 
         model_trainer.save_results(item)
 
