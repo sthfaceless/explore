@@ -11,10 +11,10 @@ data:
   - all
   train_folder: /dsk1/danil/3d/nerf/data/games/images/
   val_folder:
-  - /dsk1/danil/3d/nerf/data/upscaling_test/facebook/
-  - /dsk1/danil/3d/nerf/data/upscaling_test/ui/
-  - /dsk1/danil/3d/nerf/data/upscaling_test/unreal-engine/
-  - /dsk1/danil/3d/nerf/data/upscaling_test/unsplash2k/
+  - /dsk1/danil/3d/nerf/data/games/test/facebook/
+  - /dsk1/danil/3d/nerf/data/games/test/ui/
+  - /dsk1/danil/3d/nerf/data/games/test/unreal-engine/
+  - /dsk1/danil/3d/nerf/data/games/test/unsplash2k/
   mode: bilinear
   out: /dsk1/danil/3d/nerf/results
 metrics:
@@ -49,7 +49,7 @@ saving:
   ckp_folder: checkpoints/
   log_folder: logs/
 train:
-  base_rate: 0.004
+  base_rate: 0.003
   rbf_filters:
   epochs: 30
   steps: 2000

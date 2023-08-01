@@ -285,6 +285,7 @@ class HardItems:
         self.size = size
         self.items = SortedList()
         self.pairs = {}
+        self.thread_lock = threading.RLock()
 
     def __len__(self):
         return len(self.items)
@@ -292,11 +293,12 @@ class HardItems:
     def __getitem__(self, idx):
         return self.items[idx][1]
 
-    def put(self, metric, name):
+    def __put__(self, metric, name):
 
         if name in self.pairs:
             old_pair = self.pairs[name]
             self.items.discard(old_pair)
+            del self.pairs[name]
 
         if len(self.items) < self.size or metric < self.best_metric():
             new_pair = (metric, name)
@@ -306,6 +308,10 @@ class HardItems:
             if len(self.items) > self.size:
                 min_pair = self.items.pop()
                 del self.pairs[min_pair[1]]
+
+    def put(self, metric, name):
+        with self.thread_lock:
+            self.__put__(metric, name)
 
     def best_metric(self):
         return self.items[-1][0]
@@ -341,6 +347,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         self.metrics = defaultdict(lambda: 0.0)
         self.hard_items = {}
         self.games = []
+        self.weights = []
 
         # augment transforms
         if augment > 0:
@@ -364,6 +371,8 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __update_metrics(self, names, values):
         for name, value in zip(names, values):
+            if math.isnan(value):
+                continue
             self.metrics[name] = self.metrics[name] * self.hard_alpha + value * (1 - self.hard_alpha)
             self.hard_items[self.get_game(name)].put(self.metrics[name], name)
 
@@ -418,6 +427,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
             for game_paths in game_files
         }
         self.games = list(self.hard_items.keys())
+        self.weights = list([items.size for items in self.hard_items.values()])
 
         # create thread pool and submit all files
         tasks = []
@@ -470,9 +480,8 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __next__(self):
         if random() < self.hard_prob:
-            weights = [len(items) for items in self.hard_items.values()]
-            if any(weights):
-                game = choices(population=self.games, weights=weights, k=1)[0]
+            game = choices(population=self.games, weights=self.weights, k=1)[0]
+            if len(self.hard_items[game]) > 0:
                 return self.load_patch(self.path2object[choice(self.hard_items[game])])
 
         return self.load_patch(choice(self.objects))
@@ -563,7 +572,7 @@ class GameDataset(torch.utils.data.Dataset):
 def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format='*.png'):
     filenames = []
     if len(datasets_names) == 0:
-        pattern = os.path.join(dataset_path, hr_subfolder, pic_format)
+        pattern = os.path.join(dataset_path, pic_format)
         print(pattern)
         filenames.append(glob(pattern))
     elif datasets_names[0] == 'all':  # take all game folders in the root folder
@@ -1021,13 +1030,14 @@ class Trainer:
         self.prepare_val_data()
 
     def element_metrics(self, outputs, labels):
-        return {
+        metrics = {
             'loss': self.losses.combined_loss(outputs[:, :self.in_channels], labels[:, :self.in_channels]),
             'psnr': peak_signal_noise_ratio(outputs[:, :1], labels[:, :1], data_range=1.0, reduction=None,
                                             dim=tuple(range(1, len(outputs.shape)))),  # gamma channel only
             'ssim': structural_similarity_index_measure(outputs[:, :1], labels[:, :1], data_range=1.0,
                                                         reduction=None).view(len(outputs), -1).mean(dim=1)
         }
+        return {k: torch.nan_to_num(v, nan=0, posinf=0, neginf=0) for k, v in metrics.items()}
 
     def metrics(self, outputs, labels):
         return {k: v.mean() for k, v in self.element_metrics(outputs, labels).items()}
@@ -1223,6 +1233,20 @@ class Trainer:
 
         return total_metrics
 
+    def build_metrics_item(self, train_metrics, val_metrics):
+        item = {
+            'lr': self.optimizer.param_groups[0]["lr"],
+            **{f'train_{k}': v for k, v in train_metrics.items()},
+        }
+        val_mean = defaultdict(list)
+        for val_idx, val_item in enumerate(val_metrics):
+            for k, v in val_item.items():
+                val_name = self.cfg["data"]["val_folder"][val_idx].rstrip(os.path.sep).split(os.path.sep)[-1]
+                item[f'{val_name}_{k}'] = v
+                val_mean[k].append(v)
+        item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
+        return item
+
     def save_results(self, item, epoch):
 
         item['epoch'] = epoch
@@ -1366,13 +1390,11 @@ class Trainer:
         dict_weights = torch.load(file, map_location=self.device)
 
         dict_weights = {k.split('module.')[-1]: v for k, v in dict_weights.items()}
-        status = self.model.load_state_dict(dict_weights)
+        status = self.model.load_state_dict(dict_weights, strict=False)
         print('Weights loaded: ', status)
 
         val_metrics = self.validate()
-        item = {}
-        for val_idx, val_item in enumerate(val_metrics):
-            item.update({f'val{val_idx}_{k}': v for k, v in val_item.items()})
+        item = self.build_metrics_item({}, val_metrics)
         print(f'Validation metrics for loaded weights:', *(f'{k}: {v:.6f}' for k, v in item.items()))
 
     def find_lr(self, min_lr=1e-6, max_lr=1.0, steps=1000, acc_grad=1, monitor='loss', max_factor=10.0):
@@ -1404,7 +1426,6 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm,
                                                    error_if_nonfinite=False)
                 value += __metrics[monitor].item() / acc_grad
-
 
             values.append(value)
 
@@ -1440,20 +1461,8 @@ def run(cfg, logger):
         train_metrics = model_trainer.train(epoch, steps=cfg['train']['steps'])
         val_metrics = model_trainer.validate()
 
-        item = {
-            'lr': model_trainer.optimizer.param_groups[0]["lr"],
-            **{f'train_{k}': v for k, v in train_metrics.items()},
-        }
-        val_mean = defaultdict(list)
-        for val_idx, val_item in enumerate(val_metrics):
-            for k, v in val_item.items():
-                val_name = cfg["data"]["val_folder"][val_idx].rstrip(os.path.sep).split(os.path.sep)[-1]
-                item[f'{val_name}_{k}'] = v
-                val_mean[k].append(v)
-        item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
-
+        item = model_trainer.build_metrics_item(train_metrics, val_metrics)
         model_trainer.save_results(item, epoch)
-
         print(*(f'{k}: {v:.6f}' if isinstance(v, float) else f'{k}: {v}' for k, v in item.items()))
 
         for key, group in itertools.groupby(
