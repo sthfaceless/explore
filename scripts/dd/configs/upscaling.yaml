@@ -54,6 +54,7 @@ train:
   rbf_filters:
   epochs: 30
   steps: 2000
+  acc_grads: 1
   log_freq: 50
   optimizer: lamb
   max_grad_norm: 0.1

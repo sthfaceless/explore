@@ -1018,6 +1018,7 @@ class Trainer:
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
         self.max_grad_norm = self.cfg['train']['max_grad_norm']
+        self.acc_grads = self.cfg['train']['acc_grads']
         self.model = None
         self.models = None
         self.train_dataset = None
@@ -1068,7 +1069,7 @@ class Trainer:
 
         if steps is None:
             if not self.cfg['data']['patched']:
-                steps = len(self.trainloader)
+                steps = len(self.trainloader) // self.acc_grads
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
@@ -1085,65 +1086,85 @@ class Trainer:
         self.model.train()
 
         metrics = defaultdict(list)
-        for batch_id in range(steps):
+        for batch_id in range(steps * self.acc_grads):
 
+            # load batch
             data = next(data_iter)
             inputs = data['lr'].to(self.device, non_blocking=True, dtype=torch.float16)
             labels = data['hr'].to(self.device, non_blocking=True, dtype=torch.float16)
 
-            self.optimizer.zero_grad(set_to_none=True)
+            # zero grads
+            if batch_id % self.acc_grads == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+
+            # forward pass
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 outputs = self.forward(inputs)
                 __metrics = self.element_metrics(outputs, labels)
-            self.scaler.scale(__metrics['loss'].mean()).backward()
-            self.scaler.unscale_(self.optimizer)
-            if self.max_grad_norm:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm, error_if_nonfinite=False)
-            __metrics['grad-norm'] = torch.nan_to_num(grad_norm(self.model), nan=0, posinf=0, neginf=0)
-            self.scaler.step(self.optimizer)
-
-            if self.use_disc and batch_id % self.cfg['train']['disc']['freq'] == 0:
-                self.losses.disc.enable_grads()
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    preds = self.losses.disc(torch.cat([outputs.detach(), labels], dim=0), return_probs=False)
-                    target = torch.zeros_like(preds)
-                    target[len(outputs):] = 1 - torch.rand_like(target[len(outputs):]) * 0.1
-
-                    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(preds, target)
-                self.scaler.scale(bce_loss).backward()
-                self.scaler.unscale_(self.disc_optimizer)
-                __metrics['disc-loss'] = bce_loss
-                __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
-                self.scaler.step(self.disc_optimizer)
-                self.losses.disc.disable_grads()
-            self.scaler.update()
-
-            # lr scheduling
-            if self.scheduler_interval == 'step':
-                self.scheduler.step()
-
-            for k, v in __metrics.items():
-                metrics[k].append(v.detach().mean())
 
             # update hard sampling dataset
             if self.hard_sampling:
                 self.train_dataset.update_metrics(data['path'], __metrics['psnr'].detach().cpu().tolist())
 
+            # backward pass
+            self.scaler.scale(__metrics['loss'].mean() / self.acc_grads).backward()
+
+            # optimizer step
+            if (batch_id + 1) % self.acc_grads == 0:
+                self.scaler.unscale_(self.optimizer)
+                if self.max_grad_norm:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm,
+                                                   error_if_nonfinite=False)
+                __metrics['grad-norm'] = torch.nan_to_num(grad_norm(self.model), nan=0, posinf=0, neginf=0)
+                self.scaler.step(self.optimizer)
+
+                # lr scheduling
+                if self.scheduler_interval == 'step':
+                    self.scheduler.step()
+
+                # ema updates
+                if 'ema' in self.cfg['model']['avg']:
+                    self.models['ema'].update_parameters(self.model)
+
+                # swa updates
+                if 'swa' in self.cfg['model']['avg'] and \
+                        np.abs(self.scheduler.get_last_lr()[0] - self.min_lr) / self.min_lr < 1.0:
+                    self.models['swa'].update_parameters(self.model)
+
+            # disc step
+            if self.use_disc and (batch_id // self.acc_grads) % self.cfg['train']['disc']['freq'] == 0:
+
+                if batch_id % (self.acc_grads * self.cfg['train']['disc']['freq']) == 0:
+                    self.disc_optimizer.zero_grad(set_to_none=True)
+
+                self.losses.disc.enable_grads()
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    preds = self.losses.disc(torch.cat([outputs.detach(), labels], dim=0), return_probs=False)
+                    target = torch.zeros_like(preds)
+                    target[len(outputs):] = 1 - torch.rand_like(target[len(outputs):]) * 0.1
+                    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(preds, target)
+                self.scaler.scale(bce_loss / self.acc_grads).backward()
+                __metrics['disc-loss'] = bce_loss
+
+                if ((batch_id + 1) // self.acc_grads) % self.cfg['train']['disc']['freq'] != 0:
+                    self.scaler.unscale_(self.disc_optimizer)
+                    __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
+                    self.scaler.step(self.disc_optimizer)
+
+                self.losses.disc.disable_grads()
+
+            if (batch_id + 1) % self.acc_grads == 0:
+                self.scaler.update()
+
+            for k, v in __metrics.items():
+                metrics[k].append(v.detach().mean())
+
             # logs running statistics
-            record_step = steps // self.cfg['train']['log_freq']
+            record_step = steps * self.acc_grads // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
                 print(f'[{epoch + 1}, {batch_id + 1:5d}]',
                       *(f'{name} --- {torch.stack(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
-
-            # ema updates
-            if 'ema' in self.cfg['model']['avg']:
-                self.models['ema'].update_parameters(self.model)
-
-            # swa updates
-            if 'swa' in self.cfg['model']['avg'] and \
-                    np.abs(self.scheduler.get_last_lr()[0] - self.min_lr) / self.min_lr < 1.0:
-                self.models['swa'].update_parameters(self.model)
 
         if self.scheduler_interval == 'epoch':
             self.scheduler.step()
