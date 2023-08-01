@@ -951,10 +951,11 @@ class SimpleDiscriminator(torch.nn.Module):
 
 
 class Losses:
-    def __init__(self, loss_coeff, rbf=None, threshold=0.0):
+    def __init__(self, loss_coeff, rbf=None, disc=None, threshold=0.0):
         self.coeff = loss_coeff
         self.threshold = threshold
         self.rbf = rbf
+        self.disc = disc
 
     def combined_loss(self, y_pred, y_true):
         loss = ((y_true - y_pred) ** 2).view(len(y_true), -1).mean(dim=1) \
@@ -969,6 +970,12 @@ class Losses:
                * (self.coeff['ssim'] if 'ssim' in self.coeff else 0.0) + \
                ((charbonnier_loss(self.rbf(y_pred), self.rbf(y_true)) * self.coeff[
                    'rbf']) if self.rbf and 'rbf' in self.coeff else 0.0)
+
+        if self.disc:
+            disc_preds = self.disc(y_pred, return_probs=False)
+            adv_loss = torch.nn.functional.binary_cross_entropy_with_logits(disc_preds, torch.ones_like(disc_preds))
+            loss += torch.nan_to_num(adv_loss, nan=0, posinf=0, neginf=0) \
+                    * (self.coeff['disc'] if 'disc' in self.coeff else 0.0)
         return loss
 
 
@@ -999,7 +1006,7 @@ class Trainer:
                                   + '-train-weights.pth'
         self.logs_path = cfg['saving']['log_folder'] + cfg['model']['name'] + '-' + pref_time + '-logs.json'
 
-        self.min_lr = self.cfg['train']['base_rate'] * self.cfg['train']['sched_min']
+        self.min_lr = self.cfg['train']['base_rate'] * self.cfg['train']['sched']['min']
         self.scale = self.cfg['model']['upscale_factor']
         self.in_channels = self.cfg['model']['in_channels']
         self.max_grad_norm = self.cfg['train']['max_grad_norm']
@@ -1016,8 +1023,12 @@ class Trainer:
         self.scheduler = None
         self.scheduler_interval = 'epoch'
         self.scaler = None
-        self.hard_warmup = self.cfg['train']['hard_warmup']
-        self.hard_sampling = self.hard_warmup is not None and self.cfg['train']['hard_prob'] > 0.0
+        self.hard_warmup = self.cfg['train']['hard']['warmup']
+        self.hard_sampling = self.hard_warmup is not None and self.cfg['train']['hard']['prob'] > 0.0
+
+        self.use_disc = self.cfg['train']['disc']['warmup'] is not None \
+                        and self.cfg['loss']['weights']['disc'] > 0
+        self.disc_optimizer = None
 
         self.configure()
         if cfg['train']['pretrained_weights']:
@@ -1054,7 +1065,10 @@ class Trainer:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
         if self.hard_sampling and epoch + 1 >= self.hard_warmup:
-            self.train_dataset.hard_prob = self.cfg['train']['hard_prob']
+            self.train_dataset.hard_prob = self.cfg['train']['hard']['prob']
+
+        if self.use_disc and epoch + 1 >= self.cfg['train']['disc']['warmup']:
+            self.losses.coeff['disc'] = self.cfg['loss']['weights']['disc']
 
         if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
             self.train_dataset.reset_cache()
@@ -1077,8 +1091,21 @@ class Trainer:
             self.scaler.unscale_(self.optimizer)
             if self.max_grad_norm:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm, error_if_nonfinite=False)
-            __metrics['grad-norm'] = grad_norm(self.model)
+            __metrics['grad-norm'] = torch.nan_to_num(grad_norm(self.model), nan=0, posinf=0, neginf=0)
             self.scaler.step(self.optimizer)
+
+            if self.use_disc and batch_id % self.cfg['train']['disc']['freq'] == 0:
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    preds = self.losses.disc(torch.cat([outputs.detach(), labels], dim=0), return_probs=False)
+                    target = torch.zeros_like(preds)
+                    target[len(outputs):] = 1 - torch.rand_like(target[len(outputs):]) * 0.1
+
+                    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(preds, target)
+                self.scaler.scale(bce_loss).backward()
+                self.scaler.unscale_(self.disc_optimizer)
+                __metrics['disc-loss'] = bce_loss
+                __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
+                self.scaler.step(self.disc_optimizer)
             self.scaler.update()
 
             # lr scheduling
@@ -1341,8 +1368,14 @@ class Trainer:
             rbf = rbf.to(self.device)
         else:
             rbf = None
-        self.losses = Losses(loss_coeff=self.cfg['metrics']['loss_coeff'], rbf=rbf,
-                             threshold=self.cfg['metrics']['loss_threshold'])
+        if self.use_disc:
+            disc = SimpleDiscriminator(in_channels=self.in_channels, dim=self.cfg['train']['disc']['channels'],
+                                       n_blocks=self.cfg['train']['disc']['blocks'])
+        else:
+            disc = None
+        self.losses = Losses(loss_coeff=self.cfg['loss']['weights'], rbf=rbf,
+                             threshold=self.cfg['loss']['threshold'], disc=disc)
+        self.losses.coeff['disc'] = 0
 
     def configure_optimizer(self):
 
@@ -1356,22 +1389,26 @@ class Trainer:
             self.optimizer = Lamb(self.model.parameters(), lr=lr, betas=(0.9, 0.99))
         self.scaler = torch.cuda.amp.GradScaler()
 
-        if self.cfg['train']['sched'] == 'cosine':
+        if self.cfg['train']['sched']['name'] == 'cosine':
             self.scheduler_interval = 'step'
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                self.optimizer, T_0=self.cfg['train']['sched_start'] * self.cfg['train']['steps'],
-                T_mult=self.cfg['train']['sched_mult'], eta_min=lr * self.cfg['train']['sched_min'])
-        elif self.cfg['train']['sched'] == 'multistep':
+                self.optimizer, T_0=self.cfg['train']['sched']['start'] * self.cfg['train']['steps'],
+                T_mult=self.cfg['train']['sched']['mult'], eta_min=lr * self.cfg['train']['sched']['min'])
+        elif self.cfg['train']['sched']['name'] == 'multistep':
             self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
-                                                                  milestones=self.cfg['train']['sched_steps'],
-                                                                  gamma=self.cfg['train']['sched_gamma'])
-        elif self.cfg['train']['sched'] == 'one':
+                                                                  milestones=self.cfg['train']['sched']['steps'],
+                                                                  gamma=self.cfg['train']['sched']['gamma'])
+        elif self.cfg['train']['sched']['name'] == 'one':
             self.scheduler_interval = 'step'
             self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched_start'] / self.cfg['train']['epochs'],
-                div_factor=1 / self.cfg['train']['sched_initial'],
-                final_div_factor=self.cfg['train']['sched_initial'] / self.cfg['train']['sched_min'],
+                self.optimizer, max_lr=lr, pct_start=self.cfg['train']['sched']['start'] / self.cfg['train']['epochs'],
+                div_factor=1 / self.cfg['train']['sched']['initial'],
+                final_div_factor=self.cfg['train']['sched']['initial'] / self.cfg['train']['sched']['min'],
                 epochs=self.cfg['train']['epochs'], steps_per_epoch=self.cfg['train']['steps'])
+
+        if self.use_disc:
+            self.disc_optimizer = torch.optim.SGD(params=self.losses.disc.parameters(),
+                                                  lr=self.cfg['train']['disc']['lr'])
 
     def get_onnx(self):
         x = torch.randn(1, 1, 720, 1280)

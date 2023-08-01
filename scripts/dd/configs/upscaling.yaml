@@ -17,15 +17,16 @@ data:
   - /dsk1/danil/3d/nerf/data/games/test/unsplash2k/
   mode: bilinear
   out: /dsk1/danil/3d/nerf/results
-metrics:
-  loss_threshold: 0.0
-  loss_coeff:
+loss:
+  threshold: 0.0
+  weights:
     mae: 1.0
     mse: 0.0
     psnr: 0.0
     ssim: 0.0
     rbf: 0.0
-  loss_name:
+    disc: 0.0
+  name:
   - mse
   - mae
 model:
@@ -57,25 +58,33 @@ train:
   optimizer: lamb
   max_grad_norm: 0.1
   pretrained_weights: ''
-  hard_rate: 0.1
-  hard_prob: 0.5
-  hard_alpha: 0.95
-  hard_warmup: 5
-  sched: 'cosine'
-  sched_min: 0.01
-  sched_initial: 0.25
-  sched_start: 2
-  sched_mult: 2
-  sched_gamma: 0.4
-  sched_steps:
-  - 7
-  - 17
-  - 30
-  - 45
-  - 75
-  - 90
-  - 125
-  - 150
-  - 175
-  - 200
-  - 225
+  hard:
+    rate: 0.1
+    prob: 0.5
+    alpha: 0.95
+    warmup: 5
+  disc:
+    lr: 0.001
+    warmup: 10
+    dim: 64
+    blocks: 2
+    freq: 1
+  sched:
+    name: 'cosine'
+    min: 0.01
+    initial: 0.25
+    start: 2
+    mult: 2
+    gamma: 0.4
+    steps:
+    - 7
+    - 17
+    - 30
+    - 45
+    - 75
+    - 90
+    - 125
+    - 150
+    - 175
+    - 200
+    - 225
