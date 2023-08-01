@@ -247,7 +247,6 @@ class SimpleDiscriminator(torch.nn.Module):
         probs = self.classifier(features)
         return torch.sigmoid(probs.view(-1)) if return_probs else probs.view(-1)
 
-
 class DownSample2d(torch.nn.Module):
 
     def __init__(self, in_dim, out_dim, kernel_size=3, scale_factor=0.5, use_conv=True):

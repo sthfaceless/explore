@@ -943,6 +943,14 @@ class SimpleDiscriminator(torch.nn.Module):
             torch.nn.utils.spectral_norm(torch.nn.Linear(dim, 1)),
         )
 
+    def disable_grads(self):
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def enable_grads(self):
+        for p in self.parameters():
+            p.requires_grad = True
+
     def forward(self, x, return_probs=True):
         h = self.first_conv(x[:, :self.in_channels])
         features = self.feature_extractor(h)
@@ -1095,6 +1103,7 @@ class Trainer:
             self.scaler.step(self.optimizer)
 
             if self.use_disc and batch_id % self.cfg['train']['disc']['freq'] == 0:
+                self.losses.disc.enable_grads()
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     preds = self.losses.disc(torch.cat([outputs.detach(), labels], dim=0), return_probs=False)
                     target = torch.zeros_like(preds)
@@ -1106,6 +1115,7 @@ class Trainer:
                 __metrics['disc-loss'] = bce_loss
                 __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
                 self.scaler.step(self.disc_optimizer)
+                self.losses.disc.disable_grads()
             self.scaler.update()
 
             # lr scheduling
@@ -1369,8 +1379,8 @@ class Trainer:
         else:
             rbf = None
         if self.use_disc:
-            disc = SimpleDiscriminator(in_channels=self.in_channels, dim=self.cfg['train']['disc']['channels'],
-                                       n_blocks=self.cfg['train']['disc']['blocks'])
+            disc = SimpleDiscriminator(in_channels=self.in_channels, dim=self.cfg['train']['disc']['dim'],
+                                       n_blocks=self.cfg['train']['disc']['blocks']).to(self.device)
         else:
             disc = None
         self.losses = Losses(loss_coeff=self.cfg['loss']['weights'], rbf=rbf,
