@@ -1137,7 +1137,6 @@ class Trainer:
                 if batch_id % (self.acc_grads * self.cfg['train']['disc']['freq']) == 0:
                     self.disc_optimizer.zero_grad(set_to_none=True)
 
-                self.losses.disc.enable_grads()
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     preds = self.losses.disc(torch.cat([outputs.detach(), labels], dim=0), return_probs=False)
                     target = torch.zeros_like(preds)
@@ -1151,8 +1150,6 @@ class Trainer:
                     __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
                     self.scaler.step(self.disc_optimizer)
 
-                self.losses.disc.disable_grads()
-
             if (batch_id + 1) % self.acc_grads == 0:
                 self.scaler.update()
 
@@ -1162,7 +1159,7 @@ class Trainer:
             # logs running statistics
             record_step = steps * self.acc_grads // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
-                print(f'[{epoch + 1}, {batch_id + 1:5d}]',
+                print(f'[{epoch + 1}, {(batch_id + 1) // self.acc_grads:5d}]',
                       *(f'{name} --- {torch.stack(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
 
