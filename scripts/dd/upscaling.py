@@ -369,9 +369,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def get_game(self, path):
         return os.path.normpath(path).lstrip(os.path.sep).split(os.path.sep)[-3]  # game/hr/0.png
 
-    def __update_metrics(self, names, values):
+    def __update_metrics(self, names, values, low_threshold=20.0):
         for name, value in zip(names, values):
-            if math.isnan(value):
+            if math.isnan(value) or value < low_threshold:
                 continue
             self.metrics[name] = self.metrics[name] * self.hard_alpha + value * (1 - self.hard_alpha)
             self.hard_items[self.get_game(name)].put(self.metrics[name], name)
