@@ -67,7 +67,7 @@ train:
   disc:
     lr: 0.001
     warmup: 10
-    dim: 64
+    dim: 32
     blocks: 2
     freq: 1
   sched:

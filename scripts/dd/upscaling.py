@@ -558,6 +558,7 @@ class GameDataset(torch.utils.data.Dataset):
             img = self.transform(cv2.imread(img_path))
         else:
             img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=0.5, mode=self.mode)[0]
+            img = torch_convert_RGB2YUV((torch_convert_YUV2RGB(img) * 255.0).round() / 255.0)
 
         return {
             'lr': img,
@@ -572,7 +573,7 @@ class GameDataset(torch.utils.data.Dataset):
 def get_filenames(dataset_path, datasets_names=(), hr_subfolder='hr', pic_format='*.png'):
     filenames = []
     if len(datasets_names) == 0:
-        pattern = os.path.join(dataset_path, pic_format)
+        pattern = os.path.join(dataset_path, hr_subfolder, pic_format)
         print(pattern)
         filenames.append(glob(pattern))
     elif datasets_names[0] == 'all':  # take all game folders in the root folder
@@ -1145,7 +1146,7 @@ class Trainer:
                 self.scaler.scale(bce_loss / self.acc_grads).backward()
                 __metrics['disc-loss'] = bce_loss
 
-                if ((batch_id + 1) // self.acc_grads) % self.cfg['train']['disc']['freq'] != 0:
+                if (batch_id + 1) % self.acc_grads == 0:
                     self.scaler.unscale_(self.disc_optimizer)
                     __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
                     self.scaler.step(self.disc_optimizer)
@@ -1266,7 +1267,7 @@ class Trainer:
                             metrics[f'{model}_{k}'].append(v.item())
 
                         if save_images:
-                            upscaled_images[model].append(to_image(out))
+                            upscaled_images[model].append(to_image(out)[0])
                             upscaled_names[model].extend(names)
 
             val_metrics = {k: torch.tensor(v).mean().item() for k, v in metrics.items()}
