@@ -116,6 +116,9 @@ def to_image(tensor, yuv=True):
     return image
 
 
+def reduce_image_precision(img):
+    return torch_convert_RGB2YUV((torch_convert_YUV2RGB(img) * 255.0).round() / 255.0)
+
 def run_async(fun, *args, **kwargs):
     thread = threading.Thread(target=fun, args=args, kwargs=kwargs)
     thread.start()
@@ -323,10 +326,12 @@ class HardItems:
 class PatchedDataset(torch.utils.data.IterableDataset):
 
     def __init__(self, file_names, patch_size=16, patch_pad=2, scale=2, in_channels=3, augment=0.0, noise=0.0,
-                 orig='hr', mode='bilinear', cache_size=1024, hard_rate=0.1, hard_alpha=0.95):
+                 orig='hr', mode='bilinear', cache_size=1024, hard_rate=0.1, hard_alpha=0.95, h=None, w=None):
         super(PatchedDataset, self).__init__()
         self.patch_size = patch_size
         self.patch_pad = patch_pad
+        self.h = h
+        self.w = w
         self.scale = scale
         self.in_channels = in_channels
         self.augment = augment
@@ -382,6 +387,20 @@ class PatchedDataset(torch.utils.data.IterableDataset):
     def __load_file(self, file):
         frame = cv2.imread(file)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self.h is not None and self.w is not None:
+            h, w = frame.shape[:2]
+            frame_ratio = w / h
+            if frame_ratio > self.w / self.h:
+                # width is bigger so let's crop it
+                true_w = int(h * self.w / self.h)
+                start_w = int((w - true_w) / 2)
+                frame = frame[:, start_w: start_w + true_w]
+            else:
+                # height is bigger
+                true_h = int(w / self.w * self.h)
+                start_h = int((h - true_h) / 2)
+                frame = frame[start_h: start_h + true_h]
+            frame = cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_AREA)
         return to_tensor(frame, in_channels=self.in_channels).to(torch.float16)
 
     def load_file(self, file):
@@ -453,7 +472,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
         sr = obj[self.orig]
         c, h, w = sr.shape
 
-        patch_size = (self.patch_size + self.patch_pad * 2) * self.scale
+        patch_size = int((self.patch_size + self.patch_pad * 2) * self.scale)
         i_start = randint(0, h - patch_size - 1)
         j_start = randint(0, w - patch_size - 1)
         sr_patch = sr[:, i_start:i_start + patch_size, j_start:j_start + patch_size]
@@ -468,6 +487,9 @@ class PatchedDataset(torch.utils.data.IterableDataset):
 
         if random() < self.noise:
             lr_patch = choice(self.noises)(lr_patch)
+
+        # imitate precision reducing
+        lr_patch = reduce_image_precision(lr_patch)
 
         return {
             'lr': lr_patch,
@@ -558,7 +580,7 @@ class GameDataset(torch.utils.data.Dataset):
             img = self.transform(cv2.imread(img_path))
         else:
             img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=0.5, mode=self.mode)[0]
-            img = torch_convert_RGB2YUV((torch_convert_YUV2RGB(img) * 255.0).round() / 255.0)
+            img = reduce_image_precision(img)
 
         return {
             'lr': img,
@@ -735,29 +757,32 @@ class MiniConv(torch.nn.Module):
         super().__init__()
 
         squeeze_channels = dim // 3
+        # channel reduction
+        self.pw = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+
         # 3x3 kernel convolution
-        self.pw1 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
         self.conv1 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=3, stride=1, padding=1)
 
-        # factorized 5x5 kernel convolution
-        self.pw2 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
-        self.conv21 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(1, 5), stride=(1, 1),
-                                      padding=(0, 2), groups=squeeze_channels)
-        self.conv22 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(5, 1), stride=(1, 1),
-                                      padding=(2, 0), groups=squeeze_channels)
+        # 3x3 kernel with 1x1 following
+        self.conv21 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(3, 3), stride=(1, 1),
+                                      padding=(1, 1))
+        self.conv22 = torch.nn.Conv2d(squeeze_channels, squeeze_channels, kernel_size=(1, 1), stride=(1, 1),
+                                      padding=(0, 0))
 
-        # factorized 7x7 kernel convolution
-        self.pw3 = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
+        # 3x3 grouped with following 1x1
         self.conv31 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
-                                      kernel_size=(1, 7), stride=(1, 1), padding=(0, 3), groups=squeeze_channels)
+                                      kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=squeeze_channels)
         self.conv32 = torch.nn.Conv2d(squeeze_channels, squeeze_channels,
-                                      kernel_size=(7, 1), stride=(1, 1), padding=(3, 0), groups=squeeze_channels)
+                                      kernel_size=(1, 1), stride=(1, 1), padding=(0, 0))
 
     def forward(self, x):
+
         x = nonlinear(x)
-        x1 = self.conv1(self.pw1(x))
-        x2 = self.conv22(self.conv21(self.pw2(x)))
-        x3 = self.conv32(self.conv31(self.pw3(x)))
+        x = self.pw(x)
+
+        x1 = self.conv1(x)
+        x2 = self.conv22(nonlinear(self.conv21(x)))
+        x3 = self.conv32(nonlinear(self.conv31(x)))
 
         x = torch.cat((x1, x2, x3), dim=1)
 
@@ -776,7 +801,7 @@ class MiniBlock(torch.nn.Module):
 
     def forward(self, x):
         out = self.layers(x)
-        out = out + x
+        out = (out + x) / 2 ** 0.5
         return out
 
 
@@ -837,6 +862,9 @@ class UpscalingModelBase(torch.nn.Module):
             self.upscaling_layer = torch.nn.ConvTranspose2d(
                 n_channels, n_channels // (self.scale * self.scale) if not out_channels else out_channels,
                 kernel_size=self.scale, stride=self.scale, padding=0)
+        elif upscaling_method == 'Interpolation':
+            self.upscaling_layer = lambda img: torch.nn.functional.interpolate(img, scale_factor=upscale_factor,
+                                                                               mode='nearest-exact')
 
         if use_norm:
             self.out_norm = norm(n_channels // (self.scale * self.scale))
@@ -1262,7 +1290,7 @@ class Trainer:
                                                             mode=self.cfg['data']['mode'])], dim=1)
 
                         # imitates image saving for correct validation metrics
-                        out = torch_convert_RGB2YUV((torch_convert_YUV2RGB(out) * 255.0).round() / 255.0)
+                        out = reduce_image_precision(out)
                         for k, v in self.metrics(out, labels).items():
                             metrics[f'{model}_{k}'].append(v.item())
 
@@ -1335,9 +1363,10 @@ class Trainer:
         if patched:
             dataset = PatchedDataset(file_names, patch_size=self.cfg['data']['patch_size'],
                                      patch_pad=self.cfg['data']['patch_pad'],
-                                     augment=self.cfg['data']['augment'],
+                                     augment=self.cfg['data']['augment'], scale=self.cfg['model']['upscale_factor'],
+                                     h=self.cfg['data']['height'], w=self.cfg['data']['width'],
                                      cache_size=self.cfg['data']['cache_size'],
-                                     in_channels=self.cfg['model']['in_channels'])
+                                     in_channels=3)
             dataloader = PatchedDataLoader(dataset, batch_size=batch_size, num_workers=4 * torch.cuda.device_count(),
                                            prefetch_factor=2)
         else:
