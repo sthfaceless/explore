@@ -489,7 +489,7 @@ class PatchedDataset(torch.utils.data.IterableDataset):
             lr_patch = choice(self.noises)(lr_patch)
 
         # imitate precision reducing
-        lr_patch = reduce_image_precision(lr_patch)
+        lr_patch = reduce_image_precision(lr_patch.unsqueeze(0))[0]
 
         return {
             'lr': lr_patch,
@@ -580,7 +580,7 @@ class GameDataset(torch.utils.data.Dataset):
             img = self.transform(cv2.imread(img_path))
         else:
             img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=0.5, mode=self.mode)[0]
-            img = reduce_image_precision(img)
+            img = reduce_image_precision(img.unsqueeze(0))[0]
 
         return {
             'lr': img,
