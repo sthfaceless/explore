@@ -20,7 +20,7 @@ data:
   mode: bilinear
   out: /dsk1/danil/3d/nerf/results
 loss:
-  threshold: 0.0
+  threshold: 0.001
   weights:
     mae: 1.0
     mse: 0.0

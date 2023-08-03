@@ -1,5 +1,5 @@
 data:
-  batch_size: 256
+  batch_size: 512
   cache_size: 4000
   augment: 1.0
   noise: 0.5
@@ -7,8 +7,8 @@ data:
   patch_size: 80
   patch_pad: 8
   val_batch_size: 1
-  height: 720
-  width: 1280
+  height: 1280
+  width: 720
   train_datasets:
   - all
   train_folder: /dsk1/danil/3d/nerf/data/games/images/
@@ -20,7 +20,7 @@ data:
   mode: bilinear
   out: /dsk1/danil/3d/nerf/results
 loss:
-  threshold: 0.0
+  threshold: 0.001
   weights:
     mae: 1.0
     mse: 0.0
@@ -32,7 +32,7 @@ loss:
   - mse
   - mae
 model:
-  block_size: 2
+  block_size: 1
   in_channels: 1
   dropout: 0.0
   out_channels: 12
@@ -54,11 +54,11 @@ saving:
 train:
   base_rate: 0.005
   rbf_filters:
-  epochs: 60
+  epochs: 30
   steps: 2000
   acc_grads: 1
   log_freq: 50
-  optimizer: adam
+  optimizer: lamb
   max_grad_norm: 0.1
   pretrained_weights: ''
   hard:

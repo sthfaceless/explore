@@ -119,6 +119,19 @@ def to_image(tensor, yuv=True):
 def reduce_image_precision(img):
     return torch_convert_RGB2YUV((torch_convert_YUV2RGB(img) * 255.0).round() / 255.0)
 
+
+def fix_scale_dim(img, scale):
+    h, w = img.shape[:2]
+    target_h = int(int(h / scale) * scale)
+    if target_h != h:
+        img = img[:target_h]
+
+    target_w = int(int(w / scale) * scale)
+    if target_w != w:
+        img = img[:, :target_w]
+    return img
+
+
 def run_async(fun, *args, **kwargs):
     thread = threading.Thread(target=fun, args=args, kwargs=kwargs)
     thread.start()
@@ -559,9 +572,10 @@ class PatchedDataLoader:
 
 class GameDataset(torch.utils.data.Dataset):
 
-    def __init__(self, file_names, mode='bilinear'):
+    def __init__(self, file_names, mode='bilinear', scale=2.0):
         self.filenames = file_names
         self.mode = mode
+        self.scale = scale
 
     def transform(self, image):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -579,7 +593,9 @@ class GameDataset(torch.utils.data.Dataset):
         if os.path.exists(img_path):
             img = self.transform(cv2.imread(img_path))
         else:
-            img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=0.5, mode=self.mode)[0]
+            # remove extra pixels for correct upscaling
+            label = fix_scale_dim(label, self.scale)
+            img = torch.nn.functional.interpolate(label.unsqueeze(0), scale_factor=1 / self.scale, mode=self.mode)[0]
             img = reduce_image_precision(img.unsqueeze(0))[0]
 
         return {
@@ -776,7 +792,6 @@ class MiniConv(torch.nn.Module):
                                       kernel_size=(1, 1), stride=(1, 1), padding=(0, 0))
 
     def forward(self, x):
-
         x = nonlinear(x)
         x = self.pw(x)
 
@@ -864,7 +879,7 @@ class UpscalingModelBase(torch.nn.Module):
                 kernel_size=self.scale, stride=self.scale, padding=0)
         elif upscaling_method == 'Interpolation':
             self.upscaling_layer = lambda img: torch.nn.functional.interpolate(img, scale_factor=upscale_factor,
-                                                                               mode='nearest-exact')
+                                                                               mode='bilinear')
 
         if use_norm:
             self.out_norm = norm(n_channels // (self.scale * self.scale))
@@ -1176,7 +1191,8 @@ class Trainer:
 
                 if (batch_id + 1) % self.acc_grads == 0:
                     self.scaler.unscale_(self.disc_optimizer)
-                    __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0, neginf=0)
+                    __metrics['disc-grad-norm'] = torch.nan_to_num(grad_norm(self.losses.disc), nan=0, posinf=0,
+                                                                   neginf=0)
                     self.scaler.step(self.disc_optimizer)
 
             if (batch_id + 1) % self.acc_grads == 0:
@@ -1209,6 +1225,8 @@ class Trainer:
 
         b, c, h_orig, w_orig = images.shape
         patch_size, patch_pad = self.cfg['data']['patch_size'], self.cfg['data']['patch_pad']
+
+        # adding extra padding to match patch division
         h_add = patch_size - (h_orig - h_orig // patch_size * patch_size)
         w_add = patch_size - (w_orig - w_orig // patch_size * patch_size)
         images = torch.cat([torch.zeros_like(images[:, :, :h_add // 2 + h_add % 2]),
@@ -1217,27 +1235,30 @@ class Trainer:
         images = torch.cat([torch.zeros_like(images[:, :, :, :w_add // 2 + w_add % 2]),
                             images,
                             torch.zeros_like(images[:, :, :, :w_add // 2])], dim=3)
-        h, w = images.shape[-2:]
+
         # divide image to patches
+        h, w = images.shape[-2:]
         __tiles = rearrange(images, 'b c (n p1) (m p2) -> b c n m p1 p2', p1=patch_size, p2=patch_size)
 
-        # add up and down padding in height
-        up_pad = __tiles[:, :, 1:, :, :patch_pad, :]
-        up_pad = torch.cat([up_pad, torch.zeros_like(up_pad[:, :, :1])], dim=2)
-        down_pad = __tiles[:, :, :-1, :, -patch_pad:, :]
-        down_pad = torch.cat([torch.zeros_like(down_pad[:, :, :1]), down_pad], dim=2)
-        __tiles = torch.cat([down_pad, __tiles, up_pad], dim=-2)
+        if patch_pad:
+            # add up and down padding in height
+            up_pad = __tiles[:, :, 1:, :, :patch_pad, :]
+            up_pad = torch.cat([up_pad, torch.zeros_like(up_pad[:, :, :1])], dim=2)
+            down_pad = __tiles[:, :, :-1, :, -patch_pad:, :]
+            down_pad = torch.cat([torch.zeros_like(down_pad[:, :, :1]), down_pad], dim=2)
+            __tiles = torch.cat([down_pad, __tiles, up_pad], dim=-2)
 
-        # add left and right paddings in width
-        right_pad = __tiles[:, :, :, 1:, :, :patch_pad]
-        right_pad = torch.cat([right_pad, torch.zeros_like(right_pad[:, :, :, :1])], dim=3)
-        left_pad = __tiles[:, :, :, :-1, :, -patch_pad:]
-        left_pad = torch.cat([torch.zeros_like(left_pad[:, :, :, :1]), left_pad], dim=3)
-        __tiles = torch.cat([left_pad, __tiles, right_pad], dim=-1)
+            # add left and right paddings in width
+            right_pad = __tiles[:, :, :, 1:, :, :patch_pad]
+            right_pad = torch.cat([right_pad, torch.zeros_like(right_pad[:, :, :, :1])], dim=3)
+            left_pad = __tiles[:, :, :, :-1, :, -patch_pad:]
+            left_pad = torch.cat([torch.zeros_like(left_pad[:, :, :, :1]), left_pad], dim=3)
+            __tiles = torch.cat([left_pad, __tiles, right_pad], dim=-1)
 
         # rearrange to batch tiles
         tiles = rearrange(__tiles, 'b c n m p1 p2 -> (b n m) c p1 p2')
 
+        # run model on each patch
         upscaled = []
         for __tiles in torch.split(tiles, self.cfg['data']['batch_size'], dim=0):
             upscaled.append(self.forward(__tiles.to(self.device), model=model).to(images.device))
@@ -1245,13 +1266,19 @@ class Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
+        # merge to one image
         upscaled = torch.cat(upscaled, dim=0)
         upscaled = rearrange(upscaled, '(b n m) c p1 p2 -> b c n m p1 p2', n=h // patch_size, m=w // patch_size)
-        upscaled = upscaled[:, :, :, :, patch_pad * self.scale:-patch_pad * self.scale,
-                   patch_pad * self.scale:-patch_pad * self.scale]
+
+        # remove patch pad
+        extra_pad = upscaled.shape[-1] - int(patch_size * self.scale)
+        upscaled = upscaled[:, :, :, :, extra_pad // 2 + extra_pad % 2:-extra_pad // 2,
+                   extra_pad // 2 + extra_pad % 2:-extra_pad // 2]
         upscaled = rearrange(upscaled, 'b c n m p1 p2 -> b c (n p1) (m p2)', n=h // patch_size, m=w // patch_size)
-        upscaled = upscaled[:, :, (h_add // 2 + h_add % 2) * self.scale: -h_add // 2 * self.scale,
-                   (w_add // 2 + w_add % 2) * self.scale: -w_add // 2 * self.scale]
+
+        # remove image pad
+        upscaled = upscaled[:, :, int((h_add // 2 + h_add % 2) * self.scale): int(-h_add // 2 * self.scale),
+                   int((w_add // 2 + w_add % 2) * self.scale): int(-w_add // 2 * self.scale)]
 
         return upscaled
 
@@ -1370,7 +1397,8 @@ class Trainer:
             dataloader = PatchedDataLoader(dataset, batch_size=batch_size, num_workers=4 * torch.cuda.device_count(),
                                            prefetch_factor=2)
         else:
-            dataset = GameDataset(list(itertools.chain.from_iterable(file_names)))
+            dataset = GameDataset(list(itertools.chain.from_iterable(file_names)),
+                                  scale=self.cfg['model']['upscale_factor'])
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=not patched and not val,
                                                      num_workers=4 * torch.cuda.device_count(), prefetch_factor=2,
                                                      pin_memory=True)
