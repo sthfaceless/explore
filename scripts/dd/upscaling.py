@@ -121,15 +121,19 @@ def reduce_image_precision(img):
 
 
 def fix_scale_dim(img, scale):
-    h, w = img.shape[:2]
+    h, w = img.shape[-2:]
+
     target_h = int(int(h / scale) * scale)
-    if target_h != h:
-        img = img[:target_h]
+    while target_h != h:
+        h = target_h
+        target_h = int(int(h / scale) * scale)
 
     target_w = int(int(w / scale) * scale)
-    if target_w != w:
-        img = img[:, :target_w]
-    return img
+    while target_w != w:
+        w = target_w
+        target_w = int(int(w / scale) * scale)
+
+    return img[..., :target_h, :target_w]
 
 
 def run_async(fun, *args, **kwargs):
@@ -820,6 +824,21 @@ class MiniBlock(torch.nn.Module):
         return out
 
 
+class ReduceBlock(torch.nn.Module):
+
+    def __init__(self, dim, block_size):
+        super(ReduceBlock, self).__init__()
+        self.ds = torch.nn.Conv2d(dim, dim, kernel_size=2, stride=2, padding=0)
+        self.layers = torch.nn.Sequential(*[MiniConv(dim) for _ in range(block_size)])
+        self.us = torch.nn.ConvTranspose2d(dim, dim, kernel_size=2, stride=2, padding=0)
+
+    def forward(self, x):
+        h = self.ds(x)
+        h = self.layers(h)
+        h = self.us(h)
+        return x + h
+
+
 class VITBlock(torch.nn.Module):
 
     def __init__(self, in_channels, dim):
@@ -868,6 +887,8 @@ class UpscalingModelBase(torch.nn.Module):
                 layers.append(GroupedBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
                 layers.append(MiniBlock(n_channels, block_size))
+            elif main_block_type == 'reduce':
+                layers.append(ReduceBlock(n_channels, block_size))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -1229,12 +1250,12 @@ class Trainer:
         # adding extra padding to match patch division
         h_add = patch_size - (h_orig - h_orig // patch_size * patch_size)
         w_add = patch_size - (w_orig - w_orig // patch_size * patch_size)
-        images = torch.cat([torch.zeros_like(images[:, :, :h_add // 2 + h_add % 2]),
+        images = torch.cat([torch.zeros_like(images[:, :, :h_add // 2]),
                             images,
-                            torch.zeros_like(images[:, :, :h_add // 2])], dim=2)
-        images = torch.cat([torch.zeros_like(images[:, :, :, :w_add // 2 + w_add % 2]),
+                            torch.zeros_like(images[:, :, :h_add // 2 + h_add % 2])], dim=2)
+        images = torch.cat([torch.zeros_like(images[:, :, :, :w_add // 2]),
                             images,
-                            torch.zeros_like(images[:, :, :, :w_add // 2])], dim=3)
+                            torch.zeros_like(images[:, :, :, :w_add // 2 + w_add % 2])], dim=3)
 
         # divide image to patches
         h, w = images.shape[-2:]
@@ -1277,15 +1298,15 @@ class Trainer:
         upscaled = rearrange(upscaled, 'b c n m p1 p2 -> b c (n p1) (m p2)', n=h // patch_size, m=w // patch_size)
 
         # remove image pad
-        upscaled = upscaled[:, :, int((h_add // 2 + h_add % 2) * self.scale): int(-h_add // 2 * self.scale),
-                   int((w_add // 2 + w_add % 2) * self.scale): int(-w_add // 2 * self.scale)]
+        upscaled = upscaled[:, :, int(h_add // 2 * self.scale): -int(h_add * self.scale) + int(h_add // 2 * self.scale),
+                   int(w_add // 2 * self.scale): -int(w_add * self.scale) + int(w_add // 2 * self.scale)]
 
         return upscaled
 
     @torch.no_grad()
     def upscale(self, inputs, model=''):
         orig_device = inputs.device
-        if self.cfg['data']['patched']:
+        if self.cfg['data']['val_patched']:
             return self.patch_upscale(inputs, model=model)
         else:
             return self.forward(inputs.to(self.device), model=model).to(orig_device)
@@ -1524,6 +1545,9 @@ class Trainer:
 
         # setup optimizer
         optim = self.optimizer
+
+        if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
+            self.train_dataset.reset_cache()
 
         data_iter = iter(self.trainloader)
         best_loss, best_lr = 1e9, min_lr

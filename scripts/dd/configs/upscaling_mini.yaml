@@ -4,6 +4,7 @@ data:
   augment: 1.0
   noise: 0.5
   patched: true
+  val_patched: false
   patch_size: 80
   patch_pad: 8
   val_batch_size: 1
