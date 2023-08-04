@@ -33,19 +33,19 @@ loss:
   - mse
   - mae
 model:
-  block_size: 1
+  block_size: 2
   in_channels: 1
   dropout: 0.0
   out_channels: 12
   final_act: Tanh
   first_block_type: none
   kernel_size: 3
-  main_block_type: mini
-  n_blocks: 2
+  main_block_type: reduce
+  n_blocks: 1
   n_channels: 12
-  name: model-mini
-  upscale_factor: 1.5
-  upscaling_method: Interpolation
+  name: reduce
+  upscale_factor: 2
+  upscaling_method: PixelShuffle
   use_norm: false
   avg:
   - ema

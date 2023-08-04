@@ -824,21 +824,6 @@ class MiniBlock(torch.nn.Module):
         return out
 
 
-class ReduceBlock(torch.nn.Module):
-
-    def __init__(self, dim, block_size):
-        super(ReduceBlock, self).__init__()
-        self.ds = torch.nn.Conv2d(dim, dim, kernel_size=2, stride=2, padding=0)
-        self.layers = torch.nn.Sequential(*[MiniConv(dim) for _ in range(block_size)])
-        self.us = torch.nn.ConvTranspose2d(dim, dim, kernel_size=2, stride=2, padding=0)
-
-    def forward(self, x):
-        h = self.ds(x)
-        h = self.layers(h)
-        h = self.us(h)
-        return x + h
-
-
 class VITBlock(torch.nn.Module):
 
     def __init__(self, in_channels, dim):
@@ -887,8 +872,6 @@ class UpscalingModelBase(torch.nn.Module):
                 layers.append(GroupedBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
                 layers.append(MiniBlock(n_channels, block_size))
-            elif main_block_type == 'reduce':
-                layers.append(ReduceBlock(n_channels, block_size))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -928,18 +911,57 @@ class UpscalingModelBase(torch.nn.Module):
         return Y
 
 
+class ReduceModel(torch.nn.Module):
+    def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2):
+        super(ReduceModel, self).__init__()
+        self.in_channels = in_channels
+        self.upscale_factor = upscale_factor
+        self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels, kernel_size=1)
+        self.layers = [MiniConv(n_channels) for _ in range(n_blocks)]
+        self.out_conv = torch.nn.Conv2d(n_channels, upscale_factor ** 4, kernel_size=1)
+
+    def forward(self, x):
+        # [0, 1] -> [-1, 1]
+        x = x[:, :self.in_channels] * 2 - 1.0
+
+        # initial downsampling and mapping
+        h = torch.nn.functional.pixel_unshuffle(x, downscale_factor=self.upscale_factor)
+        h = self.in_conv(h)
+
+        # mid layers
+        for conv in self.layers:
+            h = (conv(h) + h) / 2 ** 0.5
+
+        # out mapping and skip connection
+        h = self.out_conv(h)
+        h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
+        h = h + x.repeat(1, self.upscale_factor ** 2, 1, 1)
+        h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
+
+        # [-1, 1] -> [0, 1]
+        out = torch.clamp(h / 2 + 0.5, min=0, max=1)
+
+        return out
+
+
 def build_model(cfg):
-    model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
-                               n_blocks=cfg['model']['n_blocks'],
-                               in_channels=cfg['model']['in_channels'],
-                               block_size=cfg['model']['block_size'],
-                               kernel_size=cfg['model']['kernel_size'],
-                               upscale_factor=cfg['model']['upscale_factor'],
-                               dropout=cfg['model']['dropout'],
-                               upscaling_method=cfg['model']['upscaling_method'],
-                               main_block_type=cfg['model']['main_block_type'],
-                               use_norm=cfg['model']['use_norm'],
-                               out_channels=cfg['model']['out_channels'])
+    if cfg['model']['main_block_type'] == 'reduce':
+        model = ReduceModel(in_channels=cfg['model']['in_channels'],
+                            n_channels=cfg['model']['n_channels'],
+                            n_blocks=cfg['model']['n_blocks'],
+                            upscale_factor=cfg['model']['upscale_factor'], )
+    else:
+        model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
+                                   n_blocks=cfg['model']['n_blocks'],
+                                   in_channels=cfg['model']['in_channels'],
+                                   block_size=cfg['model']['block_size'],
+                                   kernel_size=cfg['model']['kernel_size'],
+                                   upscale_factor=cfg['model']['upscale_factor'],
+                                   dropout=cfg['model']['dropout'],
+                                   upscaling_method=cfg['model']['upscaling_method'],
+                                   main_block_type=cfg['model']['main_block_type'],
+                                   use_norm=cfg['model']['use_norm'],
+                                   out_channels=cfg['model']['out_channels'])
     return model
 
 
@@ -1250,12 +1272,10 @@ class Trainer:
         # adding extra padding to match patch division
         h_add = patch_size - (h_orig - h_orig // patch_size * patch_size)
         w_add = patch_size - (w_orig - w_orig // patch_size * patch_size)
-        images = torch.cat([torch.zeros_like(images[:, :, :h_add // 2]),
-                            images,
-                            torch.zeros_like(images[:, :, :h_add // 2 + h_add % 2])], dim=2)
-        images = torch.cat([torch.zeros_like(images[:, :, :, :w_add // 2]),
-                            images,
-                            torch.zeros_like(images[:, :, :, :w_add // 2 + w_add % 2])], dim=3)
+        images = torch.cat([images,
+                            torch.flip(images[:, :, -h_add:], dims=(2,))], dim=2)
+        images = torch.cat([images,
+                            torch.flip(images[:, :, :, -w_add:], dims=(3,))], dim=3)
 
         # divide image to patches
         h, w = images.shape[-2:]
@@ -1298,8 +1318,7 @@ class Trainer:
         upscaled = rearrange(upscaled, 'b c n m p1 p2 -> b c (n p1) (m p2)', n=h // patch_size, m=w // patch_size)
 
         # remove image pad
-        upscaled = upscaled[:, :, int(h_add // 2 * self.scale): -int(h_add * self.scale) + int(h_add // 2 * self.scale),
-                   int(w_add // 2 * self.scale): -int(w_add * self.scale) + int(w_add // 2 * self.scale)]
+        upscaled = upscaled[:, :, : -int(h_add * self.scale), :-int(w_add * self.scale)]
 
         return upscaled
 
