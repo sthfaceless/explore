@@ -912,13 +912,15 @@ class UpscalingModelBase(torch.nn.Module):
 
 
 class ReduceModel(torch.nn.Module):
-    def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2):
+    def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2, kernel_size=1):
         super(ReduceModel, self).__init__()
         self.in_channels = in_channels
         self.upscale_factor = upscale_factor
-        self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels, kernel_size=1)
-        self.layers = [MiniConv(n_channels) for _ in range(n_blocks)]
-        self.out_conv = torch.nn.Conv2d(n_channels, upscale_factor ** 4, kernel_size=1)
+        self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels,
+                                       kernel_size=kernel_size, padding=kernel_size//2)
+        self.layers = torch.nn.ModuleList([MiniConv(n_channels) for _ in range(n_blocks)])
+        self.out_conv = torch.nn.Conv2d(n_channels, upscale_factor ** 4, kernel_size=kernel_size,
+                                        padding=kernel_size//2)
 
     def forward(self, x):
         # [0, 1] -> [-1, 1]
@@ -949,7 +951,8 @@ def build_model(cfg):
         model = ReduceModel(in_channels=cfg['model']['in_channels'],
                             n_channels=cfg['model']['n_channels'],
                             n_blocks=cfg['model']['n_blocks'],
-                            upscale_factor=cfg['model']['upscale_factor'], )
+                            upscale_factor=cfg['model']['upscale_factor'],
+                            kernel_size=cfg['model']['kernel_size'])
     else:
         model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
                                    n_blocks=cfg['model']['n_blocks'],

@@ -5,7 +5,7 @@ data:
   noise: 0.5
   patched: true
   val_patched: false
-  patch_size: 72
+  patch_size: 84
   patch_pad: 6
   val_batch_size: 1
   height:
