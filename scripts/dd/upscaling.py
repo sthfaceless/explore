@@ -1542,10 +1542,10 @@ class Trainer:
 
         if self.cfg['train']['sched']['name'] == 'cosine':
             self.scheduler_interval = 'step'
-            total_steps = self.cfg['train']['sched']['start'] * self.cfg['train']['steps']
+            total_steps = self.cfg['train']['epochs'] * self.cfg['train']['steps']
             multipliers = [self.cfg['train']['sched']['mult'] ** i for i in range(self.cfg['train']['sched']['cycles'])]
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                self.optimizer, T_0=int(total_steps / sum(multipliers)),
+                self.optimizer, T_0=int(total_steps / (sum(multipliers) * self.cfg['train']['sched']['start'])),
                 T_mult=self.cfg['train']['sched']['mult'], eta_min=lr * self.cfg['train']['sched']['min'])
         elif self.cfg['train']['sched']['name'] == 'multistep':
             self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
