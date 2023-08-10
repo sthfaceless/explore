@@ -921,10 +921,10 @@ class ReduceModel(torch.nn.Module):
         self.skip_normalize = skip_normalize
         self.enhance = enhance
         self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels,
-                                       kernel_size=kernel_size, padding=kernel_size//2)
+                                       kernel_size=kernel_size, padding=kernel_size // 2)
         self.layers = torch.nn.ModuleList([MiniConv(n_channels) for _ in range(n_blocks)])
         self.out_conv = torch.nn.Conv2d(n_channels, upscale_factor ** 4, kernel_size=kernel_size,
-                                        padding=kernel_size//2)
+                                        padding=kernel_size // 2)
 
     def forward(self, x):
         # [0, 1] -> [-1, 1]
@@ -1413,7 +1413,7 @@ class Trainer:
         item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
         return item
 
-    def save_results(self, item):
+    def save_results(self, item, epoch):
 
         for model_name in self.models.keys():
             val_loss, val_psnr = [], []
@@ -1424,9 +1424,30 @@ class Trainer:
             val_psnr = torch.tensor(val_psnr).mean().item()
             if val_psnr > self.best_val_psnr:
                 print("Best val psnr updated")
-                model = self.model if model_name == '' else self.models[model_name].module
-                torch.save(model.state_dict(), self.val_weights_path)
+                self.save(model=self.model if model_name == '' else self.models[model_name].module,
+                          path=self.val_weights_path)
                 self.best_val_psnr = val_psnr
+
+    def save(self, model=None, path=None):
+        model = model if model else self.model
+        path = path if path else self.val_weights_path
+
+        ckp = {
+            'model': model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'scheduler_interval': self.scheduler_interval,
+            'val_psnr': self.best_val_psnr
+        }
+        if self.use_disc:
+            ckp['disc'] = self.losses.disc.state_dict()
+            ckp['disc_optimizer'] = self.disc_optimizer.state_dict()
+        torch.save(ckp, path)
+
+    def save_model(self, model=None, path=None):
+        model = model if model else self.model
+        path = path if path else self.val_weights_path
+        torch.save(model.state_dict(), path)
 
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False, val=False):
 
@@ -1558,9 +1579,13 @@ class Trainer:
 
         dict_weights = torch.load(file, map_location=self.device)
 
-        dict_weights = {k.split('module.')[-1]: v for k, v in dict_weights.items()}
-        status = self.model.load_state_dict(dict_weights, strict=False)
+        status = self.model.load_state_dict(dict_weights['model'], strict=False)
         print('Weights loaded: ', status)
+
+        self.optimizer.load_state_dict(dict_weights['optimizer'])
+        self.scheduler.load_state_dict(dict_weights['scheduler'])
+        self.scheduler_interval = dict_weights['scheduler_interval']
+        self.best_val_psnr = dict_weights['val_psnr']
 
         val_metrics = self.validate()
         item = self.build_metrics_item({}, val_metrics)
