@@ -1,8 +1,8 @@
 data:
-  batch_size: 512
+  batch_size: 256
   cache_size: 4000
-  augment: 1.0
-  noise: 0.5
+  augment: 0.0
+  noise: 0.0
   patched: true
   val_patched: false
   patch_size: 84
@@ -47,8 +47,9 @@ model:
   upscale_factor: 2
   upscaling_method: PixelShuffle
   use_norm: false
-  avg:
-  - ema
+  skip_normalize: False
+  enhance: false
+  avg: []
 saving:
   ckp_folder: checkpoints/
   log_folder: logs/
@@ -77,6 +78,7 @@ train:
     name: 'cosine'
     min: 0.01
     initial: 0.25
+    cycles: 6
     start: 1
     mult: 2
     gamma: 0.4

@@ -810,9 +810,9 @@ class MiniConv(torch.nn.Module):
 
 class MiniBlock(torch.nn.Module):
 
-    def __init__(self, dim, block_size):
+    def __init__(self, dim, block_size, skip_normalize=False):
         super().__init__()
-
+        self.skip_normalize = skip_normalize
         layers = []
         for _ in range(block_size):
             layers.append(MiniConv(dim))
@@ -820,7 +820,7 @@ class MiniBlock(torch.nn.Module):
 
     def forward(self, x):
         out = self.layers(x)
-        out = (out + x) / 2 ** 0.5
+        out = (out + x) * (2 ** (-0.5) if self.skip_normalize else 1.0)
         return out
 
 
@@ -850,7 +850,8 @@ class UpscalingModelBase(torch.nn.Module):
                  main_block_type='squeeze',
                  use_norm=False,
                  dropout=0.0,
-                 out_channels=None):
+                 out_channels=None,
+                 skip_normalize=False):
         super().__init__()
 
         self.in_channels = in_channels
@@ -871,7 +872,7 @@ class UpscalingModelBase(torch.nn.Module):
             elif main_block_type == 'grouped':
                 layers.append(GroupedBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
-                layers.append(MiniBlock(n_channels, block_size))
+                layers.append(MiniBlock(n_channels, block_size, skip_normalize=skip_normalize))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -912,10 +913,13 @@ class UpscalingModelBase(torch.nn.Module):
 
 
 class ReduceModel(torch.nn.Module):
-    def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2, kernel_size=1):
+    def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2, kernel_size=1,
+                 skip_normalize=False, enhance=False):
         super(ReduceModel, self).__init__()
         self.in_channels = in_channels
         self.upscale_factor = upscale_factor
+        self.skip_normalize = skip_normalize
+        self.enhance = enhance
         self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels,
                                        kernel_size=kernel_size, padding=kernel_size//2)
         self.layers = torch.nn.ModuleList([MiniConv(n_channels) for _ in range(n_blocks)])
@@ -932,13 +936,18 @@ class ReduceModel(torch.nn.Module):
 
         # mid layers
         for conv in self.layers:
-            h = (conv(h) + h) / 2 ** 0.5
+            h = (conv(h) + h) * (2 ** (-0.5) if self.skip_normalize else 1.0)
 
         # out mapping and skip connection
         h = self.out_conv(h)
-        h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
-        h = h + x.repeat(1, self.upscale_factor ** 2, 1, 1)
-        h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
+
+        if self.enhance:
+            h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor ** 2)
+            h = h + torch.nn.functional.interpolate(x, scale_factor=self.upscale_factor, mode='bilinear')
+        else:
+            h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
+            h = h + x.repeat(1, self.upscale_factor ** 2, 1, 1)
+            h = torch.nn.functional.pixel_shuffle(h, upscale_factor=self.upscale_factor)
 
         # [-1, 1] -> [0, 1]
         out = torch.clamp(h / 2 + 0.5, min=0, max=1)
@@ -952,7 +961,9 @@ def build_model(cfg):
                             n_channels=cfg['model']['n_channels'],
                             n_blocks=cfg['model']['n_blocks'],
                             upscale_factor=cfg['model']['upscale_factor'],
-                            kernel_size=cfg['model']['kernel_size'])
+                            kernel_size=cfg['model']['kernel_size'],
+                            skip_normalize=cfg['model']['skip_normalize'],
+                            enhance=cfg['model']['enhance'])
     else:
         model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
                                    n_blocks=cfg['model']['n_blocks'],
@@ -964,7 +975,8 @@ def build_model(cfg):
                                    upscaling_method=cfg['model']['upscaling_method'],
                                    main_block_type=cfg['model']['main_block_type'],
                                    use_norm=cfg['model']['use_norm'],
-                                   out_channels=cfg['model']['out_channels'])
+                                   out_channels=cfg['model']['out_channels'],
+                                   skip_normalize=cfg['model']['skip_normalize'])
     return model
 
 
@@ -1401,18 +1413,7 @@ class Trainer:
         item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
         return item
 
-    def save_results(self, item, epoch):
-
-        item['epoch'] = epoch
-
-        with open(self.logs_path, mode='a', encoding='utf-8') as f:
-            json.dump(item, f)
-            f.write('\n')
-
-        if item['train_loss'] < self.best_train_loss:
-            print("Best train loss updated.")
-            self.best_train_loss = item['train_loss']
-            torch.save(self.model.state_dict(), self.train_weights_path)
+    def save_results(self, item):
 
         for model_name in self.models.keys():
             val_loss, val_psnr = [], []
@@ -1424,7 +1425,7 @@ class Trainer:
             if val_psnr > self.best_val_psnr:
                 print("Best val psnr updated")
                 model = self.model if model_name == '' else self.models[model_name].module
-                torch.save(model.state_dict(), self.val_weights_path.replace('val', 'val-psnr'))
+                torch.save(model.state_dict(), self.val_weights_path)
                 self.best_val_psnr = val_psnr
 
     def get_dataset(self, folder, datasets=(), batch_size=1, patched=False, val=False):
@@ -1520,8 +1521,10 @@ class Trainer:
 
         if self.cfg['train']['sched']['name'] == 'cosine':
             self.scheduler_interval = 'step'
+            total_steps = self.cfg['train']['sched']['start'] * self.cfg['train']['steps']
+            multipliers = [self.cfg['train']['sched']['mult'] ** i for i in range(self.cfg['train']['sched']['cycles'])]
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                self.optimizer, T_0=self.cfg['train']['sched']['start'] * self.cfg['train']['steps'],
+                self.optimizer, T_0=int(total_steps / sum(multipliers)),
                 T_mult=self.cfg['train']['sched']['mult'], eta_min=lr * self.cfg['train']['sched']['min'])
         elif self.cfg['train']['sched']['name'] == 'multistep':
             self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer,
