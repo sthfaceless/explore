@@ -1129,6 +1129,7 @@ class Trainer:
         self.best_train_loss = 100.0
         self.best_val_loss = 100.0
         self.best_val_psnr = 0.0
+        self.current_epoch = 0
         self.losses = None
         self.optimizer = None
         self.scheduler = None
@@ -1167,7 +1168,7 @@ class Trainer:
     def forward(self, x, model=''):
         return self.models[model](x)
 
-    def train(self, epoch, steps=None):
+    def train(self, steps=None):
 
         if steps is None:
             if not self.cfg['data']['patched']:
@@ -1175,10 +1176,10 @@ class Trainer:
             else:
                 raise RuntimeError('Train dataloader has no len and num of steps was not specified')
 
-        if self.hard_sampling and epoch + 1 >= self.hard_warmup:
+        if self.hard_sampling and self.current_epoch + 1 >= self.hard_warmup:
             self.train_dataset.hard_prob = self.cfg['train']['hard']['prob']
 
-        if self.use_disc and epoch + 1 >= self.cfg['train']['disc']['warmup']:
+        if self.use_disc and self.current_epoch + 1 >= self.cfg['train']['disc']['warmup']:
             self.losses.coeff['disc'] = self.cfg['loss']['weights']['disc']
 
         if self.cfg['data']['cache_size'] or self.cfg['data']['patched']:
@@ -1262,7 +1263,7 @@ class Trainer:
             # logs running statistics
             record_step = steps * self.acc_grads // self.cfg['train']['log_freq']
             if batch_id % record_step == record_step - 1:  # record every record_step batches
-                print(f'[{epoch + 1}, {(batch_id + 1) // self.acc_grads:5d}]',
+                print(f'[{self.current_epoch + 1}, {(batch_id + 1) // self.acc_grads:5d}]',
                       *(f'{name} --- {torch.stack(metrics[name][-record_step:]).mean().item():.6f}'
                         for name in metrics.keys()))
 
@@ -1276,6 +1277,8 @@ class Trainer:
         if self.hard_sampling:
             for game, items in self.train_dataset.hard_items.items():
                 metrics[f'{game}_lowpsnr'] = items.worst_metric()
+
+        self.current_epoch += 1
 
         return metrics
 
@@ -1413,7 +1416,7 @@ class Trainer:
         item.update({f'val_mean_{k}': sum(v) / len(v) for k, v in val_mean.items()})
         return item
 
-    def save_results(self, item, epoch):
+    def save_results(self, item):
 
         for model_name in self.models.keys():
             val_loss, val_psnr = [], []
@@ -1433,6 +1436,7 @@ class Trainer:
         path = path if path else self.val_weights_path
 
         ckp = {
+            'epoch': self.current_epoch,
             'model': model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
@@ -1582,6 +1586,7 @@ class Trainer:
         status = self.model.load_state_dict(dict_weights['model'], strict=False)
         print('Weights loaded: ', status)
 
+        self.current_epoch = dict_weights['epoch']
         self.optimizer.load_state_dict(dict_weights['optimizer'])
         self.scheduler.load_state_dict(dict_weights['scheduler'])
         self.scheduler_interval = dict_weights['scheduler_interval']
@@ -1653,19 +1658,19 @@ def run(cfg, logger):
     model_trainer.prepare_train_data()  # train data didn't loaded automatically as it loads all dataset in memory
 
     print(f'Start training on device: ', model_trainer.device)
-    for epoch in range(cfg['train']['epochs']):
+    for iter_id in range(cfg['train']['epochs']):
 
-        train_metrics = model_trainer.train(epoch, steps=cfg['train']['steps'])
+        train_metrics = model_trainer.train(steps=cfg['train']['steps'])
         val_metrics = model_trainer.validate()
 
         item = model_trainer.build_metrics_item(train_metrics, val_metrics)
-        model_trainer.save_results(item, epoch)
+        model_trainer.save_results(item)
         print(*(f'{k}: {v:.6f}' if isinstance(v, float) else f'{k}: {v}' for k, v in item.items()))
 
         for key, group in itertools.groupby(
                 sorted(item.keys(), key=lambda x: x.split('_')[-1]), key=lambda x: x.split('_')[-1]):
             for k in group:
-                logger.report_scalar(title=key, series=k, iteration=epoch, value=item[k])
+                logger.report_scalar(title=key, series=k, iteration=iter_id, value=item[k])
 
         if train_metrics['psnr'] < 20.0 or math.isnan(train_metrics['loss']):
             print(f"Achieved train psnr --- {train_metrics['psnr']} model did not converged")
