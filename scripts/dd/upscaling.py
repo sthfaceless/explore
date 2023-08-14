@@ -42,8 +42,21 @@ def norm(dims, num_groups=32, min_channels_group=4):
     return torch.nn.GroupNorm(num_channels=dims, num_groups=num_groups, eps=1e-6)
 
 
+def batch_norm(dims, dim=2):
+    if dim == 1:
+        return torch.nn.BatchNorm1d(dims)
+    elif dim == 2:
+        return torch.nn.BatchNorm2d(dims)
+    elif dim == 3:
+        return torch.nn.BatchNorm3d(dims)
+
+
 def nonlinear(x):
     return torch.nn.functional.silu(x)
+
+
+def nonlinear_mini(x):
+    return torch.nn.functional.elu(x)
 
 
 def grad_norm(model):
@@ -773,10 +786,13 @@ class GroupedBlock(torch.nn.Module):
 
 class MiniConv(torch.nn.Module):
 
-    def __init__(self, dim):
+    def __init__(self, dim, use_norm=False, nonlinearity=True):
         super().__init__()
-
+        self.use_norm = use_norm
+        self.nonlinearity = nonlinearity
         squeeze_channels = dim // 3
+        if use_norm:
+            self.in_norm = batch_norm(squeeze_channels, dim=2)
         # channel reduction
         self.pw = torch.nn.Conv2d(dim, squeeze_channels, kernel_size=1, stride=1, padding=0)
 
@@ -796,12 +812,13 @@ class MiniConv(torch.nn.Module):
                                       kernel_size=(1, 1), stride=(1, 1), padding=(0, 0))
 
     def forward(self, x):
-        x = nonlinear(x)
+        x = nonlinear_mini(x)
         x = self.pw(x)
+        x = self.in_norm(x) if self.use_norm else x
 
         x1 = self.conv1(x)
-        x2 = self.conv22(nonlinear(self.conv21(x)))
-        x3 = self.conv32(nonlinear(self.conv31(x)))
+        x2 = self.conv22(nonlinear_mini(self.conv21(x)) if self.nonlinearity else self.conv21(x))
+        x3 = self.conv32(nonlinear_mini(self.conv31(x)) if self.nonlinearity else self.conv31(x))
 
         x = torch.cat((x1, x2, x3), dim=1)
 
@@ -810,12 +827,12 @@ class MiniConv(torch.nn.Module):
 
 class MiniBlock(torch.nn.Module):
 
-    def __init__(self, dim, block_size, skip_normalize=False):
+    def __init__(self, dim, block_size, skip_normalize=False, use_norm=False, nonlinearity=True):
         super().__init__()
         self.skip_normalize = skip_normalize
         layers = []
         for _ in range(block_size):
-            layers.append(MiniConv(dim))
+            layers.append(MiniConv(dim, use_norm=use_norm, nonlinearity=nonlinearity))
         self.layers = torch.nn.Sequential(*layers)
 
     def forward(self, x):
@@ -851,7 +868,8 @@ class UpscalingModelBase(torch.nn.Module):
                  use_norm=False,
                  dropout=0.0,
                  out_channels=None,
-                 skip_normalize=False):
+                 skip_normalize=False,
+                 nonlinearity=True):
         super().__init__()
 
         self.in_channels = in_channels
@@ -872,7 +890,8 @@ class UpscalingModelBase(torch.nn.Module):
             elif main_block_type == 'grouped':
                 layers.append(GroupedBlock(n_channels, block_size, use_norm=use_norm, dropout=dropout))
             elif main_block_type == 'mini':
-                layers.append(MiniBlock(n_channels, block_size, skip_normalize=skip_normalize))
+                layers.append(MiniBlock(n_channels, block_size, skip_normalize=skip_normalize,
+                                        nonlinearity=nonlinearity))
 
         self.base_blocks_seq = torch.nn.Sequential(*layers)
 
@@ -914,7 +933,7 @@ class UpscalingModelBase(torch.nn.Module):
 
 class ReduceModel(torch.nn.Module):
     def __init__(self, in_channels=1, n_channels=12, n_blocks=2, upscale_factor=2, kernel_size=1,
-                 skip_normalize=False, enhance=False):
+                 skip_normalize=False, enhance=False, nonlinearity=True, use_norm=False):
         super(ReduceModel, self).__init__()
         self.in_channels = in_channels
         self.upscale_factor = upscale_factor
@@ -922,8 +941,9 @@ class ReduceModel(torch.nn.Module):
         self.enhance = enhance
         self.in_conv = torch.nn.Conv2d(in_channels * (upscale_factor ** 2), n_channels,
                                        kernel_size=kernel_size, padding=kernel_size // 2)
-        self.layers = torch.nn.ModuleList([MiniConv(n_channels) for _ in range(n_blocks)])
-        self.out_conv = torch.nn.Conv2d(n_channels, upscale_factor ** 4, kernel_size=kernel_size,
+        self.layers = torch.nn.ModuleList([
+            MiniConv(n_channels, nonlinearity=nonlinearity, use_norm=use_norm) for _ in range(n_blocks)])
+        self.out_conv = torch.nn.Conv2d(n_channels, (upscale_factor ** 4) * in_channels, kernel_size=kernel_size,
                                         padding=kernel_size // 2)
 
     def forward(self, x):
@@ -963,7 +983,9 @@ def build_model(cfg):
                             upscale_factor=cfg['model']['upscale_factor'],
                             kernel_size=cfg['model']['kernel_size'],
                             skip_normalize=cfg['model']['skip_normalize'],
-                            enhance=cfg['model']['enhance'])
+                            enhance=cfg['model']['enhance'],
+                            use_norm=cfg['model']['use_norm'],
+                            nonlinearity=cfg['model']['nonlinearity'])
     else:
         model = UpscalingModelBase(n_channels=cfg['model']['n_channels'],
                                    n_blocks=cfg['model']['n_blocks'],
@@ -1672,7 +1694,7 @@ def run(cfg, logger):
             for k in group:
                 logger.report_scalar(title=key, series=k, iteration=iter_id, value=item[k])
 
-        if train_metrics['psnr'] < 20.0 or math.isnan(train_metrics['loss']):
+        if train_metrics['psnr'] < 10.0 or math.isnan(train_metrics['loss']):
             print(f"Achieved train psnr --- {train_metrics['psnr']} model did not converged")
             print('Stop training...')
             break
