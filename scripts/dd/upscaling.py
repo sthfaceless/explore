@@ -1452,6 +1452,7 @@ class Trainer:
                 self.save(model=self.model if model_name == '' else self.models[model_name].module,
                           path=self.val_weights_path)
                 self.best_val_psnr = val_psnr
+        self.save(model=self.model, path=self.train_weights_path)
 
     def save(self, model=None, path=None):
         model = model if model else self.model

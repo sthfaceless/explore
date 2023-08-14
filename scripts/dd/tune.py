@@ -80,6 +80,11 @@ class MultiConfig:
             items[k] = v
         return wrap(list(items.items()))
 
+    def explain(self, cfg_id):
+        explanation = '|'
+        for k, v in self.variants[cfg_id].items():
+            explanation += f'{k}={v}|'
+        return explanation
 
 def run(cfg_path, cfg_id, model_name):
     device = device_queue.get()
@@ -131,7 +136,7 @@ if __name__ == "__main__":
         futures = []
         for cfg_id, local_cfg in zip(configs, local_configs):
             # specify config for current run
-            model_name = f"{local_cfg['model']['name']}-{current_iter}-{cfg_id}"
+            model_name = f"{local_cfg['model']['name']}-{cfg.explain(cfg_id)}-{current_iter}"
             local_cfg['saving']['ckp_folder'] = f'{job_dir}/'
             local_cfg['saving']['log_folder'] = f'{job_dir}/'
             local_cfg['data']['out'] = None
@@ -169,7 +174,7 @@ if __name__ == "__main__":
                 if len(checkpoint_paths) == 0:
                     print(f'Not found checkpoint for {model_name}')
                     continue
-                checkpoints[cfg_id] = checkpoint_paths[0]
+                checkpoints[cfg_id] = list(sorted(checkpoint_paths))[-1]
                 # load result of checkpoint
                 state = torch.load(os.path.join(job_dir, checkpoints[cfg_id]), map_location='cpu')
                 metrics[cfg_id] = state['val_psnr']
