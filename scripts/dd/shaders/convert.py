@@ -17,7 +17,7 @@ import onnxruntime as ort
 MERGE_BACK = False
 MAGPIE = True
 
-MODEL_ONNX = '../wide_mobile_one_silu.onnx'
+MODEL_ONNX = '../24ch_4bl.onnx'
 OUTPUT_FILE = 'D:\\PycharmProjects\\explore\\MAGPIE\\effects\\reduce_full.hlsl'
 model = onnx.load(MODEL_ONNX)
 onnx.checker.check_model(model)
@@ -491,7 +491,7 @@ class Operation:
         return {opt: self.__dict__[opt] for opt in ('depth', 'read_type', 'root_op', 'out_channels')}
 
     def requires_synchronization(self):
-        return self.requires_shape > (1, 1) or self.sync or self.scale_change != 1.0
+        return self.requires_shape > (1, 1) or self.sync or self.scale_change > 1.0
 
     def __hash__(self):
         return hash((self.name, self.op_type))
@@ -1144,9 +1144,9 @@ for op in get_backward_order(ops):
     if op.op_type != 'write' and len(next_shapes) >= 1 and op.requires_shape == (1, 1) and op.scale_change == 1.0:
         for nxt in [item for item in op.output
                     if not (item.read_shape == op.read_shape and item.read_type == op.read_type)]:
-            reduce = Operation(name=f'{op.name}_{nxt.name}_reduce', op_type='reduce', priority=op.priority + 1,
+            reduce = Operation(name=f'{op.name}_{nxt.name}_reduce', op_type='reduce', priority=nxt.priority - 1,
                                scale=op.scale, requires_shape=op.read_shape, **nxt.get_opts(),
-                               out_item=Vec(op.out_channels, op_idx=op.priority + 1, shape=nxt.read_shape))
+                               out_item=Vec(op.out_channels, op_idx=nxt.priority - 1, shape=nxt.read_shape))
             ops[reduce.name] = reduce
             add_between(reduce, op, nxt)
 
@@ -1172,6 +1172,8 @@ for op in reversed(get_backward_order(ops)):
         # else propagate from input
         elif len(input_shapes) > 0:
             op.out_item.shape = input_shapes[0]
+
+    # print(op.name, op.read_shape, op.scale)
 
 
 # first forward for textures
