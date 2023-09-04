@@ -15,9 +15,9 @@ import onnx
 import onnxruntime as ort
 
 MERGE_BACK = False
-MAGPIE = False
+MAGPIE = True
 
-MODEL_ONNX = '../reparam_scalable_base16_relu.onnx'
+MODEL_ONNX = '../wide_mobile_one_silu.onnx'
 OUTPUT_FILE = 'D:\\PycharmProjects\\explore\\MAGPIE\\effects\\reduce_full.hlsl'
 model = onnx.load(MODEL_ONNX)
 onnx.checker.check_model(model)
@@ -491,7 +491,7 @@ class Operation:
         return {opt: self.__dict__[opt] for opt in ('depth', 'read_type', 'root_op', 'out_channels')}
 
     def requires_synchronization(self):
-        return self.requires_shape > (1, 1) or self.sync or self.scale_change < 1.0
+        return self.requires_shape > (1, 1) or self.sync or self.scale_change != 1.0
 
     def __hash__(self):
         return hash((self.name, self.op_type))
@@ -877,9 +877,10 @@ for op in reversed(get_backward_order(ops)):
 
     if op.requires_synchronization():
         op.depth += 1
-        while op.depth in sync_scales and sync_scales[op.depth] != op.scale:
+        run_scale = op.scale if op.scale_change <= 1.0 else op.scale / op.scale_change
+        while op.depth in sync_scales and sync_scales[op.depth] != run_scale:
             op.depth += 1
-        sync_scales[op.depth] = op.scale
+        sync_scales[op.depth] = run_scale
 
     op.update_channels()
 
@@ -926,14 +927,7 @@ if MERGE_BACK:
 
 
 def fix_depths(ops, depths):
-    __sync_scales = dict()
-    for op in reversed(get_backward_order(ops)):
-        depths[op] = max([depths[__op] for __op in op.input], default=depths[op])
-        if op.requires_synchronization():
-            depths[op] += 1
-            while depths[op] in __sync_scales and __sync_scales[depths[op]] != op.scale:
-                depths[op] += 1
-            __sync_scales[depths[op]] = op.scale
+    pass
 
 
 GREEDY_FORWARD = False
