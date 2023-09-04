@@ -17,7 +17,7 @@ import onnxruntime as ort
 MERGE_BACK = False
 MAGPIE = False
 
-MODEL_ONNX = '../reduce500.onnx'
+MODEL_ONNX = '../reparam_scalable_base16_relu.onnx'
 OUTPUT_FILE = 'D:\\PycharmProjects\\explore\\MAGPIE\\effects\\reduce_full.hlsl'
 model = onnx.load(MODEL_ONNX)
 onnx.checker.check_model(model)
@@ -278,7 +278,7 @@ class ShaderManager:
             pass_header = '\n'.join([line for line in pass_header.split('\n') if '!OUT' not in line])
         if pass_id == min(self.passes.keys()):
             pass_header += self.header.split('//!BEGIN')[1]
-        elif pass_id == max(self.passes.keys()):
+        if pass_id == max(self.passes.keys()):
             pass_header += self.header.split('//!END')[1]
         pass_header += textwrap.dedent(f"""
             void Pass{pass_id + 1}(uint2 blockStart, uint3 threadId){{\n
@@ -688,7 +688,10 @@ def find_patterns(op, state, visited, pattern=None):
         if state == PatternState.INITIAL:
             # chain of operations
             if in_opchain(nxt.op_type):
-                patterns['OpChain'].extend(find_patterns(nxt, PatternState.OP_CHAIN, visited, pattern=[nxt]))
+                if len(nxt.output) == 1:
+                    patterns['OpChain'].extend(find_patterns(nxt, PatternState.OP_CHAIN, visited, pattern=[nxt]))
+                else:
+                    patterns['OpChain'].append([nxt])
             # silu op
             if nxt.op_type == 'Sigmoid':
                 patterns['Silu'].extend(find_patterns(nxt, PatternState.SILU, visited, pattern=[nxt]))
@@ -749,39 +752,49 @@ def find_patterns(op, state, visited, pattern=None):
     return state_patterns
 
 
-visited = set()
-patterns = merge_list_dicts(*[find_patterns(ops[name], PatternState.INITIAL, visited=visited) for name in INPUT_NAMES])
-patterns = [(name, __pattern) for name, patterns_lst in patterns.items() for __pattern in patterns_lst]
-patterns = sorted(patterns, key=lambda pair: len(pair[1]), reverse=True)
-pattern_used_ops = set()
-for name, __pattern in patterns:
-    # print(name)
-    if len(__pattern) == 0 or any([item in pattern_used_ops for item in __pattern]):
-        continue
-    pattern_used_ops.update(__pattern)
-    # print([op.name for op in __pattern])
+last_patterns = []
+for pattern_iter in range(len(ops)):
+    visited, pattern_used_ops = set(), set()
+    patterns = merge_list_dicts(
+        *[find_patterns(ops[name], PatternState.INITIAL, visited=visited) for name in INPUT_NAMES])
+    patterns = [(name, __pattern) for name, patterns_lst in patterns.items()
+                for __pattern in patterns_lst if len(__pattern) > 0]
+    patterns = sorted(patterns, key=lambda pair: (len(pair[1]), pair[1][-1].name), reverse=True)
 
-    for op in __pattern:
-        ops.pop(op.name)
+    if pattern_iter > 0 and len(last_patterns) == len(patterns) and \
+            all([tuple(p1[1]) == tuple(p2[1]) for p1, p2 in zip(last_patterns, patterns)]):
+        break
 
-    op = Operation(name=__pattern[-1].name, op_type=name, pattern_ops=__pattern)
+    for name, __pattern in patterns:
+        # print(name)
+        if any([item in pattern_used_ops for item in __pattern]):
+            continue
+        pattern_used_ops.update(__pattern)
+        # print([op.name for op in __pattern])
 
-    for el in __pattern:
-        for __op in el.input:
-            if __op not in __pattern:
-                for idx in [idx for idx, item in enumerate(__op.output) if item == el]:
-                    __op.output[idx] = op
-                op.input.append(__op)
+        for op in __pattern:
+            ops.pop(op.name)
 
-        for __op in el.output:
-            if __op not in __pattern:
-                for idx in [idx for idx, item in enumerate(__op.input) if item == el]:
-                    __op.input[idx] = op
-                op.output.append(__op)
+        op = Operation(name=__pattern[-1].name, op_type=name, pattern_ops=__pattern)
 
-    op.input = [*dict.fromkeys(op.input)]
-    op.output = [*dict.fromkeys(op.output)]
-    ops[op.name] = op
+        for el in __pattern:
+            for __op in el.input:
+                if __op not in __pattern:
+                    for idx in [idx for idx, item in enumerate(__op.output) if item == el]:
+                        __op.output[idx] = op
+                    op.input.append(__op)
+
+            for __op in el.output:
+                if __op not in __pattern:
+                    for idx in [idx for idx, item in enumerate(__op.input) if item == el]:
+                        __op.input[idx] = op
+                    op.output.append(__op)
+
+        op.input = [*dict.fromkeys(op.input)]
+        op.output = [*dict.fromkeys(op.output)]
+        ops[op.name] = op
+
+    last_patterns = patterns
 
 # decompose some blocks
 for op in list(ops.values()):
@@ -1267,18 +1280,18 @@ def process_op(op, shader_manager):
             for column_id, column in enumerate(row):
                 for var_idx, (var, tp) in enumerate(column):
                     step = min(4, vec.channels - var_idx * 4)
+                    # reading for scaling or for convolution
+                    mul = int(op.scale / sync_scales[op.depth])
+                    pos_mul = f"pos{f' * {mul}' if mul != 1 else ''}"
+                    if op.read_type == 'conv':
+                        pos = f"{pos_mul} + int2({row_id - (len(variables) - 1) // 2}, {column_id - (len(row) - 1) // 2})"
+                    else:
+                        pos = f"{pos_mul} + int2({row_id}, {column_id})"
                     if op.read_type == 'resize':
-                        pos = f"(pos + 0.5f) / ({op.scale_change} * GetInputSize())"
+                        pos = f"({pos} + 0.5f) / ({op.scale_change} * GetInputSize())"
                         expr = f"{tex_names[var_idx]}.SampleLevel({shader_manager.sampler}, {pos}, 0)" \
                                f"{f'.xyzw'[:step + 1] if step < 4 else ''}"
                     else:
-                        # reading for scaling or for convolution
-                        mul = int(op.scale / sync_scales[op.depth])
-                        pos_mul = f"pos{f' * {mul}' if mul != 1 else ''}"
-                        if op.read_type == 'conv':
-                            pos = f"{pos_mul} + int2({row_id - (len(variables) - 1) // 2}, {column_id - (len(row) - 1) // 2})"
-                        else:
-                            pos = f"{pos_mul} + int2({row_id}, {column_id})"
                         # input preprocessing right after reading
                         if op.name in INPUT_NAMES:
                             expr = f"load({pos})"
@@ -1348,17 +1361,17 @@ def process_op(op, shader_manager):
                     step = min(4, vec.channels - var_idx * 4)
                     values = [prec(val, tp) for val in op.b[4 * var_idx: 4 * var_idx + step]]
                     code += f"{tp} {var} = {tp}({', '.join(values)});\n"
+                    prev_x = int(row_id / op.scale_change)
+                    prev_y = int(col_id / op.scale_change)
                     if op.w.shape[1] * op.groups == op.w.shape[0] and op.groups == op.w.shape[0]:
                         # one to one depthwise convolution
                         matrix = op.w[var_idx * 4: var_idx * 4 + step:, 0, row_id % op.scale_change,
                                  col_id % op.scale_change]
                         matrix_values = ', '.join([prec(val, tp) for val in matrix])
-                        inp_var, inp_tp = input_names[0][
-                            int(row_id / op.scale_change)][int(col_id / op.scale_change)][var_idx]
+                        inp_var, inp_tp = input_names[0][prev_x][prev_y][var_idx]
                         code += f"{var} += {inp_tp}({matrix_values}) * {inp_var};\n"
                     elif op.groups == 1:
-                        for inp_idx, (inp_var, inp_tp) in enumerate(
-                                input_names[0][int(row_id / op.scale_change)][int(col_id / op.scale_change)]):
+                        for inp_idx, (inp_var, inp_tp) in enumerate(input_names[0][prev_x][prev_y]):
                             # usual full convolution
                             inp_step = min(4, input_vecs[0].channels - inp_idx * 4)
                             matrix = op.w[inp_idx * 4: inp_idx * 4 + inp_step, var_idx * 4: var_idx * 4 + step,
