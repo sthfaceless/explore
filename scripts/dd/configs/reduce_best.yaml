@@ -1,0 +1,94 @@
+data:
+  augment: 1.0
+  batch_size: 512
+  cache_size: 4000
+  height: null
+  mode: bilinear
+  noise: 0.5
+  out: results
+  patch_pad: 12
+  patch_size: 84
+  patched: true
+  train_datasets:
+  - all
+  train_folder: /dsk1/danil/3d/nerf/data/games/images/
+  val_batch_size: 1
+  val_folder:
+    - images
+  val_patched: false
+  width: null
+loss:
+  name:
+  - mse
+  - mae
+  threshold: 0.001
+  weights:
+    disc: 0.0
+    mae: 1.0
+    mse: 0.0
+    psnr: 0.0
+    rbf: 0.0
+    ssim: 0.0
+model:
+  avg: []
+  block_size: 1
+  dropout: 0.0
+  enhance: false
+  final_act: Tanh
+  first_block_type: none
+  in_channels: 1
+  kernel_size: 1
+  main_block_type: reduce
+  n_blocks: 3
+  n_channels: 12
+  name: reduce
+  nonlinearity: true
+  out_channels: 12
+  skip_normalize: true
+  upscale_factor: 2
+  upscaling_method: PixelShuffle
+  use_norm: false
+saving:
+  ckp_folder: checkpoints/
+  log_folder: logs/
+train:
+  acc_grads: 1
+  base_rate: 0.005
+  disc:
+    blocks: 2
+    dim: 32
+    freq: 1
+    lr: 0.001
+    warmup: 10
+  epochs: 112
+  hard:
+    alpha: 0.95
+    prob: 0.5
+    rate: 0.1
+    warmup: 0
+  log_freq: 50
+  max_grad_norm: 0.1
+  optimizer: lamb
+  pretrained_weights: reduce.pth
+  rbf_filters: null
+  sched:
+    cycles: 3
+    gamma: 0.4
+    initial: 0.25
+    min: 0.005
+    mult: 2
+    name: cosine
+    start: 1
+    steps:
+    - 7
+    - 17
+    - 30
+    - 45
+    - 75
+    - 90
+    - 125
+    - 150
+    - 175
+    - 200
+    - 225
+  steps: 1000

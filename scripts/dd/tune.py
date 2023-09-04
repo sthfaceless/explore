@@ -81,9 +81,9 @@ class MultiConfig:
         return wrap(list(items.items()))
 
     def explain(self, cfg_id):
-        explanation = '|'
+        explanation = '['
         for k, v in self.variants[cfg_id].items():
-            explanation += f'{k}={v}|'
+            explanation += f'{k.split(".")[-1]}={v}]'
         return explanation
 
 def run(cfg_path, cfg_id, model_name):
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         futures = []
         for cfg_id, local_cfg in zip(configs, local_configs):
             # specify config for current run
-            model_name = f"{local_cfg['model']['name']}-{cfg.explain(cfg_id)}-{current_iter}"
+            model_name = f"{local_cfg['model']['name']}-{cfg.explain(cfg_id)}"
             local_cfg['saving']['ckp_folder'] = f'{job_dir}/'
             local_cfg['saving']['log_folder'] = f'{job_dir}/'
             local_cfg['data']['out'] = None
@@ -186,7 +186,7 @@ if __name__ == "__main__":
         configs = configs[:max(min_models, len(configs) // 2)]
         if len(configs) == min_models:
             step = args.max_cycles - (args.min_cycles + current_iter)
-            current_iter = args.max_cycles - args.min_cycles
+            current_iter = args.max_cycles - args.min_cycles - step
 
         print(f'Finished iters: {args.min_cycles + current_iter - step}')
         print(f'Top metrics: {[metrics[idx] for idx in configs]}')
