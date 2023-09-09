@@ -16,6 +16,9 @@ import onnxruntime as ort
 
 MERGE_BACK = False
 MAGPIE = True
+VECTORIZED = True
+DOT_VECTORIZED = True
+BASE_TYPE = 'float'
 
 MODEL_ONNX = '../24ch_4bl.onnx'
 OUTPUT_FILE = 'D:\\PycharmProjects\\explore\\MAGPIE\\effects\\reduce_full.hlsl'
@@ -603,7 +606,7 @@ class Texture:
 
 class Vec:
 
-    def __init__(self, channels, op_idx, shape=(1, 1), base_type='float'):
+    def __init__(self, channels, op_idx, shape=(1, 1), base_type=BASE_TYPE):
         self.shape = shape
         self.op_idx = op_idx
         self.channels = channels
@@ -1260,6 +1263,28 @@ def apply_op(expr, op, var_idx, tp, step, fun_defines):
         raise NotImplementedError(f'Not implemented applying operation of type {op.op_type}')
 
 
+def matrix_mul(var, tp, inp_var, inp_tp, matrix):
+    code = ""
+    if VECTORIZED:
+        matrix_values = ',\n\t'.join(', '.join(prec(val, tp) for val in row) for row in matrix)
+        code += f"{var} += mul({tp if type_size(tp) > 1 else f'{tp}1'}x{type_size(inp_tp)}(\n\t" \
+                f"{matrix_values}" \
+                f"), {inp_var});\n"
+    else:
+        for local_idx in range(type_size(tp)):
+            var_part = var if type_size(tp) == 1 else var + '.' + 'xyzw'[local_idx]
+            if DOT_VECTORIZED:
+                values = ', '.join(prec(val, inp_tp) for val in matrix[local_idx])
+                code += f"{var_part} += dot({inp_tp}({values}), {inp_var});\n"
+            else:
+                values = ' + '.join(
+                    f"{inp_var}{'.' + 'xyzw'[val_idx] if type_size(inp_tp) > 1 else ''} * {prec(val, inp_tp)}"
+                    for val_idx, val in enumerate(matrix[local_idx]))
+                code += f"{var_part} += {values};\n"
+
+    return code
+
+
 def process_op(op, shader_manager):
     code = f"//{op.op_type} {op.name}\n"
     vec = op.out_item
@@ -1345,11 +1370,7 @@ def process_op(op, shader_manager):
                                     inp_step = min(4, input_vecs[0].channels - inp_idx * 4)
                                     matrix = op.w[var_idx * 4: var_idx * 4 + step, inp_idx * 4: inp_idx * 4 + inp_step,
                                              prev_row_id, prev_col_id]
-                                    matrix_values = ',\n\t'.join(
-                                        [', '.join([prec(val, tp) for val in row]) for row in matrix])
-                                    code += f"{var} += mul({tp if type_size(tp) > 1 else f'{tp}1'}x{inp_step}(\n\t" \
-                                            f"{matrix_values}" \
-                                            f"), {inp_var});\n"
+                                    code += matrix_mul(var, tp, inp_var, inp_tp, matrix)
     elif op.op_type == 'ConvTranspose':
         for row_id, row in enumerate(variables):
             for col_id, col in enumerate(row):
@@ -1372,10 +1393,7 @@ def process_op(op, shader_manager):
                             inp_step = min(4, input_vecs[0].channels - inp_idx * 4)
                             matrix = op.w[inp_idx * 4: inp_idx * 4 + inp_step, var_idx * 4: var_idx * 4 + step,
                                      row_id % op.scale_change, col_id % op.scale_change].transpose()
-                            matrix_values = ',\n\t'.join([', '.join([prec(val, tp) for val in row]) for row in matrix])
-                            code += f"{var} += mul({tp if type_size(tp) > 1 else f'{tp}1'}x{inp_step}(\n\t" \
-                                    f"{matrix_values}" \
-                                    f"), {inp_var});\n"
+                            code += matrix_mul(var, tp, inp_var, inp_tp, matrix)
     elif op.op_type == 'Slice':
         for row_id, row in enumerate(variables):
             for col_id, col in enumerate(row):
