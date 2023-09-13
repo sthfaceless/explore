@@ -1,3 +1,5 @@
+//!HEAD
+
 //!MAGPIE EFFECT
 //!VERSION 2
 //!OUTPUT_WIDTH INPUT_WIDTH
@@ -10,17 +12,19 @@ Texture2D INPUT;
 //!FILTER LINEAR
 SamplerState sam;
 
+//!HEAD
+
 //!COMMON
 static const float PI = 3.14159265f;
 #define RELU(x) max(x, 0)
 #define TANH(x) tanh(x)
-#define SIGMOID(x) 1 / (1 + exp(-(x)))
-#define SILU(x) (x) * SIGMOID(x)
-#define ELU(x) max(0, x) + min(0, exp(x) - 1)
-#define SELU(x) 1.05 * (max(0, x) + min(0, 1.67 * (exp(x) - 1)))
-#define GELU2(x) 0.5 * (x) * (1 + tanh(0.7978845608 * min(10, max((x) * (1 + 0.044715 * (x) * (x)), -10))))
-#define GELU(x) (x) * SIGMOID(1.702 * (x))
-#define READ(value, pos, scale) (value) * step(0, (pos).x) * step(0, (pos).y) * step((pos).x, __inputSize.x * scale) * step((pos).y, __inputSize.y * scale)
+#define SIGMOID(x) (1 / (1 + exp(-(x))))
+#define SILU(x) ((x) * SIGMOID(x))
+#define ELU(x) (max(0, x) + min(0, exp(x) - 1))
+#define SELU(x) (1.05 * (max(0, x) + min(0, 1.67 * (exp(x) - 1))))
+// #define GELU(x) 0.5 * (x) * (1 + tanh(0.7978845608 * min(10, max((x) * (1 + 0.044715 * (x) * (x)), -10))))
+#define GELU(x) ((x) * SIGMOID(1.702 * (x)))
+#define READ(value, pos, scale) ((value) * step(0, (pos).x) * step(0, (pos).y) * step((pos).x, __inputSize.x * scale) * step((pos).y, __inputSize.y * scale))
 #define CLIP01(value) max(min(value, 1), 0)
 
 const static float3x3 rgb2yuv = {
@@ -34,7 +38,7 @@ const static float3x3 yuv2rgb = {
 	1, -0.3437, -0.71417,
 	1, 1.77216, 0.00099
 };
-
+//!COMMON
 
 //!BEGIN
 float load(int2 pos) {
@@ -45,11 +49,21 @@ float load(int2 pos) {
 //!BEGIN
 
 //!END
-void write(float value, int2 pos, float scale) {
-    float3 rgb = INPUT.SampleLevel(sam, (pos + 0.5f) * 1.0 / (scale * GetInputSize()), 0).rgb;
+void write(float gamma, int2 pos, float2 scale) {
+    float3 rgb = INPUT.SampleLevel(sam, float2((pos.x + 0.5f) / scale.x, (pos.y + 0.5f) / scale.y) / GetInputSize(), 0).rgb;
     float3 yuv = mul(rgb2yuv, rgb);
-    yuv.x = value;
+    yuv.x = gamma;
     rgb = mul(yuv2rgb, yuv);
     WriteToOutput(pos, CLIP01(rgb));
 }
 //!END
+
+//!VULKAN
+struct TexSize{
+    int w, h;
+    float scale_w, scale_h;
+};
+
+[[vk::push_constant]]
+TexSize input_tex_size;
+//!VULKAN

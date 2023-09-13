@@ -1,0 +1,19 @@
+input: '../bad_nn_maxpool_onnx.onnx'
+out: 'model.hlsl'
+header: 'header.hlsl'
+base_type: float
+block_size: 8
+target:
+  vulkan: false
+  magpie: true
+heuristics:
+  # matrix mul vectorization
+  vectorized: true
+  dot_vectorized: true
+  # merge ops from previous pass to reduce write ops but increase computation ops
+  merge_back: true
+  # whether upscale/downscale operation requires new pass (may speed up shader with removing redundant calculations)
+  sync_upscale: false
+  sync_downscale: false
+  # onnx names which requires new pass (Conv_10, Slice_4 ... )
+  sync_names: []
